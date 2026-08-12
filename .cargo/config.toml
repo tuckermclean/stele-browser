@@ -1,0 +1,9 @@
+# Linker for the i486 floor target: the cross musl gcc built into the
+# monolith-builder image (CROSS_COMPILE=i486-linux-musl-).
+#
+# NOTE: we deliberately do NOT set `[build] target` here. Host unit tests must
+# build for the host; only the release binary targets i486, and it passes
+# `--target targets/i486-monolith-linux-musl.json -Zbuild-std=std,panic_abort`
+# explicitly (see accept.sh and the build brief §2 canonical command).
+[target.i486-monolith-linux-musl]
+linker = "i486-linux-musl-gcc"

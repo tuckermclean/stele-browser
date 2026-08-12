@@ -1,0 +1,56 @@
+{
+  "arch": "x86",
+  "cpu": "i486",
+  "crt-objects-fallback": "musl",
+  "crt-static-default": true,
+  "crt-static-respected": true,
+  "data-layout": "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-i128:128-f64:32:64-f80:32-n8:16:32-S128",
+  "default-uwtable": true,
+  "dynamic-linking": true,
+  "env": "musl",
+  "features": "-mmx,-sse,-sse2",
+  "frame-pointer": "always",
+  "has-rpath": true,
+  "has-thread-local": true,
+  "linker-flavor": "gnu-cc",
+  "llvm-target": "i586-unknown-linux-musl",
+  "max-atomic-width": 32,
+  "metadata": {
+    "description": "Stele i486 floor — 32-bit Linux musl, cpu=i486 (no CMPXCHG8B, no MMX/SSE), hardware x87 float. 486SX (no FPU) is a documented gap; the myth's machine is a DX2.",
+    "host_tools": false,
+    "std": true,
+    "tier": 3
+  },
+  "os": "linux",
+  "panic-strategy": "abort",
+  "position-independent-executables": false,
+  "post-link-objects-fallback": {
+    "dynamic-dylib": ["crtendS.o", "crtn.o"],
+    "dynamic-nopic-exe": ["crtend.o", "crtn.o"],
+    "dynamic-pic-exe": ["crtendS.o", "crtn.o"],
+    "static-dylib": ["crtendS.o", "crtn.o"],
+    "static-nopic-exe": ["crtend.o", "crtn.o"],
+    "static-pic-exe": ["crtendS.o", "crtn.o"]
+  },
+  "pre-link-args": {
+    "gnu-cc": ["-m32", "-Wl,-melf_i386"],
+    "gnu-lld-cc": ["-m32", "-Wl,-melf_i386"]
+  },
+  "pre-link-objects-fallback": {
+    "dynamic-dylib": ["crti.o", "crtbeginS.o"],
+    "dynamic-nopic-exe": ["crt1.o", "crti.o", "crtbegin.o"],
+    "dynamic-pic-exe": ["Scrt1.o", "crti.o", "crtbeginS.o"],
+    "static-dylib": ["crti.o", "crtbeginS.o"],
+    "static-nopic-exe": ["crt1.o", "crti.o", "crtbegin.o"],
+    "static-pic-exe": ["rcrt1.o", "crti.o", "crtbeginS.o"]
+  },
+  "relocation-model": "static",
+  "relro-level": "full",
+  "stack-probes": {
+    "kind": "inline"
+  },
+  "supported-split-debuginfo": ["packed", "unpacked", "off"],
+  "supports-fentry": true,
+  "target-family": ["unix"],
+  "target-pointer-width": 32
+}

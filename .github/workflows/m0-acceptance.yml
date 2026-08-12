@@ -1,0 +1,76 @@
+name: m0-acceptance
+
+# M0 definition-of-done in CI: build the i486 binary with the canonical pipeline
+# inside the monolith-builder image, then run accept.sh (A1 + A4 live).
+#
+# Split into two jobs on purpose:
+#   build  — runs INSIDE the image (only there is the i486 cross musl toolchain).
+#   accept — runs on the plain ubuntu host, where qemu-user is one apt away.
+#            The binary is fully static (crt-static), so qemu-i386 needs no
+#            loader or libs from the build image — the artifact runs anywhere.
+#
+# Image pinned by digest (charter C11): tag 20260811-b25ecd2b24a5.
+
+on:
+  push:
+    branches: ["packet/**", "main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/tuckermclean/monolith-builder@sha256:c8978fe3b56cf6ec1714b1b878997c7082cbf9786caa2b8cbcdbd986169c0daf
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain identity
+        run: |
+          set -euxo pipefail
+          rustc --version
+          cargo --version
+          echo "CROSS_COMPILE=$CROSS_COMPILE"
+          command -v "${CROSS_COMPILE}gcc"
+
+      - name: Build i486 release binary (canonical pipeline)
+        run: |
+          set -euxo pipefail
+          cargo build --release \
+            --target targets/i486-monolith-linux-musl.json \
+            -Zbuild-std=std,panic_abort
+          BIN=target/i486-monolith-linux-musl/release/stele
+          ls -l "$BIN"
+          file "$BIN" || true
+
+      - name: Upload i486 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: stele-i486
+          path: target/i486-monolith-linux-musl/release/stele
+          if-no-files-found: error
+
+  accept:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install qemu-user (A4 — execute the i486 binary)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user file
+
+      - name: Download i486 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: stele-i486
+          path: target/i486-monolith-linux-musl/release/
+
+      - name: Run acceptance (A1 + A4 live)
+        run: |
+          chmod +x target/i486-monolith-linux-musl/release/stele accept.sh
+          ./accept.sh
