@@ -9,7 +9,7 @@ use crate::dom::{Dom, Node, NodeId};
 use crate::style::computed::{
     BorderSide, BorderStyle, Dimension, Edges, LengthPercentage, LengthPercentageAuto, LineHeight,
 };
-use crate::style::selector::ElementInfo;
+use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
 use crate::style::value::{BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
 use crate::style::{parser, ComputedStyle, Stylesheet};
@@ -59,11 +59,7 @@ fn visit(
         }
         Node::Element(el) => {
             let info = ElementInfo::from_element(&el.name, &el.attrs);
-            let mut decls = Declarations::default();
-            parser::collect_matching(ua, ancestors, &info, &mut decls);
-            for sheet in author {
-                parser::collect_matching(sheet, ancestors, &info, &mut decls);
-            }
+            let decls = fold_matching_declarations(ua, author, ancestors, &info);
             let style = resolve(&decls, parent);
             out[id] = style.clone();
 
@@ -74,6 +70,40 @@ fn visit(
             ancestors.pop();
         }
     }
+}
+
+/// Merge every UA + author rule that matches this element and fold their
+/// declarations onto one accumulator, in cascade precedence order: sorted
+/// globally by `(origin, specificity, source order)`, applied low-to-high so
+/// the highest-precedence match's fields win (`Declarations::overlay`).
+///
+/// Author sheets always outrank the UA sheet regardless of specificity (real
+/// CSS origin ordering — we don't support `!important`, so normal-weight
+/// author always beats normal-weight UA). *Within* the author origin, every
+/// matching rule from *every* author sheet is compared by specificity
+/// together, with sheet index (then in-sheet source order) only breaking
+/// exact specificity ties — a later sheet must not automatically beat an
+/// earlier one on lower specificity (that was the bug: folding one sheet at
+/// a time made specificity only work within a single sheet).
+fn fold_matching_declarations(ua: &Stylesheet, author: &[Stylesheet], ancestors: &[ElementInfo], info: &ElementInfo) -> Declarations {
+    // (is_author_origin, specificity, sheet_index, in-sheet source order, declarations)
+    let mut candidates: Vec<(bool, Specificity, usize, u32, &Declarations)> = Vec::new();
+
+    for r in parser::matching_rules(ua, ancestors, info) {
+        candidates.push((false, r.selector.specificity(), 0, r.order, &r.declarations));
+    }
+    for (sheet_index, sheet) in author.iter().enumerate() {
+        for r in parser::matching_rules(sheet, ancestors, info) {
+            candidates.push((true, r.selector.specificity(), sheet_index, r.order, &r.declarations));
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
+
+    let mut decls = Declarations::default();
+    for (_, _, _, _, d) in candidates {
+        decls.overlay(d);
+    }
+    decls
 }
 
 /// Turn one node's folded `Declarations` (still raw: px/pt/em/% units, not
@@ -101,6 +131,11 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
     let line_height = match d.line_height {
         Some(RawLineHeight::Normal) => LineHeight::Normal,
         Some(RawLineHeight::Number(n)) => LineHeight::Px(n * font_size),
+        // `%` on line-height is a percentage of the element's own font-size
+        // (same as `em`), not of the containing block — unlike width/margin/
+        // padding, there's no deferred `Percent` variant on `LineHeight` for
+        // layout to resolve later, so this must resolve eagerly here.
+        Some(RawLineHeight::Length(RawLength::Percent(p))) => LineHeight::Px(font_size * p / 100.0),
         Some(RawLineHeight::Length(raw)) => LineHeight::Px(raw_to_px(raw, font_size)),
         None => parent.map(|p| p.line_height).unwrap_or(default.line_height),
     };
@@ -384,6 +419,36 @@ mod tests {
         let sheet2 = parser::parse("p { color: blue; }");
         let styles = cascade(&d, &[sheet1, sheet2]);
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn cross_sheet_specificity_wins_regardless_of_sheet_order() {
+        // A higher-specificity rule in an EARLIER sheet must still beat a
+        // lower-specificity rule in a LATER sheet — specificity is compared
+        // globally across all author sheets, not sheet-by-sheet with the
+        // last sheet always winning. Source order only breaks *ties*.
+        let d = dom::parser::parse(r#"<p id="foo">x</p>"#);
+        let sheet1 = parser::parse("#foo { color: red; }");
+        let sheet2 = parser::parse("p { color: blue; }");
+        let styles = cascade(&d, &[sheet1, sheet2]);
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn cross_sheet_specificity_also_holds_in_reverse_sheet_order() {
+        let d = dom::parser::parse(r#"<p id="foo">x</p>"#);
+        let sheet1 = parser::parse("p { color: blue; }");
+        let sheet2 = parser::parse("#foo { color: red; }");
+        let styles = cascade(&d, &[sheet1, sheet2]);
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn line_height_percent_resolves_against_font_size() {
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse("p { font-size: 20px; line-height: 150%; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "p")].line_height, LineHeight::Px(30.0));
     }
 
     #[test]

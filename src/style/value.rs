@@ -285,6 +285,15 @@ fn token_to_raw_length(t: &Token) -> Option<RawLength> {
     }
 }
 
+/// `border-width` (unlike margin/padding/width/height) has no percentage
+/// form in CSS — a `%` token must not parse as a border width.
+fn token_to_border_width(t: &Token) -> Option<RawLength> {
+    match token_to_raw_length(t)? {
+        RawLength::Percent(_) => None,
+        other => Some(other),
+    }
+}
+
 fn token_to_raw_length_auto(t: &Token) -> Option<RawLengthAuto> {
     if let Token::Ident(s) = t {
         if s.eq_ignore_ascii_case("auto") {
@@ -294,8 +303,22 @@ fn token_to_raw_length_auto(t: &Token) -> Option<RawLengthAuto> {
     token_to_raw_length(t).map(RawLengthAuto::Length)
 }
 
+/// Real CSS invalidates a whole shorthand declaration if any single
+/// component fails to parse (it does not silently drop the bad token and
+/// reinterpret the rest as a shorthand with fewer values) — so this returns
+/// `false` (and leaves `edges` untouched) the moment any token doesn't
+/// convert, rather than filtering unrecognized tokens out.
 fn apply_edges_shorthand<T: Copy>(tokens: &[Token], edges: &mut EdgesRaw<T>, conv: impl Fn(&Token) -> Option<T>) -> bool {
-    let vals: Vec<T> = tokens.iter().filter_map(conv).collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let mut vals: Vec<T> = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        match conv(t) {
+            Some(v) => vals.push(v),
+            None => return false,
+        }
+    }
     match vals.len() {
         1 => {
             edges.top = Some(vals[0]);
@@ -527,26 +550,28 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
         "padding-bottom" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.bottom = Some(l)).is_some(),
         "padding-left" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.left = Some(l)).is_some(),
         "border" => {
+            // Real CSS invalidates the whole shorthand if any single
+            // component is unrecognized — it does not silently apply the
+            // components it understood and drop the rest. `border-width`
+            // also has no percentage form in CSS (unlike margin/padding),
+            // so a `%` token must fail to parse as a width here rather than
+            // resolve to `0px` later.
             let mut b = BorderRaw::default();
-            let mut any = false;
             for t in tokens {
-                if let Some(l) = token_to_raw_length(t) {
+                if let Some(l) = token_to_border_width(t) {
                     b.width = Some(l);
-                    any = true;
                     continue;
                 }
                 if let Token::Ident(s) = t {
                     match s.to_ascii_lowercase().as_str() {
                         "solid" => {
                             b.style = Some(BorderStyle::Solid);
-                            any = true;
                             continue;
                         }
                         "none" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
                             // Curated set is solid-only (brief §4); every other
                             // named style resolves to "no visible border".
                             b.style = Some(BorderStyle::None);
-                            any = true;
                             continue;
                         }
                         _ => {}
@@ -554,13 +579,15 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 }
                 if let Some(c) = parse_color(std::slice::from_ref(t)) {
                     b.color = Some(c);
-                    any = true;
+                    continue;
                 }
+                return false; // unrecognized token: the whole shorthand is invalid
             }
-            if any {
-                d.border = Some(b);
+            if b.width.is_none() && b.style.is_none() && b.color.is_none() {
+                return false;
             }
-            any
+            d.border = Some(b);
+            true
         }
         "float" => match keyword(tokens).as_deref() {
             Some("left") => {
@@ -820,6 +847,42 @@ mod tests {
     fn unparseable_color_is_not_applied() {
         let mut d = Declarations::default();
         assert!(!apply_property("color", &toks("bogus"), &mut d));
+    }
+
+    #[test]
+    fn margin_shorthand_rejects_the_whole_declaration_if_any_token_is_unrecognized() {
+        // Real CSS invalidates the whole declaration if any component fails
+        // to parse — it must not silently degrade into a 3-value shorthand.
+        let mut d = Declarations::default();
+        assert!(!apply_property("margin", &toks("1px bogus 2px 3px"), &mut d));
+        assert_eq!(d.margin.top, None);
+        assert_eq!(d.margin.right, None);
+        assert_eq!(d.margin.bottom, None);
+        assert_eq!(d.margin.left, None);
+    }
+
+    #[test]
+    fn padding_shorthand_rejects_the_whole_declaration_if_any_token_is_unrecognized() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("padding", &toks("1px bogus"), &mut d));
+        assert_eq!(d.padding.top, None);
+        assert_eq!(d.padding.left, None);
+    }
+
+    #[test]
+    fn border_shorthand_rejects_the_whole_declaration_on_a_trailing_unrecognized_token() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("border", &toks("2px solid red garbage"), &mut d));
+        assert!(d.border.is_none());
+    }
+
+    #[test]
+    fn border_shorthand_rejects_a_percentage_width() {
+        // border-width has no percentage form in CSS; it must not silently
+        // become width 0 — the whole shorthand is invalid.
+        let mut d = Declarations::default();
+        assert!(!apply_property("border", &toks("5% solid red"), &mut d));
+        assert!(d.border.is_none());
     }
 
     #[test]

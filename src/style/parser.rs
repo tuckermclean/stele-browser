@@ -68,17 +68,14 @@ pub fn parse(css: &str) -> Stylesheet {
     sheet
 }
 
-/// Collect every rule in `sheet` whose selector matches `target` (given its
-/// ancestor chain), in increasing cascade precedence (specificity, then
-/// source order), and fold their declarations onto `decls` — later (higher
-/// precedence) always overwrites earlier per-field. Used by the cascade to
-/// apply the UA sheet and then each author sheet in turn.
-pub(crate) fn collect_matching(sheet: &Stylesheet, ancestors: &[ElementInfo], target: &ElementInfo, decls: &mut Declarations) {
-    let mut matched: Vec<&StyleRule> = sheet.rules.iter().filter(|r| r.selector.matches(ancestors, target)).collect();
-    matched.sort_by(|a, b| a.selector.specificity().cmp(&b.selector.specificity()).then(a.order.cmp(&b.order)));
-    for r in matched {
-        decls.overlay(&r.declarations);
-    }
+/// Every rule in `sheet` whose selector matches `target` (given its ancestor
+/// chain), unordered. The cascade needs to merge these against matches from
+/// *other* sheets (UA vs. every author sheet) before sorting by precedence —
+/// sorting per-sheet here would let a later sheet win regardless of
+/// specificity, which is wrong (specificity is compared globally within an
+/// origin; only ties fall back to source order — see `cascade::visit`).
+pub(crate) fn matching_rules<'a>(sheet: &'a Stylesheet, ancestors: &[ElementInfo], target: &ElementInfo) -> Vec<&'a StyleRule> {
+    sheet.rules.iter().filter(|r| r.selector.matches(ancestors, target)).collect()
 }
 
 fn skip_ws(tokens: &[Token], pos: &mut usize) {
@@ -599,6 +596,21 @@ mod tests {
     #[test]
     fn ignore_unknown_property_increments_counter() {
         let sheet = parse("p { flibbertigibbet: 1; color: red; }");
+        assert_eq!(sheet.ignored_declarations, 1);
+    }
+
+    #[test]
+    fn bad_shorthand_token_counts_as_ignored_and_does_not_apply_partially() {
+        // `div` (unlike `p`) has no UA-sheet margin default, so a rejected
+        // author declaration should leave it at the CSS initial `0`.
+        let dom = crate::dom::parser::parse("<div>t</div>");
+        let sheet = parse("div { margin: 1px bogus 2px 3px; }");
+        assert_eq!(sheet.ignored_declarations, 1);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let div = find(&dom, "div").unwrap();
+        assert_eq!(styles[div].margin.top, LengthPercentageAuto::Px(0.0)); // CSS initial, not `1px`
+
+        let sheet = parse("p { border: 5% solid red; }");
         assert_eq!(sheet.ignored_declarations, 1);
     }
 
