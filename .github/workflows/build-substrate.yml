@@ -1,0 +1,89 @@
+name: build-substrate
+
+# Proves the autonomous fleet's build environment before any Stele code
+# exists: the monolith-builder image (charter C11), pinned BY DIGEST, boots
+# on a GitHub-hosted runner and carries the toolchain M0 needs. This is the
+# M0 vow expressed as CI — prove the environment before the program.
+#
+# Image: ghcr.io/tuckermclean/monolith-builder:20260811-b25ecd2b24a5
+# Digest: sha256:c8978fe3b56cf6ec1714b1b878997c7082cbf9786caa2b8cbcdbd986169c0daf
+# (public package — no registry credentials required)
+#
+# Steps use only `run:` (no JS actions, no checkout), so nothing needs Node
+# inside the container: this job is purely the container's own toolchain
+# introspecting itself.
+
+on:
+  push:
+    branches: ["ci/**", "main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  toolchain:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/tuckermclean/monolith-builder@sha256:c8978fe3b56cf6ec1714b1b878997c7082cbf9786caa2b8cbcdbd986169c0daf
+    steps:
+      - name: Image identity
+        run: |
+          echo "::group::os-release"
+          cat /etc/os-release 2>/dev/null | head -4 || echo "(no /etc/os-release)"
+          echo "::endgroup::"
+          echo "CROSS_TARGET  = ${CROSS_TARGET:-<unset>}"
+          echo "CROSS_COMPILE = ${CROSS_COMPILE:-<unset>}"
+          echo "RUSTUP_HOME   = ${RUSTUP_HOME:-<unset>}"
+          echo "CARGO_HOME    = ${CARGO_HOME:-<unset>}"
+          echo "PATH          = ${PATH}"
+
+      - name: Rust toolchain
+        run: |
+          set -uxo pipefail
+          command -v rustc  && rustc  --version || echo "MISSING rustc"
+          command -v cargo  && cargo  --version || echo "MISSING cargo"
+          command -v rustup && rustup --version || echo "(no rustup on PATH)"
+          echo "::group::rustup toolchains"; rustup toolchain list 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::installed components"; rustup component list --installed 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::rust-src present? (needed for -Zbuild-std)"
+          ( rustup component list --installed 2>/dev/null | grep -q rust-src && echo "rust-src: PRESENT" ) || echo "rust-src: not reported (M0 will add it)"
+          echo "::endgroup::"
+          echo "::group::i486/i586 in stock target list?"
+          rustc --print target-list | grep -E 'i[45]86' || echo "(no stock i4/586 target — the custom i486 JSON is expected, this is fine)"
+          echo "::endgroup::"
+
+      - name: Cross C toolchain (musl / build-std C shims)
+        run: |
+          set -uxo pipefail
+          gcc="${CROSS_COMPILE:-i486-linux-musl-}gcc"
+          ld="${CROSS_COMPILE:-i486-linux-musl-}ld"
+          command -v "$gcc" && "$gcc" --version | head -1 || echo "MISSING $gcc"
+          command -v "$ld"  && "$ld"  --version | head -1 || echo "MISSING $ld"
+
+      - name: Emulation (A4/A5 — executing the i486 binary)
+        run: |
+          set -uxo pipefail
+          found=""
+          for q in qemu-i386 qemu-i386-static qemu-x86_64; do
+            if command -v "$q" >/dev/null; then "$q" --version | head -1; found="$q"; fi
+          done
+          [ -n "$found" ] || echo "qemu-i386: NOT FOUND (A4/A5 acceptance will require it — note for M0)"
+
+      - name: Build tooling (audit / provenance)
+        run: |
+          set -uxo pipefail
+          command -v cargo-auditable && echo "cargo-auditable: present" || echo "cargo-auditable: absent (M6/C11 will need it)"
+          command -v cargo-audit     && echo "cargo-audit: present"     || echo "cargo-audit: absent (M6/A6 will need it)"
+
+      - name: Assert essential substrate
+        run: |
+          set -uo pipefail
+          fail=0
+          command -v rustc >/dev/null || { echo "::error::rustc missing from image"; fail=1; }
+          command -v cargo >/dev/null || { echo "::error::cargo missing from image"; fail=1; }
+          gcc="${CROSS_COMPILE:-i486-linux-musl-}gcc"
+          command -v "$gcc" >/dev/null || { echo "::error::cross compiler $gcc missing from image"; fail=1; }
+          if [ "$fail" = 0 ]; then echo "Essential substrate present: rustc, cargo, $gcc"; fi
+          exit $fail
