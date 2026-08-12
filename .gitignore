@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# The custom-target build directory (kept out of history; toolchain rebuilds it)
+/target-i486/
+
+# Editor / OS noise
+*.swp
+.DS_Store
+
+# Local env overrides
+/.env
+/.cargo/registry/
+
+# NOTE: vendor/ is intentionally NOT ignored — vendored crates are committed
+# for the network-free, attested build (charter C8/C11).
