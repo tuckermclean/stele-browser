@@ -7,7 +7,7 @@
 # explicitly (see accept.sh and the build brief §2 canonical command).
 [target.i486-monolith-linux-musl]
 linker = "i486-linux-musl-gcc"
-# Use the image's cross musl toolchain for crt objects + libc, not rust's
-# bundled self-contained musl (which doesn't exist for a custom build-std
-# target). With panic=abort there is no unwinder to link.
-rustflags = ["-C", "link-self-contained=no"]
+# The target spec omits crt-objects-fallback / self-contained object lists, so
+# self-contained linking is OFF: the image's cross musl toolchain
+# (i486-linux-musl-gcc) supplies crt objects + static libc, and panic=abort
+# needs no unwinder. (No link-self-contained rustflag — this target rejects it.)
