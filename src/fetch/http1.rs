@@ -215,6 +215,15 @@ fn format_request(
         ) {
             continue;
         }
+        // No caller reaches this today (all extra_headers are static
+        // strings), but layout/forms will eventually route page-supplied
+        // data into request headers. A bare CR or LF in a name/value could
+        // smuggle extra header lines — or a whole extra request — into the
+        // outbound stream, so reject the header outright rather than write
+        // it partially or unescaped.
+        if contains_crlf(k) || contains_crlf(v) {
+            continue;
+        }
         out.push_str(&format!("{}: {}\r\n", k, v));
     }
     out.push_str("\r\n");

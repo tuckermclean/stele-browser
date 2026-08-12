@@ -135,7 +135,17 @@ impl CookieJar {
 /// RFC 6265 §5.1.3 domain-match, adapted to our leading-dot convention: a
 /// cookie domain starting with `.` matches its exact suffix plus any
 /// subdomain; a bare (host-only) domain matches only that exact host.
+///
+/// Exception (also §5.1.3): IP addresses have no subdomains, so if either
+/// the cookie's own domain value or the host being checked is an
+/// IP-literal, domain-match degrades to exact-string equality — a stored
+/// `.1.2.3.4` must never suffix-match `foo.1.2.3.4`, and checking against
+/// an IP-literal host must never treat it as a suffix of anything either.
 fn domain_matches(cookie_domain: &str, host: &str) -> bool {
+    let bare = cookie_domain.strip_prefix('.').unwrap_or(cookie_domain);
+    if is_ip_literal(bare) || is_ip_literal(host) {
+        return bare.eq_ignore_ascii_case(host);
+    }
     match cookie_domain.strip_prefix('.') {
         Some(suffix) => {
             host.eq_ignore_ascii_case(suffix)
@@ -145,6 +155,23 @@ fn domain_matches(cookie_domain: &str, host: &str) -> bool {
         }
         None => host.eq_ignore_ascii_case(cookie_domain),
     }
+}
+
+/// `true` if `host` is an IP-literal rather than a DNS name: an IPv6
+/// literal (contains `:`, which is never legal in a hostname), or a
+/// dotted-quad IPv4 address (four `0..=255` numeric components).
+fn is_ip_literal(host: &str) -> bool {
+    if host.contains(':') {
+        return true;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 3
+                && p.chars().all(|c| c.is_ascii_digit())
+                && p.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
+        })
 }
 
 /// RFC 6265 §5.1.4 path-match: exact match, or `request_path` extends
@@ -203,10 +230,30 @@ fn parse_set_cookie(url: &Url, set_cookie: &str) -> Option<Cookie> {
         match key.to_ascii_lowercase().as_str() {
             "domain" => {
                 if let Some(v) = val {
-                    let v = v.trim().trim_start_matches('.');
-                    if !v.is_empty() {
-                        domain = Some(format!(".{}", v.to_ascii_lowercase()));
+                    let v = v.trim().trim_start_matches('.').to_ascii_lowercase();
+                    if v.is_empty() {
+                        continue; // Domain= with no value: treat as absent
                     }
+                    // Heuristic public-suffix guard (RFC 6265 §5.3 step 6;
+                    // we have no real PSL in v0 — see DECISIONS): reject a
+                    // single-label Domain= like `com` outright, since we
+                    // can't otherwise tell a public suffix from a real
+                    // registrable domain. This is a heuristic, not full PSL
+                    // coverage — an unusual two-label public suffix (e.g.
+                    // "co.uk") would still slip through.
+                    if !v.contains('.') {
+                        return None; // reject the WHOLE cookie
+                    }
+                    // The responding host must itself domain-match the
+                    // requested Domain= — otherwise a response from
+                    // attacker.test could plant a cookie scoped to
+                    // example.com (cross-origin cookie injection). Reject
+                    // the whole cookie, never downgrade it to host-only.
+                    let candidate = format!(".{}", v);
+                    if !domain_matches(&candidate, &url.host()) {
+                        return None;
+                    }
+                    domain = Some(candidate);
                 }
             }
             "path" => {

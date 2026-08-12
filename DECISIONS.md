@@ -5,6 +5,26 @@ revisit-trigger. Newest first.
 
 ## P3 — Fetch (Wave 1)
 
+### D12 — Cookie `Domain=` validated against the responding host; no PSL
+Review caught a Critical bug: `parse_set_cookie` stored an explicit
+`Domain=` attribute verbatim with no check against who actually sent it, so
+a response from `attacker.test` could plant a cookie scoped to
+`example.com` (cross-origin cookie injection), and `Domain=com` was
+accepted as a supercookie for every `*.com` site. **Fix (RFC 6265 §5.3 step
+6):** a `Domain=` cookie is now accepted only if the responding host
+domain-matches it (`domain_matches(candidate, url.host())`); otherwise the
+whole cookie is rejected (never silently downgraded to host-only). Since v0
+has no public-suffix list, a second heuristic guard rejects any `Domain=`
+value with no embedded dot (`com`, `localhost`, ...) outright — this is a
+heuristic, not full PSL coverage: a two-label public suffix like `co.uk`
+would still slip through. Also fixed in the same pass: `domain_matches`
+now requires exact-string equality (not RFC 6265 §5.1.3 suffix matching)
+whenever either side of the comparison is an IP-literal, so a stored
+`.127.0.0.1` can never suffix-match `foo.127.0.0.1`. Revisit-trigger: a
+fixture needs real public-suffix-aware matching (e.g. rejecting
+`Domain=co.uk` specifically) — vendor a PSL table then; low urgency since
+v0 has no third-party cookies to begin with (brief §4).
+
 ### D10 — Cookie domain convention: leading `.` encodes "subdomains match"
 The frozen `Cookie` shape (`domain`, `path`, `name`, `value`, `secure`) has
 no separate host-only/subdomain flag, but both `header_for`'s domain-match
