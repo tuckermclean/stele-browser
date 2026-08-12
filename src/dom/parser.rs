@@ -11,12 +11,720 @@
 //! which is exactly why `dom::ast` has no variant to hold one. `<noscript>`
 //! content, by contrast, is rendered first-class (charter C3, the JS treaty).
 
-use crate::dom::Dom;
+use crate::dom::{Dom, ElementName, Node, NodeId};
+
+/// Elements with no content model and no end tag (brief §4/dialect note).
+const VOID_ELEMENTS: &[&str] = &[
+    "br", "hr", "img", "meta", "link", "input", "area", "base", "col", "wbr", "embed",
+];
+
+/// Elements whose contents are raw text, not markup. `script` is additionally
+/// discarded entirely (see [`parse`] and charter C3); the other three are kept
+/// with a single raw `Text` child.
+const RAWTEXT_ELEMENTS: &[&str] = &["script", "style", "textarea", "title"];
+
+/// Tags that get implicitly closed when a new tag from `targets` opens, unless
+/// a `stoppers` element is encountered first while scanning up the open-element
+/// stack (a lightweight stand-in for HTML5's "scope" concept — sufficient for
+/// 1996-grade tag soup without the full adoption-agency algorithm).
+fn implied_close_rule(new_tag: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    match new_tag {
+        "p" => Some((
+            &["p"],
+            &["div", "table", "td", "th", "body", "html", "ul", "ol", "dl", "blockquote", "form"],
+        )),
+        "li" => Some((&["li"], &["ul", "ol", "body", "html"])),
+        "dt" | "dd" => Some((&["dt", "dd"], &["dl", "body", "html"])),
+        "tr" => Some((&["tr"], &["table", "body", "html"])),
+        "td" | "th" => Some((&["td", "th"], &["tr", "table", "body", "html"])),
+        "option" => Some((&["option"], &["select", "optgroup", "body", "html"])),
+        _ => None,
+    }
+}
 
 /// Parse a document. Recovery rules (implied close for `p`/`li`/`td`/`tr`,
 /// b/i mis-nesting tolerance, unclosed-everything at EOF) are P1's remit.
-pub fn parse(_input: &str) -> Dom {
-    todo!("P1: bespoke tag-soup parser")
+///
+/// This parser is TOTAL: it never panics, on any input, including truncated
+/// or otherwise hostile bytes. It is a hand-rolled single-pass tokenizer over
+/// `input`'s `char`s (never raw bytes, so no UTF-8 boundary hazards) driving a
+/// stack of currently-open elements. Nodes are appended to their parent the
+/// moment they are created, so "closing" an element is just popping the stack
+/// back to (and including) it — which is also how mis-nested close tags are
+/// tolerated: the nearest matching ancestor is found and everything above it
+/// (already-attached, so no text is lost) is popped along with it.
+pub fn parse(input: &str) -> Dom {
+    let mut dom = Dom::new();
+    let root = dom.root();
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut pos: usize = 0;
+
+    // Open-element stack: (node id, lowercased tag name). Always starts with
+    // the frozen root ("html"), which is never actually popped off the end.
+    let mut stack: Vec<(NodeId, String)> = vec![(root, "html".to_string())];
+    let mut text_buf = String::new();
+
+    macro_rules! flush_text {
+        () => {
+            if !text_buf.is_empty() {
+                let decoded = decode_entities(&text_buf);
+                let parent = stack.last().unwrap().0;
+                let node = dom.new_text(decoded);
+                dom.append_child(parent, node);
+                text_buf.clear();
+            }
+        };
+    }
+
+    while pos < len {
+        let c = chars[pos];
+        if c != '<' {
+            text_buf.push(c);
+            pos += 1;
+            continue;
+        }
+
+        // c == '<'; decide what kind of token follows.
+        match chars.get(pos + 1).copied() {
+            Some('!') => {
+                flush_text!();
+                pos = skip_comment_or_doctype(&chars, pos);
+            }
+            Some('/') => {
+                flush_text!();
+                pos += 2;
+                let name = read_name(&chars, &mut pos);
+                skip_to_gt(&chars, &mut pos);
+                if !name.is_empty() {
+                    handle_end_tag(&mut stack, &name.to_ascii_lowercase());
+                }
+            }
+            Some(nc) if nc.is_ascii_alphabetic() => {
+                flush_text!();
+                pos += 1; // consume '<', leaving pos at the name's first char
+                let raw_name = read_name(&chars, &mut pos);
+                let (attrs, self_close) = parse_attributes(&chars, &mut pos);
+                let lname = raw_name.to_ascii_lowercase();
+                process_start_tag(&mut dom, &mut stack, &chars, &mut pos, root, &lname, attrs, self_close);
+            }
+            _ => {
+                // A lone '<' not starting a real tag (EOF, whitespace, digit,
+                // another '<', ...) is just a literal character in 1996 soup.
+                text_buf.push('<');
+                pos += 1;
+            }
+        }
+    }
+    flush_text!();
+
+    dom
+}
+
+/// Apply the implied-close rule (if any) for an about-to-open `new_tag`,
+/// popping the open-element stack down through the nearest matching ancestor
+/// found before a scope-stopping element.
+fn apply_implied_close(stack: &mut Vec<(NodeId, String)>, new_tag: &str) {
+    let Some((targets, stoppers)) = implied_close_rule(new_tag) else {
+        return;
+    };
+    for i in (1..stack.len()).rev() {
+        let name = stack[i].1.as_str();
+        if targets.contains(&name) {
+            stack.truncate(i);
+            return;
+        }
+        if stoppers.contains(&name) {
+            return;
+        }
+    }
+}
+
+/// Close the nearest open element named `name`, if one is open. Anything
+/// still open above it is popped too (already attached to its parent, so no
+/// content is lost) — this is what makes `<b><i>x</b>y</i>` tolerable without
+/// a full adoption-agency algorithm. A stray end tag with no open match is a
+/// silent no-op, per 1996 tag-soup convention. Closing `</html>` (or any
+/// stray close found at the sentinel root entry) collapses back to the root
+/// without ever popping the root itself.
+fn handle_end_tag(stack: &mut Vec<(NodeId, String)>, name: &str) {
+    if let Some(i) = stack.iter().rposition(|(_, n)| n == name) {
+        let cut = if i == 0 { 1 } else { i };
+        stack.truncate(cut);
+    }
+}
+
+/// Handle a start tag once its name/attrs/self-close flag are known: apply
+/// implied close, create+attach the element (unless it's `<script>`, which is
+/// discarded per charter C3), then either leave it as a leaf (void/self-close),
+/// slurp its raw-text contents (`style`/`textarea`/`title`), or push it onto
+/// the open-element stack for normal children.
+#[allow(clippy::too_many_arguments)]
+fn process_start_tag(
+    dom: &mut Dom,
+    stack: &mut Vec<(NodeId, String)>,
+    chars: &[char],
+    pos: &mut usize,
+    root: NodeId,
+    lname: &str,
+    attrs: Vec<(String, String)>,
+    self_close: bool,
+) {
+    // A literal <html ...> tag folds into the frozen root element rather than
+    // nesting a second "html" node, so long as nothing has been opened yet.
+    if lname == "html" && stack.len() == 1 {
+        set_attrs(dom, root, &attrs);
+        return;
+    }
+
+    apply_implied_close(stack, lname);
+
+    let is_void = VOID_ELEMENTS.contains(&lname);
+    let is_raw = RAWTEXT_ELEMENTS.contains(&lname);
+
+    if lname == "script" {
+        // Discarded at parse: no node is ever constructed for it or its
+        // contents (the covenant, charter C3). Still consume its raw text so
+        // the tokenizer's position stays correct past any markup-looking
+        // characters inside (e.g. `if (1 < 2)`).
+        if !(is_void || self_close) {
+            let _ = read_raw_text(chars, pos, lname);
+        }
+        return;
+    }
+
+    let parent = stack.last().unwrap().0;
+    let node = dom.new_element(ElementName::new(lname));
+    set_attrs(dom, node, &attrs);
+    dom.append_child(parent, node);
+
+    if is_void || self_close {
+        // Leaf: no children, no stack push.
+    } else if is_raw {
+        let content = read_raw_text(chars, pos, lname);
+        if !content.is_empty() {
+            // style is raw CSS text (no HTML entity decoding); textarea/title
+            // are RCDATA and do get entities decoded, per the HTML spec split
+            // between "raw text" and "RCDATA" content models.
+            let decoded = if lname == "style" { content } else { decode_entities(&content) };
+            let text_node = dom.new_text(decoded);
+            dom.append_child(node, text_node);
+        }
+        // Raw-text elements are self-contained: never pushed onto the stack.
+    } else {
+        stack.push((node, lname.to_string()));
+    }
+}
+
+fn set_attrs(dom: &mut Dom, node: NodeId, attrs: &[(String, String)]) {
+    if let Node::Element(el) = dom.node_mut(node) {
+        for (k, v) in attrs {
+            el.attrs.set(k, v);
+        }
+    }
+}
+
+/// Read an ASCII tag/attribute-name-shaped run: letters, digits, `-`, `_`,
+/// `:`. Stops (possibly immediately, yielding an empty string) at the first
+/// character outside that set or at EOF.
+fn read_name(chars: &[char], pos: &mut usize) -> String {
+    let start = *pos;
+    let len = chars.len();
+    while *pos < len {
+        let c = chars[*pos];
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+    chars[start..*pos].iter().collect()
+}
+
+fn skip_whitespace(chars: &[char], pos: &mut usize) {
+    let len = chars.len();
+    while *pos < len && chars[*pos].is_whitespace() {
+        *pos += 1;
+    }
+}
+
+/// Advance past the next `>` (consuming it), or to EOF if none exists. Used
+/// for end tags and other places where we tolerate but ignore trailing junk.
+fn skip_to_gt(chars: &[char], pos: &mut usize) {
+    let len = chars.len();
+    while *pos < len && chars[*pos] != '>' {
+        *pos += 1;
+    }
+    if *pos < len {
+        *pos += 1;
+    }
+}
+
+/// Consume a `<!-- ... -->` comment or a bogus/doctype `<! ... >` marker
+/// starting at `pos` (which must point at the `<`), returning the position
+/// just past it. Total-safe: an unterminated comment/doctype consumes to EOF
+/// rather than looping or panicking.
+fn skip_comment_or_doctype(chars: &[char], pos: usize) -> usize {
+    let len = chars.len();
+    if pos + 3 < len && chars[pos + 2] == '-' && chars[pos + 3] == '-' {
+        let mut i = pos + 4;
+        while i + 2 < len {
+            if chars[i] == '-' && chars[i + 1] == '-' && chars[i + 2] == '>' {
+                return i + 3;
+            }
+            i += 1;
+        }
+        len
+    } else {
+        let mut i = pos + 2;
+        while i < len && chars[i] != '>' {
+            i += 1;
+        }
+        if i < len {
+            i += 1;
+        }
+        i
+    }
+}
+
+/// Parse the attribute list of a start tag, `pos` positioned just after the
+/// tag name. Returns (attrs in source order, whether a self-closing `/>` was
+/// seen) and leaves `pos` just past the terminating `>` (or at EOF if the tag
+/// was truncated). Every loop iteration provably advances `pos`, so this
+/// cannot spin even on adversarial input (guarantees totality).
+fn parse_attributes(chars: &[char], pos: &mut usize) -> (Vec<(String, String)>, bool) {
+    let len = chars.len();
+    let mut attrs = Vec::new();
+    loop {
+        skip_whitespace(chars, pos);
+        if *pos >= len {
+            return (attrs, false); // truncated tag at EOF
+        }
+        match chars[*pos] {
+            '>' => {
+                *pos += 1;
+                return (attrs, false);
+            }
+            '/' => {
+                if chars.get(*pos + 1) == Some(&'>') {
+                    *pos += 2;
+                    return (attrs, true);
+                }
+                *pos += 1; // stray slash, ignore
+                continue;
+            }
+            _ => {}
+        }
+
+        let name_start = *pos;
+        while *pos < len && !matches!(chars[*pos], ' ' | '\t' | '\n' | '\r' | '=' | '>' | '/') {
+            *pos += 1;
+        }
+        if *pos == name_start {
+            // Current char (must be '=', since others are handled above) has
+            // no attribute name before it; skip it to guarantee progress.
+            *pos += 1;
+            continue;
+        }
+        let aname: String = chars[name_start..*pos].iter().collect();
+
+        skip_whitespace(chars, pos);
+        let mut value = String::new();
+        if *pos < len && chars[*pos] == '=' {
+            *pos += 1;
+            skip_whitespace(chars, pos);
+            if *pos < len && (chars[*pos] == '"' || chars[*pos] == '\'') {
+                let quote = chars[*pos];
+                *pos += 1;
+                let vstart = *pos;
+                while *pos < len && chars[*pos] != quote {
+                    *pos += 1;
+                }
+                value = chars[vstart..*pos].iter().collect();
+                if *pos < len {
+                    *pos += 1; // closing quote
+                }
+            } else {
+                let vstart = *pos;
+                while *pos < len && !matches!(chars[*pos], ' ' | '\t' | '\n' | '\r' | '>') {
+                    *pos += 1;
+                }
+                value = chars[vstart..*pos].iter().collect();
+            }
+        }
+        attrs.push((aname, decode_entities(&value)));
+    }
+}
+
+/// Read the raw-text contents of a `script`/`style`/`textarea`/`title`
+/// element: everything up to (not including) a matching `</name` close tag,
+/// with no markup interpretation in between. `pos` starts just past the open
+/// tag's `>` and ends just past the close tag's `>` (or at EOF if none was
+/// found — total-safe: the rest of the document becomes the element's text).
+fn read_raw_text(chars: &[char], pos: &mut usize, tag: &str) -> String {
+    let start = *pos;
+    let len = chars.len();
+    let tag_len = tag.len();
+    while *pos < len {
+        if chars[*pos] == '<' && chars.get(*pos + 1) == Some(&'/') {
+            let name_start = *pos + 2;
+            let name_end = name_start + tag_len;
+            if name_end <= len {
+                let candidate: String = chars[name_start..name_end].iter().collect();
+                let boundary_ok = name_end == len
+                    || matches!(chars[name_end], '>' | '/' | ' ' | '\t' | '\n' | '\r');
+                if boundary_ok && candidate.eq_ignore_ascii_case(tag) {
+                    let content: String = chars[start..*pos].iter().collect();
+                    let mut end = name_end;
+                    skip_to_gt(chars, &mut end);
+                    *pos = end;
+                    return content;
+                }
+            }
+        }
+        *pos += 1;
+    }
+    let content: String = chars[start..len].iter().collect();
+    *pos = len;
+    content
+}
+
+/// Decode HTML character references (numeric `&#169;`/`&#xA9;` and the named
+/// HTML 4.01 set) in text or an attribute value. Anything that doesn't parse
+/// as a recognized reference is left as a literal `&` followed by the rest of
+/// the text (never panics, never drops input).
+fn decode_entities(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < len {
+        if chars[i] != '&' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if chars.get(i + 1) == Some(&'#') {
+            let mut j = i + 2;
+            let hex = matches!(chars.get(j), Some('x') | Some('X'));
+            if hex {
+                j += 1;
+            }
+            let digits_start = j;
+            if hex {
+                while j < len && chars[j].is_ascii_hexdigit() {
+                    j += 1;
+                }
+            } else {
+                while j < len && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+            }
+            if j > digits_start && j < len && chars[j] == ';' {
+                let digits: String = chars[digits_start..j].iter().collect();
+                let radix = if hex { 16 } else { 10 };
+                let ch = u32::from_str_radix(&digits, radix)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .unwrap_or('\u{FFFD}');
+                out.push(ch);
+                i = j + 1;
+                continue;
+            }
+        } else {
+            let name_start = i + 1;
+            let mut j = name_start;
+            while j < len && j - name_start < 32 && chars[j].is_ascii_alphanumeric() {
+                j += 1;
+            }
+            if j > name_start && j < len && chars[j] == ';' {
+                let name: String = chars[name_start..j].iter().collect();
+                if let Some(c) = named_entity(&name) {
+                    out.push(c);
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+
+        // Not a recognized reference: emit the '&' literally and move on.
+        out.push('&');
+        i += 1;
+    }
+    out
+}
+
+/// The HTML 4.01 named character reference set (ISO 8859-1 Latin-1 block,
+/// the special markup characters, and the symbols/mathematical/Greek block),
+/// mapped to their Unicode scalar values.
+fn named_entity(name: &str) -> Option<char> {
+    let cp: u32 = match name {
+        // Special markup characters (+ apos, technically XHTML/HTML5 but
+        // harmless and expected by authors).
+        "quot" => 34,
+        "amp" => 38,
+        "apos" => 39,
+        "lt" => 60,
+        "gt" => 62,
+
+        // Latin-1 Supplement (ISO 8859-1), 160-255.
+        "nbsp" => 160,
+        "iexcl" => 161,
+        "cent" => 162,
+        "pound" => 163,
+        "curren" => 164,
+        "yen" => 165,
+        "brvbar" => 166,
+        "sect" => 167,
+        "uml" => 168,
+        "copy" => 169,
+        "ordf" => 170,
+        "laquo" => 171,
+        "not" => 172,
+        "shy" => 173,
+        "reg" => 174,
+        "macr" => 175,
+        "deg" => 176,
+        "plusmn" => 177,
+        "sup2" => 178,
+        "sup3" => 179,
+        "acute" => 180,
+        "micro" => 181,
+        "para" => 182,
+        "middot" => 183,
+        "cedil" => 184,
+        "sup1" => 185,
+        "ordm" => 186,
+        "raquo" => 187,
+        "frac14" => 188,
+        "frac12" => 189,
+        "frac34" => 190,
+        "iquest" => 191,
+        "Agrave" => 192,
+        "Aacute" => 193,
+        "Acirc" => 194,
+        "Atilde" => 195,
+        "Auml" => 196,
+        "Aring" => 197,
+        "AElig" => 198,
+        "Ccedil" => 199,
+        "Egrave" => 200,
+        "Eacute" => 201,
+        "Ecirc" => 202,
+        "Euml" => 203,
+        "Igrave" => 204,
+        "Iacute" => 205,
+        "Icirc" => 206,
+        "Iuml" => 207,
+        "ETH" => 208,
+        "Ntilde" => 209,
+        "Ograve" => 210,
+        "Oacute" => 211,
+        "Ocirc" => 212,
+        "Otilde" => 213,
+        "Ouml" => 214,
+        "times" => 215,
+        "Oslash" => 216,
+        "Ugrave" => 217,
+        "Uacute" => 218,
+        "Ucirc" => 219,
+        "Uuml" => 220,
+        "Yacute" => 221,
+        "THORN" => 222,
+        "szlig" => 223,
+        "agrave" => 224,
+        "aacute" => 225,
+        "acirc" => 226,
+        "atilde" => 227,
+        "auml" => 228,
+        "aring" => 229,
+        "aelig" => 230,
+        "ccedil" => 231,
+        "egrave" => 232,
+        "eacute" => 233,
+        "ecirc" => 234,
+        "euml" => 235,
+        "igrave" => 236,
+        "iacute" => 237,
+        "icirc" => 238,
+        "iuml" => 239,
+        "eth" => 240,
+        "ntilde" => 241,
+        "ograve" => 242,
+        "oacute" => 243,
+        "ocirc" => 244,
+        "otilde" => 245,
+        "ouml" => 246,
+        "divide" => 247,
+        "oslash" => 248,
+        "ugrave" => 249,
+        "uacute" => 250,
+        "ucirc" => 251,
+        "uuml" => 252,
+        "yacute" => 253,
+        "thorn" => 254,
+        "yuml" => 255,
+
+        // Symbols, mathematical symbols, Greek letters.
+        "fnof" => 402,
+        "Alpha" => 913,
+        "Beta" => 914,
+        "Gamma" => 915,
+        "Delta" => 916,
+        "Epsilon" => 917,
+        "Zeta" => 918,
+        "Eta" => 919,
+        "Theta" => 920,
+        "Iota" => 921,
+        "Kappa" => 922,
+        "Lambda" => 923,
+        "Mu" => 924,
+        "Nu" => 925,
+        "Xi" => 926,
+        "Omicron" => 927,
+        "Pi" => 928,
+        "Rho" => 929,
+        "Sigma" => 931,
+        "Tau" => 932,
+        "Upsilon" => 933,
+        "Phi" => 934,
+        "Chi" => 935,
+        "Psi" => 936,
+        "Omega" => 937,
+        "alpha" => 945,
+        "beta" => 946,
+        "gamma" => 947,
+        "delta" => 948,
+        "epsilon" => 949,
+        "zeta" => 950,
+        "eta" => 951,
+        "theta" => 952,
+        "iota" => 953,
+        "kappa" => 954,
+        "lambda" => 955,
+        "mu" => 956,
+        "nu" => 957,
+        "xi" => 958,
+        "omicron" => 959,
+        "pi" => 960,
+        "rho" => 961,
+        "sigmaf" => 962,
+        "sigma" => 963,
+        "tau" => 964,
+        "upsilon" => 965,
+        "phi" => 966,
+        "chi" => 967,
+        "psi" => 968,
+        "omega" => 969,
+        "thetasym" => 977,
+        "upsih" => 978,
+        "piv" => 982,
+        "bull" => 8226,
+        "hellip" => 8230,
+        "prime" => 8242,
+        "Prime" => 8243,
+        "oline" => 8254,
+        "frasl" => 8260,
+        "weierp" => 8472,
+        "image" => 8465,
+        "real" => 8476,
+        "trade" => 8482,
+        "alefsym" => 8501,
+        "larr" => 8592,
+        "uarr" => 8593,
+        "rarr" => 8594,
+        "darr" => 8595,
+        "harr" => 8596,
+        "crarr" => 8629,
+        "lArr" => 8656,
+        "uArr" => 8657,
+        "rArr" => 8658,
+        "dArr" => 8659,
+        "hArr" => 8660,
+        "forall" => 8704,
+        "part" => 8706,
+        "exist" => 8707,
+        "empty" => 8709,
+        "nabla" => 8711,
+        "isin" => 8712,
+        "notin" => 8713,
+        "ni" => 8715,
+        "prod" => 8719,
+        "sum" => 8721,
+        "minus" => 8722,
+        "lowast" => 8727,
+        "radic" => 8730,
+        "prop" => 8733,
+        "infin" => 8734,
+        "ang" => 8736,
+        "and" => 8743,
+        "or" => 8744,
+        "cap" => 8745,
+        "cup" => 8746,
+        "int" => 8747,
+        "there4" => 8756,
+        "sim" => 8764,
+        "cong" => 8773,
+        "asymp" => 8776,
+        "ne" => 8800,
+        "equiv" => 8801,
+        "le" => 8804,
+        "ge" => 8805,
+        "sub" => 8834,
+        "sup" => 8835,
+        "nsub" => 8836,
+        "sube" => 8838,
+        "supe" => 8839,
+        "oplus" => 8853,
+        "otimes" => 8855,
+        "perp" => 8869,
+        "sdot" => 8901,
+        "lceil" => 8968,
+        "rceil" => 8969,
+        "lfloor" => 8970,
+        "rfloor" => 8971,
+        "lang" => 9001,
+        "rang" => 9002,
+        "loz" => 9674,
+        "spades" => 9824,
+        "clubs" => 9827,
+        "hearts" => 9829,
+        "diams" => 9830,
+
+        // Internationalization / markup-significant additions.
+        "OElig" => 338,
+        "oelig" => 339,
+        "Scaron" => 352,
+        "scaron" => 353,
+        "Yuml" => 376,
+        "circ" => 710,
+        "tilde" => 732,
+        "ensp" => 8194,
+        "emsp" => 8195,
+        "thinsp" => 8201,
+        "zwnj" => 8204,
+        "zwj" => 8205,
+        "lrm" => 8206,
+        "rlm" => 8207,
+        "ndash" => 8211,
+        "mdash" => 8212,
+        "lsquo" => 8216,
+        "rsquo" => 8217,
+        "sbquo" => 8218,
+        "ldquo" => 8220,
+        "rdquo" => 8221,
+        "bdquo" => 8222,
+        "dagger" => 8224,
+        "Dagger" => 8225,
+        "permil" => 8240,
+        "lsaquo" => 8249,
+        "rsaquo" => 8250,
+        "euro" => 8364,
+
+        _ => return None,
+    };
+    char::from_u32(cp)
 }
 
 // ---------------------------------------------------------------------------
