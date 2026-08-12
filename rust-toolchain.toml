@@ -1,0 +1,7 @@
+# Pinned to the monolith-builder image's active default nightly
+# (rustc 1.99.0-nightly, da80ed070 2026-07-14). Charter C9: ONE pinned rustc.
+# rust-src is required for -Zbuild-std (already present in the image).
+[toolchain]
+channel = "nightly-2026-07-15"
+components = ["rust-src"]
+profile = "minimal"

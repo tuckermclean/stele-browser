@@ -1,0 +1,19 @@
+[package]
+name = "stele"
+version = "0.1.0"
+edition = "2021"
+description = "Stele — a finished document-web browser for the 486. No JavaScript, by construction (charter C3)."
+repository = "https://github.com/tuckermclean/stele-browser"
+publish = false
+
+[[bin]]
+name = "stele"
+path = "src/main.rs"
+
+# Charter C4: the rock does not unwind. Size-first for the 486 budget (A2 ≤ 2.0 MB).
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
