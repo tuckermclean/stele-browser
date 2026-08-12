@@ -23,25 +23,9 @@
   "os": "linux",
   "panic-strategy": "abort",
   "position-independent-executables": false,
-  "post-link-objects-fallback": {
-    "dynamic-dylib": ["crtendS.o", "crtn.o"],
-    "dynamic-nopic-exe": ["crtend.o", "crtn.o"],
-    "dynamic-pic-exe": ["crtendS.o", "crtn.o"],
-    "static-dylib": ["crtendS.o", "crtn.o"],
-    "static-nopic-exe": ["crtend.o", "crtn.o"],
-    "static-pic-exe": ["crtendS.o", "crtn.o"]
-  },
   "pre-link-args": {
     "gnu-cc": ["-m32", "-Wl,-melf_i386"],
     "gnu-lld-cc": ["-m32", "-Wl,-melf_i386"]
-  },
-  "pre-link-objects-fallback": {
-    "dynamic-dylib": ["crti.o", "crtbeginS.o"],
-    "dynamic-nopic-exe": ["crt1.o", "crti.o", "crtbegin.o"],
-    "dynamic-pic-exe": ["Scrt1.o", "crti.o", "crtbeginS.o"],
-    "static-dylib": ["crti.o", "crtbeginS.o"],
-    "static-nopic-exe": ["crt1.o", "crti.o", "crtbegin.o"],
-    "static-pic-exe": ["rcrt1.o", "crti.o", "crtbeginS.o"]
   },
   "relocation-model": "static",
   "relro-level": "full",
