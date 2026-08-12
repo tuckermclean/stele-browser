@@ -330,6 +330,66 @@ mod tests {
         );
     }
 
+    // -- Domain= cross-origin validation (RFC 6265 §5.3 step 6) ----------
+
+    #[test]
+    fn set_from_header_domain_attribute_rejected_when_responding_host_is_unrelated() {
+        let mut jar = CookieJar::new();
+        // attacker.test must not be able to mint a cookie scoped to
+        // example.com just by naming it in Domain=.
+        jar.set_from_header(&url("http://attacker.test/"), "sid=x; Domain=example.com");
+        assert_eq!(jar.header_for(&url("http://example.com/")), None);
+        // The whole cookie is rejected, not silently downgraded to
+        // host-only for attacker.test either.
+        assert_eq!(jar.header_for(&url("http://attacker.test/")), None);
+    }
+
+    #[test]
+    fn set_from_header_single_label_domain_is_rejected_as_a_supercookie() {
+        let mut jar = CookieJar::new();
+        // No public-suffix list in v0 (heuristic, see DECISIONS): a
+        // single-label Domain= (no embedded dot) is always rejected, even
+        // when it *would* otherwise domain-match the responding host.
+        jar.set_from_header(&url("http://shop.com/"), "sid=x; Domain=com");
+        assert_eq!(jar.header_for(&url("http://shop.com/")), None);
+        assert_eq!(jar.header_for(&url("http://other.com/")), None);
+    }
+
+    #[test]
+    fn set_from_header_domain_attribute_accepted_when_responding_host_domain_matches() {
+        let mut jar = CookieJar::new();
+        jar.set_from_header(&url("http://www.example.com/"), "sid=x; Domain=example.com");
+        assert_eq!(
+            jar.header_for(&url("http://example.com/")),
+            Some("sid=x".to_string())
+        );
+    }
+
+    #[test]
+    fn set_from_header_host_only_cookie_unaffected_by_domain_validation() {
+        let mut jar = CookieJar::new();
+        jar.set_from_header(&url("http://example.com/"), "sid=x");
+        assert_eq!(
+            jar.header_for(&url("http://example.com/")),
+            Some("sid=x".to_string())
+        );
+    }
+
+    // -- IP-literal host: domain-match must be exact, not suffix ---------
+
+    #[test]
+    fn domain_match_for_ip_literal_host_is_exact_not_suffix() {
+        let mut jar = CookieJar::new();
+        jar.set_from_header(&url("http://127.0.0.1/"), "sid=x; Domain=127.0.0.1");
+        assert_eq!(
+            jar.header_for(&url("http://127.0.0.1/")),
+            Some("sid=x".to_string())
+        );
+        // ".127.0.0.1" must not suffix-match "foo.127.0.0.1" as if it were
+        // a subdomain of an IP address (RFC 6265 §5.1.3).
+        assert_eq!(jar.header_for(&url("http://foo.127.0.0.1/")), None);
+    }
+
     // -- domain/path matching (direct, via header_for) -------------------
 
     #[test]

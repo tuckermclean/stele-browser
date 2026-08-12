@@ -447,3 +447,57 @@ fn read_line_end(
         buf.extend_from_slice(&tmp[..n]);
     }
 }
+
+/// `true` if `s` contains a bare CR or LF — writing either into a header
+/// name/value would let it smuggle extra header lines (or a whole extra
+/// request) into the outbound stream.
+fn contains_crlf(s: &str) -> bool {
+    s.bytes().any(|b| b == b'\r' || b == b'\n')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_request_drops_headers_with_crlf_in_the_value() {
+        let url = Url::new("http://example.com/");
+        let malicious = vec![(
+            "X-Evil".to_string(),
+            "value\r\nX-Injected: pwned".to_string(),
+        )];
+        let bytes = format_request(&url, Method::Get, &malicious, &[], None, "example.com", 80);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains("X-Injected"),
+            "CRLF-injected header line must never reach the wire:\n{}",
+            text
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("x-evil"),
+            "the malicious header must be dropped whole, not partially written:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn format_request_drops_headers_with_crlf_in_the_name() {
+        let url = Url::new("http://example.com/");
+        let malicious = vec![(
+            "X-Evil\r\nX-Injected".to_string(),
+            "value".to_string(),
+        )];
+        let bytes = format_request(&url, Method::Get, &malicious, &[], None, "example.com", 80);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("X-Injected"), "request was:\n{}", text);
+    }
+
+    #[test]
+    fn format_request_keeps_legitimate_custom_headers() {
+        let url = Url::new("http://example.com/");
+        let headers = vec![("X-Custom".to_string(), "safe-value".to_string())];
+        let bytes = format_request(&url, Method::Get, &headers, &[], None, "example.com", 80);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("X-Custom: safe-value\r\n"), "request was:\n{}", text);
+    }
+}
