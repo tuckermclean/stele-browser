@@ -67,3 +67,20 @@ Append-only running log. Newest at the bottom.
 - NEXT (after this + #3 merge): Wave 1 fans out to implementer subagents —
   P1 parser · P2 CSS · P3 fetch · P4 image decoders · P5 text/metrics — each
   test-first, reviewer-checked, one packet/PR.
+
+## 2026-08-12 — Wave 1 · P1 (dom parser), subagent-driven
+
+- Executed via subagents (Sonnet), orchestrator (Opus) planning/dispatch/merge only.
+- P1 `dom::parser`: bespoke tag-soup parser → arena `Dom`, full HTML 4.01 named
+  entity table + numeric, void/raw-text handling (`<script>` discarded — no node;
+  `<style>/<textarea>/<title>` kept as raw text; `<noscript>` first-class),
+  implied-close (p/li/td/th/tr/dd/dt/option), b/i mis-nesting tolerance,
+  unclosed-at-EOF, total (never panics). Fixtures: basic.html, soup.html.
+- Loop: implementer (26 green) → reviewer (Spec ✅, no Critical; 1 Important +
+  2 Minor) → fix round 1 (same agent) → scoped re-review (all addressed, no new
+  breakage) → **29 tests green**. Important bug caught before main: self-closing
+  `/>` on non-void elements built a wrong tree.
+- Deferred Minor (ledger): `<script/>` (self-closed) skips the raw-text slurp, so
+  trailing text after a self-closed script is not discarded — rare malformed
+  case; note for a later soup-fixture / hardening pass.
+- `ast.rs` frozen/untouched; covenant grep clean; std-only; no unsafe.
