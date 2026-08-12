@@ -36,6 +36,15 @@ jobs:
           echo "CROSS_COMPILE=$CROSS_COMPILE"
           command -v "${CROSS_COMPILE}gcc"
 
+      # Host-target unit tests: the contract-tested logic (parser, cascade,
+      # cookies, entity/line-break) runs natively here on the pinned nightly
+      # (rust-toolchain.toml). Folded into this container job to avoid a second
+      # image pull. Runs before the i486 cross build; a red test fails CI.
+      - name: Unit tests (host target)
+        run: |
+          set -euxo pipefail
+          cargo test --workspace --locked
+
       - name: Build i486 release binary (canonical pipeline)
         run: |
           set -euxo pipefail
