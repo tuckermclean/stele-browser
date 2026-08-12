@@ -31,7 +31,22 @@ Append-only running log. Newest at the bottom.
       live; A2 informational; A3/A5/A6/A7 PENDING against their milestones.
     - `goldens/m0-hello.txt`: the A4 golden.
     - `.github/workflows/m0-acceptance.yml`: build-in-image → accept-on-host.
-- Decisions recorded: D1–D6 (see DECISIONS.md).
-- NEXT: land the M0 packet PR, watch m0-acceptance go green (A1+A4), then the
-  interface-freeze packet (dom::ast, ComputedStyle skeleton, Surface trait,
-  fetch::Response, layout node interface) before Wave 1.
+- Decisions recorded: D1–D7 (see DECISIONS.md).
+- **M0 ACCEPTANCE GREEN** (PR #3, run 31625819900): build-in-image → accept-on-host.
+    - A1 PASS: `ELF 32-bit LSB executable, Intel 80386, statically linked, stripped`.
+    - A4 PASS: `qemu-i386 -cpu 486` output matches golden — the target binary
+      executes 486-legal code.
+    - A2: 301,372 bytes (0.29 MB) vs 2.0 MB budget — huge headroom.
+  Four real toolchain fixes were needed to get the i486 build to link, each
+  caught by CI and fixed in turn:
+    1. this nightly gates `.json` targets behind `-Zjson-target-spec`.
+    2. self-contained musl crt/libc doesn't exist for a custom build-std target
+       → drop `crt-objects-fallback`, let the cross gcc supply crt (D1-adjacent).
+    3. rustc requires the self-contained object lists empty when self-contained
+       is off → remove `pre/post-link-objects-fallback`.
+    4. GCC musl toolchain ships `libgcc_eh.a`, not LLVM `libunwind` → alias it
+       as `libunwind.a`; panic=abort never unwinds (D7).
+- NEXT (after PR #3 merges): the INTERFACE FREEZE packet (orchestrator-authored,
+  serial) — dom::ast (closed sum type, no script variant), style::ComputedStyle
+  skeleton, Surface trait, fetch::Response, layout node interface — then Wave 1
+  fans out (P1 parser · P2 CSS · P3 fetch · P4 image decoders · P5 text/metrics).
