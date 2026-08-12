@@ -18,7 +18,8 @@
 # Build it with the canonical pipeline (inside the monolith-builder image):
 #   cargo build --release \
 #     --target targets/i486-monolith-linux-musl.json \
-#     -Zbuild-std=std,panic_abort
+#     -Zbuild-std=std,panic_abort \
+#     -Zjson-target-spec   # this nightly gates .json target specs behind it
 
 set -uo pipefail
 

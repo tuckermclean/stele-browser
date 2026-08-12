@@ -41,7 +41,8 @@ jobs:
           set -euxo pipefail
           cargo build --release \
             --target targets/i486-monolith-linux-musl.json \
-            -Zbuild-std=std,panic_abort
+            -Zbuild-std=std,panic_abort \
+            -Zjson-target-spec
           BIN=target/i486-monolith-linux-musl/release/stele
           ls -l "$BIN"
           file "$BIN" || true
