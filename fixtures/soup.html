@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html><head><title>Soup &amp; Torture</title>
+<style>body { color: red; } /* <not-a-tag> */</style>
+<script>if (1 < 2) { document.write("<b>nope</b>"); }</script>
+</head>
+<body>
+<!-- a comment <p>ignored</p> -->
+<p>First paragraph
+<p>Second paragraph starts without closing the first
+<ul>
+<li>Item one
+<li>Item two
+<li>Item three
+</ul>
+<table>
+<tr><td>A<td>B<tr><td>C<td>D
+</table>
+<dl>
+<dt>Term<dd>Definition
+</dl>
+<p><b>Bold and <i>italic</b> still italic?</i></p>
+<img src="pic.gif" alt="pic">
+<hr>
+<br>
+<p>Entities: &copy; &nbsp; &#169; &#xA9; &lt;tag&gt;</p>
+<a href="/x?a=1&amp;b=2" title='He said "hi"'>link</a>
+<input type=text value=unquoted>
+<div class="">content</div>
+</body>
+</html>
