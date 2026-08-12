@@ -198,8 +198,12 @@ fn process_start_tag(
     set_attrs(dom, node, &attrs);
     dom.append_child(parent, node);
 
-    if is_void || self_close {
-        // Leaf: no children, no stack push.
+    if is_void {
+        // Leaf: no children, no stack push. HTML has no true self-closing
+        // tags outside VOID_ELEMENTS -- a trailing '/' on any other element
+        // (XHTML-style, common in transitional markup) is tolerated but
+        // ignored, exactly as real browsers do: the element still opens
+        // normally and waits for its content/close tag (or EOF).
     } else if is_raw {
         let content = read_raw_text(chars, pos, lname);
         if !content.is_empty() {
@@ -426,6 +430,12 @@ fn decode_entities(s: &str) -> String {
                 let radix = if hex { 16 } else { 10 };
                 let ch = u32::from_str_radix(&digits, radix)
                     .ok()
+                    // &#0; is a well-formed reference to the NUL codepoint,
+                    // but a bare NUL leaking into a text node would bite the
+                    // render layer downstream -- the HTML spec itself treats
+                    // codepoint 0 as a parse error remapped to U+FFFD, so we
+                    // do the same rather than passing it through.
+                    .filter(|&cp| cp != 0)
                     .and_then(char::from_u32)
                     .unwrap_or('\u{FFFD}');
                 out.push(ch);
@@ -961,6 +971,30 @@ mod tests {
         assert_eq!(el.attrs.get("title"), Some("\u{00A9} 2026"));
     }
 
+    #[test]
+    fn numeric_entity_nul_maps_to_replacement_char() {
+        // &#0; is the classic "smuggle a NUL byte into text" trick; leaking a
+        // literal NUL into a text node would bite the render layer, so it
+        // must be remapped to U+FFFD like any other disallowed codepoint.
+        let dom = parse("<p>a&#0;b</p>");
+        let root = dom.root();
+        let p = find_descendant(&dom, root, "p").expect("p");
+        assert_eq!(text_of(&dom, p), "a\u{FFFD}b");
+        assert!(!text_of(&dom, p).contains('\0'), "no literal NUL should survive decoding");
+    }
+
+    #[test]
+    fn numeric_entity_surrogate_and_out_of_range_map_to_replacement_char() {
+        // &#xD800; is a lone UTF-16 surrogate half -- not a valid Unicode
+        // scalar value, so char::from_u32 returns None. &#99999999; is simply
+        // out of Unicode's range. Both must fall back to U+FFFD rather than
+        // panicking or being dropped.
+        let dom = parse("<p>x&#xD800;y&#99999999;z</p>");
+        let root = dom.root();
+        let p = find_descendant(&dom, root, "p").expect("p");
+        assert_eq!(text_of(&dom, p), "x\u{FFFD}y\u{FFFD}z");
+    }
+
     // ------------------------------- script / style / noscript ---------------
 
     #[test]
@@ -1023,6 +1057,30 @@ mod tests {
         assert_eq!(el.attrs.get("src"), Some("pic.gif"));
         assert_eq!(el.attrs.get("alt"), Some("a picture"));
         assert!(el.children.is_empty());
+    }
+
+    #[test]
+    fn self_closing_slash_on_non_void_element_opens_normally() {
+        // XHTML-style self-closing on an ordinary (non-void) element is
+        // common in the transitional markup Stele targets, but HTML has no
+        // real self-closing tags outside VOID_ELEMENTS: browsers ignore the
+        // trailing '/' and keep the element open for content and its real
+        // close tag. `<div/>x</div>` must NOT turn "x" into a sibling of an
+        // empty <div>, and the following </div> must close that same div.
+        let dom = parse("<div/>x</div>");
+        let root = dom.root();
+        let div = find_descendant(&dom, root, "div").expect("div");
+        assert_eq!(text_of(&dom, div), "x", "\"x\" must be a child of the div, not its sibling");
+        assert!(children_of(&dom, root).len() >= 1);
+        // The div must be the only top-level element carrying "x" -- i.e. no
+        // stray top-level text node holding "x" outside the div.
+        let root_children = children_of(&dom, root);
+        let stray_text: String = root_children
+            .iter()
+            .filter(|&&c| dom.node(c).text().is_some())
+            .map(|&c| dom.node(c).text().unwrap().to_string())
+            .collect();
+        assert!(!stray_text.contains('x'), "\"x\" leaked out as a top-level sibling: {stray_text:?}");
     }
 
     // ------------------------------- comments / doctype -----------------------
