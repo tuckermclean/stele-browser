@@ -2,6 +2,14 @@
 //! implements domain/path matching and Set-Cookie parsing; no third-party
 //! cookies in v0 (brief §4 — a DECISIONS note if that bites a fixture). Cookie
 //! rules are contract-tested, so this arrives as a typed skeleton.
+//!
+//! v0 choices recorded in DECISIONS.md: (1) `Expires`/`Max-Age` are parsed-
+//! and-ignored — every cookie behaves as a session cookie (the frozen
+//! `Cookie` shape has no expiry field to store them in); (2) a cookie's
+//! `domain` is stored WITH a leading `.` when it came from an explicit
+//! `Domain=` attribute (subdomains match) and WITHOUT one for a host-only
+//! cookie (exact host match only) — this doubles as the Netscape-format
+//! "include subdomains" flag with no extra field needed.
 
 use super::Url;
 
@@ -27,28 +35,207 @@ impl CookieJar {
     }
 
     /// Ingest one `Set-Cookie` header value against the response URL.
-    pub fn set_from_header(&mut self, _url: &Url, _set_cookie: &str) {
-        todo!("P3: parse Set-Cookie, apply domain/path rules")
+    pub fn set_from_header(&mut self, url: &Url, set_cookie: &str) {
+        let Some(cookie) = parse_set_cookie(url, set_cookie) else {
+            return; // malformed: silently ignored, never panics (brief §9)
+        };
+        match self.cookies.iter_mut().find(|c| {
+            c.domain.eq_ignore_ascii_case(&cookie.domain)
+                && c.path == cookie.path
+                && c.name == cookie.name
+        }) {
+            Some(existing) => *existing = cookie,
+            None => self.cookies.push(cookie),
+        }
     }
 
     /// The `Cookie:` header value to send for `url`, or `None` if the jar has
     /// nothing that matches.
-    pub fn header_for(&self, _url: &Url) -> Option<String> {
-        todo!("P3: domain/path match + serialize")
+    pub fn header_for(&self, url: &Url) -> Option<String> {
+        let host = url.host();
+        let path = url.path();
+        let path = if path.is_empty() { "/" } else { path.as_str() };
+        let is_secure_origin = url.scheme().eq_ignore_ascii_case("https");
+
+        let mut matching: Vec<&Cookie> = self
+            .cookies
+            .iter()
+            .filter(|c| {
+                domain_matches(&c.domain, &host)
+                    && path_matches(&c.path, path)
+                    && (!c.secure || is_secure_origin)
+            })
+            .collect();
+        if matching.is_empty() {
+            return None;
+        }
+        // More specific (longer) paths first, per RFC 6265 §5.4's ordering.
+        matching.sort_by(|a, b| b.path.len().cmp(&a.path.len()));
+        Some(
+            matching
+                .iter()
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 
     /// Serialize the whole jar to Netscape jar text.
     pub fn to_netscape(&self) -> String {
-        todo!("P3: Netscape jar format")
+        let mut out = String::from("# Netscape HTTP Cookie File\n");
+        for c in &self.cookies {
+            let flag = if c.domain.starts_with('.') { "TRUE" } else { "FALSE" };
+            let secure = if c.secure { "TRUE" } else { "FALSE" };
+            let path = if c.path.is_empty() { "/" } else { &c.path };
+            // Expiration column: always 0 (session cookie; v0 does not track
+            // Expires/Max-Age — see the module doc comment).
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                c.domain, flag, path, secure, 0, c.name, c.value
+            ));
+        }
+        out
     }
 
     /// Parse a Netscape-format cookie jar text file back into a jar. Additive
     /// to the frozen skeleton (not required by the trait/type freeze) — the
     /// load half of charter C6's plain-file cookie jar, needed to persist the
     /// jar across runs.
-    pub fn from_netscape(_text: &str) -> Self {
-        todo!("P3: Netscape jar format -> CookieJar")
+    pub fn from_netscape(text: &str) -> Self {
+        let mut jar = Self::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() < 7 {
+                continue; // malformed line: skip, never panic
+            }
+            let domain = fields[0];
+            let path = fields[2];
+            let secure = fields[3];
+            let name = fields[5];
+            let value = fields[6];
+            if name.is_empty() {
+                continue;
+            }
+            jar.cookies.push(Cookie {
+                domain: domain.to_string(),
+                path: path.to_string(),
+                name: name.to_string(),
+                value: value.to_string(),
+                secure: secure.eq_ignore_ascii_case("TRUE"),
+            });
+        }
+        jar
     }
+}
+
+/// RFC 6265 §5.1.3 domain-match, adapted to our leading-dot convention: a
+/// cookie domain starting with `.` matches its exact suffix plus any
+/// subdomain; a bare (host-only) domain matches only that exact host.
+fn domain_matches(cookie_domain: &str, host: &str) -> bool {
+    match cookie_domain.strip_prefix('.') {
+        Some(suffix) => {
+            host.eq_ignore_ascii_case(suffix)
+                || host
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(".{}", suffix.to_ascii_lowercase()))
+        }
+        None => host.eq_ignore_ascii_case(cookie_domain),
+    }
+}
+
+/// RFC 6265 §5.1.4 path-match: exact match, or `request_path` extends
+/// `cookie_path` at a `/` segment boundary (not merely as a string prefix).
+fn path_matches(cookie_path: &str, request_path: &str) -> bool {
+    let cookie_path = if cookie_path.is_empty() { "/" } else { cookie_path };
+    if cookie_path == request_path {
+        return true;
+    }
+    if let Some(rest) = request_path.strip_prefix(cookie_path) {
+        if cookie_path.ends_with('/') {
+            return true;
+        }
+        return rest.starts_with('/');
+    }
+    false
+}
+
+/// RFC 6265 §5.1.4 default-path: the directory of the request path (drop the
+/// last `/`-terminated segment), or `/` if there isn't one to drop.
+fn default_path(request_path: &str) -> String {
+    if !request_path.starts_with('/') {
+        return "/".to_string();
+    }
+    match request_path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(i) => request_path[..i].to_string(),
+    }
+}
+
+/// Parse one `Set-Cookie` header value. Total: any malformed input (no `=`,
+/// empty name, empty header) yields `None` rather than panicking.
+fn parse_set_cookie(url: &Url, set_cookie: &str) -> Option<Cookie> {
+    let mut parts = set_cookie.split(';');
+    let first = parts.next()?.trim();
+    let eq = first.find('=')?;
+    let name = first[..eq].trim();
+    let value = first[eq + 1..].trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let mut domain: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut secure = false;
+
+    for attr in parts {
+        let attr = attr.trim();
+        if attr.is_empty() {
+            continue;
+        }
+        let (key, val) = match attr.find('=') {
+            Some(i) => (attr[..i].trim(), Some(attr[i + 1..].trim())),
+            None => (attr, None),
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "domain" => {
+                if let Some(v) = val {
+                    let v = v.trim().trim_start_matches('.');
+                    if !v.is_empty() {
+                        domain = Some(format!(".{}", v.to_ascii_lowercase()));
+                    }
+                }
+            }
+            "path" => {
+                if let Some(v) = val {
+                    if v.starts_with('/') {
+                        path = Some(v.to_string());
+                    }
+                }
+            }
+            "secure" => secure = true,
+            // HttpOnly, Expires, Max-Age, SameSite: parsed-and-ignored in v0
+            // (see the module doc comment — every cookie is a session cookie).
+            _ => {}
+        }
+    }
+
+    let domain = domain.unwrap_or_else(|| url.host().to_ascii_lowercase());
+    let path = path.unwrap_or_else(|| {
+        let p = url.path();
+        default_path(if p.is_empty() { "/" } else { &p })
+    });
+
+    Some(Cookie {
+        domain,
+        path,
+        name: name.to_string(),
+        value: value.to_string(),
+        secure,
+    })
 }
 
 #[cfg(test)]
