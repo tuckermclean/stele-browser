@@ -3,6 +3,57 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## P3 — Fetch (Wave 1)
+
+### D10 — Cookie domain convention: leading `.` encodes "subdomains match"
+The frozen `Cookie` shape (`domain`, `path`, `name`, `value`, `secure`) has
+no separate host-only/subdomain flag, but both `header_for`'s domain-match
+and the Netscape jar format's second column need one. **Choice:** when a
+`Set-Cookie` carries an explicit `Domain=` attribute, store the domain with
+a leading `.` (subdomain matching enabled, RFC 6265 domain-match); a
+host-only cookie (no `Domain=`) stores the bare host (exact match only).
+`to_netscape`'s `TRUE`/`FALSE` flag column falls straight out of
+`domain.starts_with('.')` with no extra field. Revisit-trigger: never,
+unless a fixture needs public-suffix-aware domain matching (not attempted
+in v0 — no third-party cookies per brief §4 makes this low-risk).
+
+### D9 — Cookie expiry: every cookie is a session cookie in v0
+`Expires`/`Max-Age` are parsed off the `Set-Cookie` header (so parsing
+doesn't choke on them) and then discarded — the frozen `Cookie` struct has
+no field to store an expiry in, and charter C6 only requires a plain-file
+jar, not eviction semantics. **Choice:** treat every stored cookie as a
+session cookie; `to_netscape`'s expiration column is always `0`.
+Revisit-trigger: a fixture or the Lua chair needs persistent (non-session)
+cookies across restarts — then add an expiry field (a freeze-packet change,
+since `Cookie` is a frozen type) and stop ignoring `Max-Age`/`Expires`.
+
+### D8 — Bespoke HTTP/1.1 over `std::net::TcpStream`, not `httparse`
+The brief (§4, §5) names `httparse` as the HTTP layer's crate. P3 needs to
+land now, but the crate-vendoring apparatus (needed to bring in *any*
+external crate under charter C8's "vendored + attested" rule) is being set
+up separately ahead of P4. Options: (a) block P3 on vendoring landing first;
+(b) hand-roll HTTP/1.1 parsing, std-only. **Choice: (b).** A bespoke
+request formatter + total (never-panics) response parser — status line,
+case-insensitive/folded headers, Content-Length and chunked bodies — is a
+few hundred lines over `std::net::TcpStream`, unblocks the whole Wave 1
+fetch packet immediately, and adds zero dependencies to `Cargo.toml`/
+`Cargo.lock` (verified: both unchanged by this packet). Revisit-trigger:
+once the vendoring apparatus lands and P4 needs it anyway, consider
+swapping this hand-rolled parser for `httparse` if a fixture exposes a
+real-world HTTP/1.1 edge case (e.g. more exotic chunk-extension syntax)
+that's cheaper to get from a maintained parser than to keep hand-fixing.
+
+### D11 — gzip deferred to a later packet
+`Content-Encoding: gzip` (brief §4/§5, via `miniz_oxide`) is out of scope
+for P3 for the same vendoring-not-ready-yet reason as D8. **Choice:** the
+client advertises `Accept-Encoding: identity` only (never claims to accept
+gzip it can't decode), and the fixture server always answers with identity
+encoding, so no test in this packet exercises decompression. `Response`'s
+`body` doc comment already promises "gzip already inflated" for whenever
+that packet lands. Revisit-trigger: `miniz_oxide` is vendored — wire gzip
+decoding into `read_response`'s body-decoding step, gated on a
+`Content-Encoding: gzip` response header.
+
 ## M0 — Toolchain
 
 ### D1 — Build substrate: GitHub Actions running the monolith-builder image
