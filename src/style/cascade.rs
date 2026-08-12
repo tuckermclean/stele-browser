@@ -3,14 +3,236 @@
 //! element semantics live (block vs inline defaults, replaced elements, form
 //! controls) — `dom::ast` deliberately stays name-agnostic.
 
-use crate::dom::Dom;
-use crate::style::{ComputedStyle, Stylesheet};
+use std::sync::OnceLock;
+
+use crate::dom::{Dom, Node, NodeId};
+use crate::style::computed::{
+    BorderSide, BorderStyle, Dimension, Edges, LengthPercentage, LengthPercentageAuto, LineHeight,
+};
+use crate::style::selector::ElementInfo;
+use crate::style::ua::UA_CSS;
+use crate::style::value::{BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
+use crate::style::{parser, ComputedStyle, Stylesheet};
+use crate::surface::Color;
+
+fn ua_stylesheet() -> &'static Stylesheet {
+    static UA: OnceLock<Stylesheet> = OnceLock::new();
+    UA.get_or_init(|| parser::parse(UA_CSS))
+}
 
 /// Compute a style for every node in `dom`, indexed by `NodeId`. Author sheets
 /// apply after the UA sheet, in source order (specificity + order resolved by
 /// P2). This is contract-testable and gets strict test-first treatment.
-pub fn cascade(_dom: &Dom, _author_sheets: &[Stylesheet]) -> Vec<ComputedStyle> {
-    todo!("P2: UA sheet + author cascade -> per-node ComputedStyle")
+///
+/// Total: never panics on any `dom`/`author_sheets` combination (an empty DOM
+/// yields an empty `Vec`, unmatched nodes simply fall back to CSS initial
+/// values / UA defaults).
+pub fn cascade(dom: &Dom, author_sheets: &[Stylesheet]) -> Vec<ComputedStyle> {
+    let mut out = vec![ComputedStyle::default(); dom.len()];
+    if dom.is_empty() {
+        return out;
+    }
+    let ua = ua_stylesheet();
+    let mut ancestors: Vec<ElementInfo> = Vec::new();
+    visit(dom, dom.root(), ua, author_sheets, None, &mut ancestors, &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit(
+    dom: &Dom,
+    id: NodeId,
+    ua: &Stylesheet,
+    author: &[Stylesheet],
+    parent: Option<&ComputedStyle>,
+    ancestors: &mut Vec<ElementInfo>,
+    out: &mut [ComputedStyle],
+) {
+    match dom.node(id) {
+        // Character data carries no rules of its own; it takes the parent's
+        // computed style wholesale (the inline engine reads font/color etc.
+        // straight off it).
+        Node::Text(_) => {
+            if let Some(p) = parent {
+                out[id] = p.clone();
+            }
+        }
+        Node::Element(el) => {
+            let info = ElementInfo::from_element(&el.name, &el.attrs);
+            let mut decls = Declarations::default();
+            parser::collect_matching(ua, ancestors, &info, &mut decls);
+            for sheet in author {
+                parser::collect_matching(sheet, ancestors, &info, &mut decls);
+            }
+            let style = resolve(&decls, parent);
+            out[id] = style.clone();
+
+            ancestors.push(info);
+            for &child in &el.children {
+                visit(dom, child, ua, author, Some(&style), ancestors, out);
+            }
+            ancestors.pop();
+        }
+    }
+}
+
+/// Turn one node's folded `Declarations` (still raw: px/pt/em/% units, not
+/// yet resolved to pixels) into a full `ComputedStyle`, given the parent's
+/// already-resolved style (`None` at the root).
+///
+/// Two CSS rules drive every field below:
+///   - inherited properties fall back to the *parent's computed value*
+///     (or the CSS initial value at the root);
+///   - non-inherited (box) properties fall back straight to the CSS initial
+///     value regardless of the parent — brief §4's "box properties do not
+///     inherit".
+/// `em`/`%` on `font-size` resolve against the *parent's* font size; every
+/// other `em` resolves against *this node's own* resolved font size, per
+/// CSS (computed here first, so everything else can use it).
+fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
+    let default = ComputedStyle::default();
+    let parent_font_size = parent.map(|p| p.font_size).unwrap_or(default.font_size);
+
+    let font_size = match d.font_size {
+        Some(raw) => resolve_font_size(raw, parent_font_size),
+        None => parent_font_size,
+    };
+
+    let line_height = match d.line_height {
+        Some(RawLineHeight::Normal) => LineHeight::Normal,
+        Some(RawLineHeight::Number(n)) => LineHeight::Px(n * font_size),
+        Some(RawLineHeight::Length(raw)) => LineHeight::Px(raw_to_px(raw, font_size)),
+        None => parent.map(|p| p.line_height).unwrap_or(default.line_height),
+    };
+
+    macro_rules! inherited {
+        ($field:ident) => {
+            d.$field.unwrap_or_else(|| parent.map(|p| p.$field).unwrap_or(default.$field))
+        };
+    }
+    macro_rules! own {
+        ($field:ident) => {
+            d.$field.unwrap_or(default.$field)
+        };
+    }
+
+    ComputedStyle {
+        color: inherited!(color),
+        background_color: own!(background_color),
+        font_family: inherited!(font_family),
+        font_size,
+        font_weight: inherited!(font_weight),
+        font_style: inherited!(font_style),
+        line_height,
+        text_align: inherited!(text_align),
+        text_decoration: own!(text_decoration),
+        white_space: inherited!(white_space),
+        vertical_align: own!(vertical_align),
+        list_style_type: inherited!(list_style_type),
+
+        display: own!(display),
+        width: resolve_dimension(d.width, font_size, default.width),
+        height: resolve_dimension(d.height, font_size, default.height),
+        margin: Edges {
+            top: resolve_lpa(d.margin.top, font_size, default.margin.top),
+            right: resolve_lpa(d.margin.right, font_size, default.margin.right),
+            bottom: resolve_lpa(d.margin.bottom, font_size, default.margin.bottom),
+            left: resolve_lpa(d.margin.left, font_size, default.margin.left),
+        },
+        padding: Edges {
+            top: resolve_lp(d.padding.top, font_size, default.padding.top),
+            right: resolve_lp(d.padding.right, font_size, default.padding.right),
+            bottom: resolve_lp(d.padding.bottom, font_size, default.padding.bottom),
+            left: resolve_lp(d.padding.left, font_size, default.padding.left),
+        },
+        border: resolve_border(d.border, font_size),
+        float: own!(float),
+        clear: own!(clear),
+
+        flex_direction: own!(flex_direction),
+        flex_wrap: own!(flex_wrap),
+        justify_content: own!(justify_content),
+        align_items: own!(align_items),
+        align_self: own!(align_self),
+        flex_grow: own!(flex_grow),
+        flex_shrink: own!(flex_shrink),
+        flex_basis: resolve_dimension(d.flex_basis, font_size, default.flex_basis),
+        gap: d.gap.map(|l| raw_to_px(l, font_size)).unwrap_or(default.gap),
+    }
+}
+
+fn resolve_font_size(raw: RawLength, parent_font_size: f32) -> f32 {
+    match raw {
+        RawLength::Px(v) => v,
+        RawLength::Pt(v) => pt_to_px(v),
+        RawLength::Em(v) => v * parent_font_size,
+        RawLength::Percent(v) => parent_font_size * v / 100.0,
+    }
+}
+
+fn pt_to_px(v: f32) -> f32 {
+    v * 96.0 / 72.0
+}
+
+/// Resolve a raw length against `font_size` (this node's own, per CSS `em`
+/// semantics for properties other than `font-size` itself). `%` is left as
+/// `LengthPercentage::Percent`/`Dimension::Percent` — layout resolves that
+/// against the containing block; only unit *conversion* (em/pt → px) happens
+/// here.
+fn raw_to_px(raw: RawLength, font_size: f32) -> f32 {
+    match raw {
+        RawLength::Px(v) => v,
+        RawLength::Pt(v) => pt_to_px(v),
+        RawLength::Em(v) => v * font_size,
+        RawLength::Percent(_) => 0.0, // callers needing percent use the *_lp/_dimension helpers
+    }
+}
+
+fn resolve_dimension(v: Option<RawLengthAuto>, font_size: f32, default: Dimension) -> Dimension {
+    match v {
+        None => default,
+        Some(RawLengthAuto::Auto) => Dimension::Auto,
+        Some(RawLengthAuto::Length(RawLength::Percent(p))) => Dimension::Percent(p),
+        Some(RawLengthAuto::Length(l)) => Dimension::Px(raw_to_px(l, font_size)),
+    }
+}
+
+fn resolve_lpa(v: Option<RawLengthAuto>, font_size: f32, default: LengthPercentageAuto) -> LengthPercentageAuto {
+    match v {
+        None => default,
+        Some(RawLengthAuto::Auto) => LengthPercentageAuto::Auto,
+        Some(RawLengthAuto::Length(RawLength::Percent(p))) => LengthPercentageAuto::Percent(p),
+        Some(RawLengthAuto::Length(l)) => LengthPercentageAuto::Px(raw_to_px(l, font_size)),
+    }
+}
+
+fn resolve_lp(v: Option<RawLength>, font_size: f32, default: LengthPercentage) -> LengthPercentage {
+    match v {
+        None => default,
+        Some(RawLength::Percent(p)) => LengthPercentage::Percent(p),
+        Some(l) => LengthPercentage::Px(raw_to_px(l, font_size)),
+    }
+}
+
+/// `border` is curated as solid-only (brief §4): any other named style
+/// resolves to `BorderStyle::None` upstream in `value::apply_property`, and
+/// an unset style here (declared width/color with no keyword) also means
+/// "no visible border" — CSS's own initial `border-style: none`. A solid
+/// border with no explicit width falls back to the classic "medium" ≈3px.
+fn resolve_border(v: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
+    match v {
+        None => Edges::all(BorderSide::default()),
+        Some(b) => {
+            let style = b.style.unwrap_or(BorderStyle::None);
+            let width = if style == BorderStyle::Solid {
+                b.width.map(|w| raw_to_px(w, font_size)).unwrap_or(3.0)
+            } else {
+                0.0
+            };
+            let color = b.color.unwrap_or(Color::BLACK);
+            Edges::all(BorderSide { width, style, color })
+        }
+    }
 }
 
 #[cfg(test)]

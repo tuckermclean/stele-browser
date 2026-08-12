@@ -3,8 +3,9 @@
 //! scope: element, `.class`, `#id`, descendant, grouping, `a:link`/`:visited`
 //! (brief §4).
 
-use crate::style::selector::Selector;
-use crate::style::value::Declarations;
+use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
+use crate::style::tokenizer::{tokenize, Token};
+use crate::style::value::{self, Declarations};
 
 /// One rule after comma-grouping has been expanded: a single selector, its
 /// source-order index (for cascade tie-breaking), and the declarations it
@@ -36,10 +37,362 @@ pub struct Stylesheet {
     pub(crate) rules: Vec<StyleRule>,
 }
 
-/// Parse a stylesheet. One-shot media queries are evaluated against the surface
-/// size at load (brief §4); that evaluation is P2's remit.
-pub fn parse(_css: &str) -> Stylesheet {
-    todo!("P2: CSS tokenizer + parser (full syntax, curated semantics)")
+/// Parse a stylesheet. Total: never panics, on any input. Full CSS syntax is
+/// tokenized and walked; only the curated declarations (brief §4) survive
+/// into `rules` — everything else is counted (charter C2's ignore-unknown
+/// treaty) and dropped. Recovery is per brief §10: a bad declaration skips to
+/// the next `;`; a bad rule (no `{` reachable) skips to the next `}`.
+pub fn parse(css: &str) -> Stylesheet {
+    let tokens = tokenize(css);
+    let mut sheet = Stylesheet::default();
+    let mut pos = 0usize;
+    let mut order = 0u32;
+    let len = tokens.len();
+
+    while pos < len {
+        skip_ws(&tokens, &mut pos);
+        if pos >= len {
+            break;
+        }
+        match &tokens[pos] {
+            Token::AtKeyword(name) => {
+                let is_media = name.eq_ignore_ascii_case("media");
+                pos += 1;
+                skip_at_rule_body(&tokens, &mut pos, is_media, &mut sheet);
+            }
+            // A stray close-brace at the top level: nothing to close, drop it.
+            Token::RBrace => pos += 1,
+            _ => parse_rule(&tokens, &mut pos, &mut sheet, &mut order),
+        }
+    }
+    sheet
+}
+
+/// Collect every rule in `sheet` whose selector matches `target` (given its
+/// ancestor chain), in increasing cascade precedence (specificity, then
+/// source order), and fold their declarations onto `decls` — later (higher
+/// precedence) always overwrites earlier per-field. Used by the cascade to
+/// apply the UA sheet and then each author sheet in turn.
+pub(crate) fn collect_matching(sheet: &Stylesheet, ancestors: &[ElementInfo], target: &ElementInfo, decls: &mut Declarations) {
+    let mut matched: Vec<&StyleRule> = sheet.rules.iter().filter(|r| r.selector.matches(ancestors, target)).collect();
+    matched.sort_by(|a, b| a.selector.specificity().cmp(&b.selector.specificity()).then(a.order.cmp(&b.order)));
+    for r in matched {
+        decls.overlay(&r.declarations);
+    }
+}
+
+fn skip_ws(tokens: &[Token], pos: &mut usize) {
+    while *pos < tokens.len() && tokens[*pos] == Token::Whitespace {
+        *pos += 1;
+    }
+}
+
+/// Consume one at-rule's body after its keyword: either up to and including
+/// a top-level `;`, or — if a `{` appears first — a balanced-brace block
+/// (needed for `@media { ... }`, whose block contains whole nested rules).
+/// Never panics; if neither terminator appears, consumes to EOF.
+fn skip_at_rule_body(tokens: &[Token], pos: &mut usize, is_media: bool, sheet: &mut Stylesheet) {
+    let len = tokens.len();
+    while *pos < len {
+        match &tokens[*pos] {
+            Token::Semicolon => {
+                *pos += 1;
+                bump_at_rule_counter(sheet, is_media);
+                return;
+            }
+            Token::LBrace => {
+                *pos += 1;
+                let mut depth = 1i32;
+                while *pos < len && depth > 0 {
+                    match &tokens[*pos] {
+                        Token::LBrace => depth += 1,
+                        Token::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    *pos += 1;
+                }
+                bump_at_rule_counter(sheet, is_media);
+                return;
+            }
+            _ => *pos += 1,
+        }
+    }
+    // Ran off the end without a terminator — still counts; nothing left to skip.
+    bump_at_rule_counter(sheet, is_media);
+}
+
+fn bump_at_rule_counter(sheet: &mut Stylesheet, is_media: bool) {
+    if is_media {
+        sheet.media_at_rules += 1;
+    } else {
+        sheet.ignored_at_rules += 1;
+    }
+}
+
+/// Parse one rule: a selector list (comma-separated), then a `{ ... }`
+/// declaration block. If no `{` is reachable before a boundary that can't be
+/// part of a selector (`}`, `;`, or EOF), the whole prelude is a bad rule —
+/// recover by skipping to the next `}` per brief §10.
+fn parse_rule(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet, order: &mut u32) {
+    let len = tokens.len();
+    let selectors = parse_selector_list(tokens, pos);
+    skip_ws(tokens, pos);
+
+    if *pos >= len || tokens[*pos] != Token::LBrace {
+        while *pos < len && tokens[*pos] != Token::RBrace {
+            *pos += 1;
+        }
+        if *pos < len {
+            *pos += 1; // consume the recovering '}'
+        }
+        return;
+    }
+
+    *pos += 1; // consume '{'
+    let decls = parse_declaration_block(tokens, pos, sheet);
+
+    let this_order = *order;
+    *order += 1;
+    for sel in selectors {
+        sheet.rules.push(StyleRule {
+            selector: sel,
+            order: this_order,
+            declarations: decls.clone(),
+        });
+    }
+}
+
+fn parse_selector_list(tokens: &[Token], pos: &mut usize) -> Vec<Selector> {
+    let mut selectors = vec![parse_selector(tokens, pos)];
+    loop {
+        skip_ws(tokens, pos);
+        if *pos < tokens.len() && tokens[*pos] == Token::Comma {
+            *pos += 1;
+            skip_ws(tokens, pos);
+            selectors.push(parse_selector(tokens, pos));
+        } else {
+            break;
+        }
+    }
+    selectors
+}
+
+/// Parse one selector (up to `{`/`}`/`;`/`,`/EOF). Constructs outside brief
+/// §4's scope (child/sibling combinators, attribute selectors, pseudo-
+/// elements, unknown pseudo-classes, …) mark the selector `supported: false`
+/// but never abort the parse — the surrounding rule's declarations still get
+/// counted correctly, the selector just never matches (charter C2 applied to
+/// selectors, not just declarations).
+#[allow(unused_assignments)] // `flush!()`'s reset-to-false is always immediately followed by a fresh true
+fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
+    let len = tokens.len();
+    let mut compounds: Vec<Compound> = Vec::new();
+    let mut supported = true;
+    let mut cur = Compound::default();
+    let mut cur_has_content = false;
+    let mut pending_descendant = false;
+
+    macro_rules! flush {
+        () => {
+            if cur_has_content {
+                compounds.push(std::mem::take(&mut cur));
+                cur_has_content = false;
+            }
+        };
+    }
+
+    while *pos < len {
+        match &tokens[*pos] {
+            Token::Whitespace => {
+                if cur_has_content {
+                    pending_descendant = true;
+                }
+                *pos += 1;
+            }
+            Token::LBrace | Token::RBrace | Token::Semicolon | Token::Comma => break,
+            Token::Ident(name) => {
+                if pending_descendant {
+                    flush!();
+                    pending_descendant = false;
+                }
+                cur.element = Some(name.to_ascii_lowercase());
+                cur_has_content = true;
+                *pos += 1;
+            }
+            Token::Star => {
+                if pending_descendant {
+                    flush!();
+                    pending_descendant = false;
+                }
+                cur.element = None;
+                cur_has_content = true;
+                *pos += 1;
+            }
+            Token::Dot => {
+                *pos += 1;
+                if let Some(Token::Ident(name)) = tokens.get(*pos) {
+                    if pending_descendant {
+                        flush!();
+                        pending_descendant = false;
+                    }
+                    cur.classes.push(name.to_ascii_lowercase());
+                    cur_has_content = true;
+                    *pos += 1;
+                } else {
+                    supported = false;
+                }
+            }
+            Token::Hash(id) => {
+                if pending_descendant {
+                    flush!();
+                    pending_descendant = false;
+                }
+                cur.id = Some(id.to_ascii_lowercase());
+                cur_has_content = true;
+                *pos += 1;
+            }
+            Token::Colon => {
+                *pos += 1;
+                if tokens.get(*pos) == Some(&Token::Colon) {
+                    *pos += 1; // pseudo-element `::x` — unsupported
+                    supported = false;
+                }
+                if let Some(Token::Ident(name)) = tokens.get(*pos) {
+                    if pending_descendant {
+                        flush!();
+                        pending_descendant = false;
+                    }
+                    match name.to_ascii_lowercase().as_str() {
+                        "link" => cur.pseudo.push(Pseudo::Link),
+                        "visited" => cur.pseudo.push(Pseudo::Visited),
+                        _ => supported = false,
+                    }
+                    cur_has_content = true;
+                    *pos += 1;
+                    if tokens.get(*pos) == Some(&Token::LParen) {
+                        // Functional pseudo-class (`:nth-child(...)`, etc.) —
+                        // unsupported; skip its balanced parens.
+                        supported = false;
+                        *pos += 1;
+                        let mut depth = 1i32;
+                        while *pos < len && depth > 0 {
+                            match &tokens[*pos] {
+                                Token::LParen => depth += 1,
+                                Token::RParen => depth -= 1,
+                                _ => {}
+                            }
+                            *pos += 1;
+                        }
+                    }
+                } else {
+                    supported = false;
+                }
+            }
+            Token::Function(_) => {
+                supported = false;
+                *pos += 1;
+                let mut depth = 1i32;
+                while *pos < len && depth > 0 {
+                    match &tokens[*pos] {
+                        Token::LParen | Token::Function(_) => depth += 1,
+                        Token::RParen => depth -= 1,
+                        _ => {}
+                    }
+                    *pos += 1;
+                }
+            }
+            Token::Delim('>') | Token::Delim('+') | Token::Delim('~') => {
+                flush!();
+                supported = false;
+                pending_descendant = false;
+                *pos += 1;
+            }
+            Token::Delim('[') => {
+                supported = false;
+                *pos += 1;
+                while *pos < len && tokens[*pos] != Token::Delim(']') {
+                    *pos += 1;
+                }
+                if *pos < len {
+                    *pos += 1;
+                }
+                cur_has_content = true;
+            }
+            _ => {
+                supported = false;
+                *pos += 1;
+            }
+        }
+    }
+    flush!();
+    let has_compounds = !compounds.is_empty();
+    Selector {
+        compounds,
+        supported: supported && has_compounds,
+    }
+}
+
+/// Parse a `{ ... }` declaration block; `*pos` starts just past the `{` and
+/// ends just past the matching `}` (or at EOF, tolerated). Each declaration
+/// that fails to parse (bad property/colon/value) or names a property
+/// outside the curated set counts against `sheet.ignored_declarations` and
+/// recovers by skipping to the next `;`.
+fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet) -> Declarations {
+    let mut decls = Declarations::default();
+    let len = tokens.len();
+    loop {
+        skip_ws(tokens, pos);
+        if *pos >= len {
+            return decls;
+        }
+        match &tokens[*pos] {
+            Token::RBrace => {
+                *pos += 1;
+                return decls;
+            }
+            Token::Semicolon => {
+                *pos += 1;
+            }
+            Token::Ident(name) => {
+                let name = name.to_ascii_lowercase();
+                *pos += 1;
+                skip_ws(tokens, pos);
+                if *pos < len && tokens[*pos] == Token::Colon {
+                    *pos += 1;
+                } else {
+                    sheet.ignored_declarations += 1;
+                    skip_to_decl_boundary(tokens, pos);
+                    continue;
+                }
+                skip_ws(tokens, pos);
+                let value_start = *pos;
+                while *pos < len && tokens[*pos] != Token::Semicolon && tokens[*pos] != Token::RBrace {
+                    *pos += 1;
+                }
+                let value_tokens: Vec<Token> = tokens[value_start..*pos].iter().filter(|t| **t != Token::Whitespace).cloned().collect();
+                if *pos < len && tokens[*pos] == Token::Semicolon {
+                    *pos += 1;
+                }
+                if !value::apply_property(&name, &value_tokens, &mut decls) {
+                    sheet.ignored_declarations += 1;
+                }
+            }
+            _ => {
+                sheet.ignored_declarations += 1;
+                skip_to_decl_boundary(tokens, pos);
+            }
+        }
+    }
+}
+
+fn skip_to_decl_boundary(tokens: &[Token], pos: &mut usize) {
+    let len = tokens.len();
+    while *pos < len && tokens[*pos] != Token::Semicolon && tokens[*pos] != Token::RBrace {
+        *pos += 1;
+    }
+    if *pos < len && tokens[*pos] == Token::Semicolon {
+        *pos += 1;
+    }
 }
 
 #[cfg(test)]
