@@ -84,3 +84,55 @@ Append-only running log. Newest at the bottom.
   trailing text after a self-closed script is not discarded — rare malformed
   case; note for a later soup-fixture / hardening pass.
 - `ast.rs` frozen/untouched; covenant grep clean; std-only; no unsafe.
+
+## 2026-08-12 — Wave 1 · P3 (fetch: HTTP/1.1 + file:// + cookies + fixture server)
+
+- Orchestrator call for this packet: bespoke std-only HTTP/1.1 over
+  `std::net::TcpStream` instead of `httparse` (the crate-vendoring apparatus
+  isn't wired up yet; unblocking Wave 1 beat waiting) — DECISIONS D8. gzip
+  deferred to a later packet — DECISIONS D11; `Accept-Encoding: identity`
+  only for now, fixture server answers identity.
+- Test-first per brief §10: one red commit (typed `todo!()` skeletons for
+  `url.rs`/`http1.rs`/`file.rs` + the full contract/integration suite +
+  the in-process fixture server), confirmed failing (`cargo +nightly test`:
+  12 cookie-jar panics), then four green implementation commits
+  (url → cookies → file → http1).
+- `src/fetch/url.rs`: bespoke minimal `Url` parsing (scheme/host/port/path/
+  query) + RFC 3986 §5 relative-reference resolution (verified against the
+  RFC's own §5.4 worked examples), total — malformed input degrades to an
+  opaque path rather than panicking.
+- `src/fetch/cookies.rs`: `CookieJar` contract suite — Set-Cookie parsing
+  (Domain/Path/Secure; Expires/Max-Age/HttpOnly/SameSite parsed-and-ignored,
+  DECISIONS D9), RFC 6265 domain-match (positive/negative, incl. subdomain
+  vs host-only) and path-match (segment-boundary, not string-prefix),
+  Secure-only-on-https, `header_for` serialization, Netscape jar
+  `to_netscape`/`from_netscape` round trip. Leading-dot domain convention
+  doubles as the Netscape flag column with no extra struct field
+  (DECISIONS D10).
+- `src/fetch/file.rs`: `file://` → `Response` (200, extension-based
+  content-type); missing file / non-file scheme → `FetchError`, never a
+  panic.
+- `src/fetch/http1.rs`: `Http1Client` (owns the `CookieJar`, since the
+  frozen `Fetch::fetch` signature has no side channel for one). Request
+  formatting (Host/User-Agent/Accept/Accept-Encoding/Connection, POST
+  Content-Type default + Content-Length). Response parsing is TOTAL:
+  status line, case-insensitive/folded headers, Content-Length body,
+  chunked body (trailers consumed), read-until-EOF fallback — every
+  malformed-input path (garbage bytes, truncated headers, oversized
+  Content-Length, bad chunk size) is a `FetchError`, never a panic; a
+  64 MiB response cap bounds memory. Redirect loop follows 301/302/303/
+  307/308 up to 5 hops (`TooManyRedirects` on a 6th), applies the usual
+  method-preservation rules, resolves `Location` via `Url::resolve`, and
+  runs the cookie jar (send + ingest) at every hop, not just the final one.
+  `https://` (or any non-http scheme) is unconditionally
+  `FetchError::UnsupportedScheme` — no TLS, ever.
+- `tests/support/mod.rs`: in-process fixture HTTP server (bind
+  `127.0.0.1:0`, background thread, one thread per connection) serving
+  `fixtures/*`, chunked/content-length/redirect-chain/echo-method/
+  POST-echo/Set-Cookie routes, plus a raw-bytes one-shot listener for
+  malformed-response tests. Tests never touch the external network.
+- `git diff --stat` on `src/fetch/mod.rs` vs the freeze commit shows only
+  three added `pub mod` lines (file/http1/url) — no frozen type or trait
+  signature changed. No new deps: `Cargo.toml`/`Cargo.lock` unchanged.
+- **75 tests green** (`cargo +nightly test`: 41 lib incl. 12 cookie
+  contract tests + 4 file + 17 http1 + 13 url), 0 failed.
