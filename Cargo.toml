@@ -6,6 +6,10 @@ description = "Stele — a finished document-web browser for the 486. No JavaScr
 repository = "https://github.com/tuckermclean/stele-browser"
 publish = false
 
+[lib]
+name = "stele"
+path = "src/lib.rs"
+
 [[bin]]
 name = "stele"
 path = "src/main.rs"

@@ -46,7 +46,24 @@ Append-only running log. Newest at the bottom.
        is off → remove `pre/post-link-objects-fallback`.
     4. GCC musl toolchain ships `libgcc_eh.a`, not LLVM `libunwind` → alias it
        as `libunwind.a`; panic=abort never unwinds (D7).
-- NEXT (after PR #3 merges): the INTERFACE FREEZE packet (orchestrator-authored,
-  serial) — dom::ast (closed sum type, no script variant), style::ComputedStyle
-  skeleton, Surface trait, fetch::Response, layout node interface — then Wave 1
-  fans out (P1 parser · P2 CSS · P3 fetch · P4 image decoders · P5 text/metrics).
+- **INTERFACE FREEZE authored** (packet/interface-freeze): the small, typed,
+  compiling core Wave 1 builds against. lib+bin split; crate-level modules:
+    - `dom::ast` — closed `Node` sum type (Element | Text), arena DOM, AttrMap,
+      ElementName. Covenant clean (the A6 grep finds no forbidden substring;
+      element semantics live in the UA sheet, not the AST). `dom::parser` stub.
+    - `style::ComputedStyle` — the full curated §4 property set with CSS initial
+      defaults; `style::{parser,cascade}` stubs (Stylesheet shape frozen).
+    - `surface::Surface` trait + `Color` primitive + `MemSurface` (real pixel
+      ops for goldens; blit/text stubbed for P9/P5).
+    - `fetch::{Request,Response,Url,Method,Fetch}` + `cookies::CookieJar` skeleton.
+    - `img::{Decode,RgbaImage,Frame}`; `text::Metrics` trait.
+    - `layout::{LayoutNode,BoxContent,Fragment,FragmentKind}` + geometry.
+  Host `cargo check --all-targets` clean; 5 unit tests pass (arena, attrs,
+  initial style values, mem-surface fill/bounds).
+- PROCESS CORRECTION (operator note): Wave 1 (and future implementation) is to
+  be executed by IMPLEMENTER + REVIEWER subagents on a cheaper model, with the
+  orchestrator (Opus) planning/dispatching/merging only — matching brief §10's
+  topology and keeping cost sane. Subagents default to Sonnet.
+- NEXT (after this + #3 merge): Wave 1 fans out to implementer subagents —
+  P1 parser · P2 CSS · P3 fetch · P4 image decoders · P5 text/metrics — each
+  test-first, reviewer-checked, one packet/PR.
