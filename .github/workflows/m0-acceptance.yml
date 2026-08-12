@@ -39,6 +39,15 @@ jobs:
       - name: Build i486 release binary (canonical pipeline)
         run: |
           set -euxo pipefail
+          # The cross musl toolchain is GCC-based: it ships libgcc_eh.a (the
+          # _Unwind_* API), not LLVM's libunwind. std's musl unwind crate asks
+          # the linker for -lunwind; since panic=abort never unwinds, alias
+          # libgcc_eh.a as libunwind.a so the reference resolves. (DECISIONS D7.)
+          GCC_EH="$(${CROSS_COMPILE}gcc -print-file-name=libgcc_eh.a)"
+          echo "libgcc_eh.a -> $GCC_EH"
+          mkdir -p /tmp/unwindshim
+          ln -sf "$GCC_EH" /tmp/unwindshim/libunwind.a
+          export RUSTFLAGS="-L /tmp/unwindshim ${RUSTFLAGS:-}"
           cargo build --release \
             --target targets/i486-monolith-linux-musl.json \
             -Zbuild-std=std,panic_abort \

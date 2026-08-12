@@ -49,6 +49,17 @@ ubuntu host where `qemu-user` is one `apt-get` away. Revisit-trigger: a reason
 to execute inside the image (e.g. testing image-provided runtime bits) — then
 add a static qemu-i386 to the image or the job.
 
+### D7 — libunwind shim: alias libgcc_eh.a as libunwind.a
+std's musl `unwind` crate links `-lunwind` (LLVM's libunwind), but the image's
+cross toolchain is GCC-based and ships `libgcc_eh.a` (same `_Unwind_*` API)
+instead. With self-contained linking off there is no bundled libunwind to fall
+back on. Options: (a) build LLVM libunwind in-tree (needs llvm sources absent
+from rust-src); (b) provide libunwind. **Choice: (b)** — symlink the cross
+gcc's `libgcc_eh.a` (found via `-print-file-name`) as `libunwind.a` on the link
+search path. Since `panic=abort` never unwinds, the `_Unwind_*` symbols resolve
+but are never called. Revisit-trigger: unwinding is ever enabled, or the image
+starts shipping a real libunwind — then link that instead.
+
 ### D6 — cargo-auditable / cargo-audit deferred to M6
 Both are absent from the image (substrate run). They serve A6/C11 (attested
 provenance, audit-clean deps), which the brief scopes to M6, not M0.
