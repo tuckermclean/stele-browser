@@ -169,3 +169,46 @@ Append-only running log. Newest at the bottom.
   reconciled by the orchestrator.
 - Process note: implementers no longer edit JOURNAL/DECISIONS (orchestrator owns
   them) to avoid cross-packet append conflicts.
+
+## 2026-08-13 — Wave 1 · P4 (image decoders: PNG/JPEG/GIF + dispatcher)
+
+- P4 `img::{png,jpeg,gif}` behind the frozen `Decode` trait, all output
+  normalized to straight-alpha RGBA8: PNG (all color types + bit depths →
+  RGBA8 via EXPAND|STRIP_16|ALPHA, palette+tRNS), JPEG baseline **and**
+  progressive (jpeg-decoder, rayon off), GIF incl. **animated** — full
+  logical-screen compositing with disposal methods (Keep/Background→
+  transparent/Previous), sub-rect offsets clamped to canvas, per-frame
+  delay (centiseconds ×10 → ms). Dispatcher: `sniff_format` (magic bytes) +
+  `decode_bytes` (Content-Type hint, falling back to sniff when the hint is
+  absent or wrong — servers lie). Deps unchanged (gif/jpeg-decoder/png
+  already landed in PR #9); `Cargo.toml`/`Cargo.lock` diff empty.
+- Totality on hostile bytes is the whole game (attacker-controlled input,
+  `panic=abort` target): every decoder + the dispatcher return
+  `DecodeError`, never panic — no `unwrap`/`expect`/OOB in decoder code
+  (the one `expect` is on a compile-time constant). A shared `check_pixel_cap`
+  (64M px, `MAX_DECODE_PIXELS`) rejects decompression-bomb dimensions before
+  any large allocation.
+- Loop: implementer (207 green, test-first `0b77705` red → `7ea05ec` green) →
+  reviewer (Spec ✅; 1 **Critical** + 2 Important, the Critical empirically
+  proven) → fix round 1 (`d6344ea`) → scoped re-review (orchestrator: fixes
+  correct, frozen `img/mod.rs` 1–49 byte-identical, no new deps) →
+  **212 tests green** (5 new regression tests).
+    - **Critical (caught before main):** JPEG enforced the pixel cap *after*
+      `decoder.decode()`, so a tiny crafted **progressive** JPEG with a huge
+      SOF (e.g. 65535×65535) drove a multi-GB coefficient-buffer allocation —
+      an uncatchable OOM abort on the 486 — before the cap ran. Fix: parse
+      the frame header only (`read_info` → `info`), `check_pixel_cap` against
+      the declared dims, *then* `decode()`. PNG/GIF already ordered correctly.
+    - **Important:** the `gif` crate's default 50MB/frame memory limit
+      (~12.5M px) is stricter than our advertised 64M-px cap and would
+      silently reject legitimate images — now `set_memory_limit` is pinned to
+      `MAX_DECODE_PIXELS*4` so our `check_pixel_cap` is the one gate.
+    - **Important:** added oversized-dimension `Unsupported` regression tests
+      for all three decoders + a real CMYK JPEG fixture exercising the
+      `CMYK32 → Unsupported` arm.
+- Deferred (ledger): APNG not decoded (only GIF animation is required); JPEG
+  16-bit `L16` `Unsupported` arm left untested (no practical encoder for that
+  lossless-only depth) — noted, not a flaky fixture. See DECISIONS D13.
+- **Wave 1 COMPLETE** with P4: parser (P1) · CSS (P2) · fetch (P3) · images
+  (P4) · text metrics (P5) all merged/green. Next: Wave 2 — the layout engine
+  (block flow + inline) and the tty backend toward M2.
