@@ -311,7 +311,23 @@ mod tests {
         // DEPTH_CAP.
         let root = build_box_tree(&d, &styles);
         assert!(root.is_some());
-        let total = count_nodes(&root.unwrap());
+        let root = root.unwrap();
+
+        // M1 (reviewer follow-up): don't just assert "it returned" — that
+        // alone wouldn't catch a regression that silently dropped the depth
+        // cap but happened not to crash at this particular depth/stack size.
+        // Positively confirm the cap actually fired: the "leaf" text sits
+        // 3000 levels deep, far past DEPTH_CAP, so it must be ABSENT from
+        // the built tree (the over-deep subtree was truncated to an empty
+        // container before ever reaching it) ...
+        assert!(find_text(&root, "leaf").is_none(), "content past DEPTH_CAP should have been dropped, not built");
+        // ... and the total node count must stay bounded near DEPTH_CAP, not
+        // anywhere close to the full 3000-deep chain.
+        let total = count_nodes(&root);
         assert!(total > 0);
+        assert!(
+            total <= DEPTH_CAP + 5,
+            "expected the tree to be truncated near DEPTH_CAP ({DEPTH_CAP}), got {total} nodes — the depth cap may not be firing"
+        );
     }
 }
