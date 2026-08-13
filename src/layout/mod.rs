@@ -12,6 +12,7 @@ use crate::style::ComputedStyle;
 pub mod block;
 pub mod box_tree;
 pub mod inline;
+pub mod table;
 
 /// A width/height pair in layout space (CSS pixels, pre-device-scaling).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
