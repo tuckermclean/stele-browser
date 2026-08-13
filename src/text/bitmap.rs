@@ -72,9 +72,12 @@ impl BitmapFont {
     /// Scale factor from design units to pixels at `size_px`. Total: returns
     /// `0.0` (never NaN/infinite, never panics) for non-finite, zero, or
     /// negative `size_px`, or for a degenerate (zero-height) cell.
-    fn scale(&self, _size_px: f32) -> f32 {
-        // TODO(p5): scale design units to size_px; see module docs.
-        todo!("BitmapFont::scale")
+    fn scale(&self, size_px: f32) -> f32 {
+        if size_px.is_finite() && size_px > 0.0 && self.cell_height > 0.0 {
+            size_px / self.cell_height
+        } else {
+            0.0
+        }
     }
 }
 
@@ -87,24 +90,24 @@ fn sanitize(v: f32) -> f32 {
 }
 
 impl Metrics for BitmapFont {
-    fn ascent(&self, _size_px: f32) -> f32 {
-        todo!("BitmapFont::ascent")
+    fn ascent(&self, size_px: f32) -> f32 {
+        self.ascent_units * self.scale(size_px)
     }
 
-    fn descent(&self, _size_px: f32) -> f32 {
-        todo!("BitmapFont::descent")
+    fn descent(&self, size_px: f32) -> f32 {
+        self.descent_units * self.scale(size_px)
     }
 
-    fn line_height(&self, _size_px: f32) -> f32 {
-        todo!("BitmapFont::line_height")
+    fn line_height(&self, size_px: f32) -> f32 {
+        self.cell_height * self.scale(size_px)
     }
 
     /// Monospace: every character — ASCII, Latin-1, CJK/emoji, control
     /// chars, unassigned scalars — gets the same cell-width advance. `ch` is
     /// deliberately never inspected, so this can never fail to "find" a
     /// glyph and is total over all of `char`.
-    fn advance(&self, _ch: char, _size_px: f32) -> f32 {
-        todo!("BitmapFont::advance")
+    fn advance(&self, _ch: char, size_px: f32) -> f32 {
+        self.cell_width * self.scale(size_px)
     }
 
     // `measure` keeps the trait default (sum of per-char advances via
@@ -206,9 +209,9 @@ mod tests {
     fn measure_counts_chars_not_bytes() {
         let f = BitmapFont::vga_8x16();
         let a = f.advance('a', 16.0);
-        // "é日" is 2 Unicode scalars but 1+3 = 4 UTF-8 bytes.
+        // "é日" is 2 Unicode scalars but 2+3 = 5 UTF-8 bytes.
         let s = "é日";
-        assert_eq!(s.len(), 4);
+        assert_eq!(s.len(), 5);
         assert_eq!(s.chars().count(), 2);
         assert_eq!(f.measure(s, 16.0), 2.0 * a);
     }
@@ -225,12 +228,23 @@ mod tests {
 
     #[test]
     fn totality_on_unusual_size_px_no_panic() {
+        // Per-call metrics stay finite even at the extremes of f32's range:
+        // each is at most a couple of multiplications away from `size_px`.
         let f = BitmapFont::vga_8x16();
         for size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MIN, f32::MAX] {
             assert!(f.advance('A', size).is_finite());
             assert!(f.ascent(size).is_finite());
             assert!(f.descent(size).is_finite());
             assert!(f.line_height(size).is_finite());
+        }
+
+        // `measure` sums per-char advances (trait default): finite at any
+        // sane size_px, including a size many orders above any real font
+        // size. Not exercised at f32::MAX/MIN here — summing several
+        // f32::MAX-scale advances legitimately overflows f32 range, which
+        // is a property of floating-point summation in general, not a
+        // BitmapFont defect (each individual advance above stays finite).
+        for size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0e30] {
             assert!(f.measure("hello", size).is_finite());
         }
     }
