@@ -26,48 +26,75 @@ fn ua_stylesheet() -> &'static Stylesheet {
 ///
 /// Total: never panics on any `dom`/`author_sheets` combination (an empty DOM
 /// yields an empty `Vec`, unmatched nodes simply fall back to CSS initial
-/// values / UA defaults).
+/// values / UA defaults) -- INCLUDING arbitrarily deep nesting. Hostile or
+/// generated markup (quote threads, WYSIWYG exports, nested-table soup) can
+/// nest thousands of elements deep; `visit` below walks the tree with an
+/// explicit heap-allocated stack rather than the call stack, so there is no
+/// depth at which this can overflow (unlike a plain recursive walk, which
+/// reliably SIGABRTs a few thousand levels down -- the recursion-hardening
+/// packet's whole reason for existing). This also keeps cascade fully
+/// CORRECT at any depth: every node, however deep, still gets its real
+/// resolved-and-inherited style, not a capped/degraded approximation.
 pub fn cascade(dom: &Dom, author_sheets: &[Stylesheet]) -> Vec<ComputedStyle> {
     let mut out = vec![ComputedStyle::default(); dom.len()];
     if dom.is_empty() {
         return out;
     }
     let ua = ua_stylesheet();
-    let mut ancestors: Vec<ElementInfo> = Vec::new();
-    visit(dom, dom.root(), ua, author_sheets, None, &mut ancestors, &mut out);
+    visit(dom, dom.root(), ua, author_sheets, &mut out);
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit(
-    dom: &Dom,
-    id: NodeId,
-    ua: &Stylesheet,
-    author: &[Stylesheet],
-    parent: Option<&ComputedStyle>,
-    ancestors: &mut Vec<ElementInfo>,
-    out: &mut [ComputedStyle],
-) {
-    match dom.node(id) {
-        // Character data carries no rules of its own; it takes the parent's
-        // computed style wholesale (the inline engine reads font/color etc.
-        // straight off it).
-        Node::Text(_) => {
-            if let Some(p) = parent {
-                out[id] = p.clone();
-            }
-        }
-        Node::Element(el) => {
-            let info = ElementInfo::from_element(&el.name, &el.attrs);
-            let decls = fold_matching_declarations(ua, author, ancestors, &info);
-            let style = resolve(&decls, parent);
-            out[id] = style.clone();
+/// One pending unit of work in the iterative walk: either compute+store the
+/// style for `id` (with its parent's already-resolved style, `None` at the
+/// root) and descend into its children, or -- once all of a subtree's
+/// children have been pushed -- pop that subtree's `ElementInfo` back off
+/// `ancestors` now that nothing left on the stack still needs it as an
+/// ancestor.
+enum Frame {
+    Enter { id: NodeId, parent: Option<ComputedStyle> },
+    Exit,
+}
 
-            ancestors.push(info);
-            for &child in &el.children {
-                visit(dom, child, ua, author, Some(&style), ancestors, out);
+/// Explicit-stack equivalent of the old recursive `visit`: identical
+/// semantics (same `ancestors` chain visible to each element when its rules
+/// are matched, same parent-style propagation to children, same "text takes
+/// the parent's style wholesale" rule), just driven by a `Vec<Frame>` on the
+/// heap instead of the native call stack, so nesting depth cannot blow it.
+fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &mut [ComputedStyle]) {
+    let mut ancestors: Vec<ElementInfo> = Vec::new();
+    let mut stack: Vec<Frame> = vec![Frame::Enter { id: root, parent: None }];
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Exit => {
+                ancestors.pop();
             }
-            ancestors.pop();
+            Frame::Enter { id, parent } => match dom.node(id) {
+                // Character data carries no rules of its own; it takes the
+                // parent's computed style wholesale (the inline engine reads
+                // font/color etc. straight off it).
+                Node::Text(_) => {
+                    if let Some(p) = &parent {
+                        out[id] = p.clone();
+                    }
+                }
+                Node::Element(el) => {
+                    let info = ElementInfo::from_element(&el.name, &el.attrs);
+                    let decls = fold_matching_declarations(ua, author, &ancestors, &info);
+                    let style = resolve(&decls, parent.as_ref());
+                    out[id] = style.clone();
+
+                    ancestors.push(info);
+                    stack.push(Frame::Exit);
+                    // Push in reverse so children are popped (and thus
+                    // visited) in source order, matching the old recursive
+                    // walk's iteration order exactly.
+                    for &child in el.children.iter().rev() {
+                        stack.push(Frame::Enter { id: child, parent: Some(style.clone()) });
+                    }
+                }
+            },
         }
     }
 }
