@@ -30,7 +30,9 @@
 //!
 //! Still (non-animated) GIFs are just the one-frame case of the same loop.
 
-use super::{check_pixel_cap, Decode, DecodeError, Frame, RgbaImage};
+use std::num::NonZeroU64;
+
+use super::{check_pixel_cap, Decode, DecodeError, Frame, RgbaImage, MAX_DECODE_PIXELS};
 
 const GIF_MAGIC_87A: &[u8] = b"GIF87a";
 const GIF_MAGIC_89A: &[u8] = b"GIF89a";
@@ -48,6 +50,17 @@ impl Decode for GifDecoder {
 
         let mut options = gif::DecodeOptions::new();
         options.set_color_output(gif::ColorOutput::RGBA);
+        // The `gif` crate defaults to a 50MB-per-frame memory limit (~12.5M
+        // px at 4 bytes/px), stricter than and independent of our own
+        // `check_pixel_cap` (64M px). Left at its default, a legitimate
+        // frame under our advertised cap could still be silently rejected
+        // (as `Malformed`, from the crate's own "image is too large" error)
+        // before `check_pixel_cap` ever runs. Raise it to match our budget
+        // so `check_pixel_cap` — run below, right after `read_info`, before
+        // any frame is decoded — is the one authoritative gate.
+        let frame_byte_cap = NonZeroU64::new(MAX_DECODE_PIXELS * 4)
+            .expect("MAX_DECODE_PIXELS * 4 is a nonzero constant");
+        options.set_memory_limit(gif::MemoryLimit::Bytes(frame_byte_cap));
         let mut decoder = options.read_info(bytes).map_err(map_gif_error)?;
 
         let (canvas_width, canvas_height) =

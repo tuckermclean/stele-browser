@@ -34,13 +34,27 @@ impl Decode for JpegDecoder {
         }
 
         let mut decoder = jpeg_decoder::Decoder::new(bytes);
-        let pixels = decoder.decode().map_err(map_jpeg_error)?;
+
+        // Read ONLY the frame header (SOF) first — this parses width/height/
+        // component count but, per the crate's `decode_internal`, returns
+        // before allocating any pixel/coefficient buffers (those are sized
+        // off the untrusted width*height and only allocated once scan data
+        // is processed). Check our pixel cap against the *declared*
+        // dimensions before calling `decode()`, which is what actually
+        // allocates those buffers — otherwise a tiny crafted file (esp.
+        // progressive, which allocates a full coefficient buffer up front)
+        // claiming e.g. 65535x65535 could drive a multi-GB allocation before
+        // we ever got a chance to reject it, an uncatchable OOM abort on our
+        // `panic = "abort"` target.
+        decoder.read_info().map_err(map_jpeg_error)?;
         let info = decoder.info().ok_or_else(|| {
             DecodeError::Malformed("JPEG decoded with no frame metadata available".to_string())
         })?;
 
         let (width, height) = (u32::from(info.width), u32::from(info.height));
         check_pixel_cap(width, height)?;
+
+        let pixels = decoder.decode().map_err(map_jpeg_error)?;
 
         let rgba = match info.pixel_format {
             PixelFormat::RGB24 => {
@@ -56,6 +70,11 @@ impl Decode for JpegDecoder {
                 out
             }
             PixelFormat::L8 => {
+                if pixels.len() < (width as usize) * (height as usize) {
+                    return Err(DecodeError::Malformed(
+                        "JPEG L8 buffer shorter than width*height".to_string(),
+                    ));
+                }
                 let mut out = Vec::with_capacity(pixels.len() * 4);
                 for &gray in &pixels {
                     out.extend_from_slice(&[gray, gray, gray, 255]);

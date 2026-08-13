@@ -179,3 +179,55 @@ fn garbage_after_valid_magic_never_panics() {
     let result = GifDecoder.decode(&garbage);
     assert!(result.is_err());
 }
+
+#[test]
+fn oversized_canvas_is_rejected_as_unsupported_before_any_frame_is_read() {
+    // 9000x9000 = 81,000,000 px > the 64,000,000px decode cap. The Logical
+    // Screen Descriptor alone declares this; the actual frame is a trivial
+    // 1x1 pixel, so this stays a tiny fixture. Must be rejected right after
+    // `read_info` (header-only), never attempting to allocate a full
+    // 9000x9000 RGBA canvas.
+    let mut bytes = Vec::new();
+    {
+        let mut encoder =
+            gif::Encoder::new(&mut bytes, 9000, 9000, &[0, 0, 0]).expect("create GIF encoder");
+        let frame = gif::Frame::from_palette_pixels(1, 1, vec![0u8], vec![1, 2, 3], None);
+        encoder.write_frame(&frame).expect("write frame");
+    }
+    let result = GifDecoder.decode(&bytes);
+    assert!(
+        matches!(result, Err(DecodeError::Unsupported(_))),
+        "expected Unsupported for an over-cap canvas, got {result:?}"
+    );
+}
+
+#[test]
+fn legitimate_large_image_under_our_cap_is_not_rejected_by_gifs_stricter_default_limit() {
+    // Regression: the `gif` crate defaults to a 50MB-per-frame memory limit
+    // (~12.5M px at 4 bytes/px RGBA output), independent of and stricter
+    // than our own 64M px `check_pixel_cap`. Before explicitly raising the
+    // crate's limit to match our budget, a legitimate image comfortably
+    // under our advertised cap (13.2M px here) was silently rejected by the
+    // crate's own default instead. This canvas is fully covered by one
+    // opaque frame, so the encoded GIF still compresses to a tiny fixture.
+    let width: u16 = 4000;
+    let height: u16 = 3300; // 13,200,000 px: > gif's default ~12.5M px limit, < our 64M px cap.
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut bytes, width, height, &[0, 0, 0])
+            .expect("create GIF encoder");
+        let pixels = vec![0u8; (width as usize) * (height as usize)];
+        let frame =
+            gif::Frame::from_palette_pixels(width, height, pixels, vec![200, 100, 50], None);
+        encoder.write_frame(&frame).expect("write frame");
+    }
+
+    let frames = GifDecoder
+        .decode(&bytes)
+        .expect("an image under our own pixel cap must not be rejected");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].image.width, u32::from(width));
+    assert_eq!(frames[0].image.height, u32::from(height));
+    // Spot-check a pixel rather than the full 52MB buffer.
+    assert_eq!(&frames[0].image.pixels[0..4], &[200, 100, 50, 255]);
+}

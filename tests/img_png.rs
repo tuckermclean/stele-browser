@@ -211,3 +211,65 @@ fn garbage_bytes_never_panic() {
     let result = PngDecoder.decode(&garbage);
     assert!(result.is_err());
 }
+
+/// Minimal CRC32 (the PNG chunk checksum), so oversized-dimension fixtures
+/// below can be hand-built without allocating an actual multi-hundred-MB
+/// pixel buffer (which `png::Encoder::write_image_data` would require).
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+fn write_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+    bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let mut crc_input = Vec::with_capacity(4 + data.len());
+    crc_input.extend_from_slice(chunk_type);
+    crc_input.extend_from_slice(data);
+    bytes.extend_from_slice(chunk_type);
+    bytes.extend_from_slice(data);
+    bytes.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+}
+
+/// A minimal-but-valid PNG stream: signature + IHDR(width, height, RGBA8) +
+/// an empty IDAT (enough for `Reader::read_info` to locate the image-data
+/// start — it does not need to actually decompress anything) + IEND. Lets
+/// the oversized-dimension test below exercise the pixel cap without ever
+/// allocating a real `width*height*4`-sized buffer to encode from.
+fn minimal_png_header_only(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.push(8); // bit depth
+    ihdr.push(6); // color type: RGBA
+    ihdr.push(0); // compression method
+    ihdr.push(0); // filter method
+    ihdr.push(0); // interlace method
+    write_chunk(&mut bytes, b"IHDR", &ihdr);
+    write_chunk(&mut bytes, b"IDAT", &[]);
+    write_chunk(&mut bytes, b"IEND", &[]);
+    bytes
+}
+
+#[test]
+fn oversized_dimensions_are_rejected_as_unsupported_before_pixel_buffer_allocation() {
+    // 9000x9000 = 81,000,000 px > the 64,000,000px decode cap. This must be
+    // rejected right after the (cheap) header is parsed, never attempting to
+    // allocate the ~324MB RGBA8 buffer those dimensions imply.
+    let bytes = minimal_png_header_only(9000, 9000);
+    let result = PngDecoder.decode(&bytes);
+    assert!(
+        matches!(result, Err(DecodeError::Unsupported(_))),
+        "expected Unsupported for an over-cap image, got {result:?}"
+    );
+}
