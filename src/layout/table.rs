@@ -28,18 +28,28 @@
 //! - **Grid sizing cap:** `spec.columns`/`spec.rows` are clamped to
 //!   [`MAX_GRID_DIM`] *before* any `Vec` is sized by them, so a hostile spec
 //!   (e.g. `columns: usize::MAX`) can't force a huge/aborting allocation.
-//!   Real HTML tables never approach this bound.
+//!   The grid *area* is further clamped to [`MAX_GRID_CELLS`] (reducing
+//!   `rows` if needed) so the occupancy bitset placement uses (see next
+//!   bullet) stays a bounded allocation too. Real HTML tables never approach
+//!   either bound.
 //! - **Placement / overlap:** cells carry explicit `col`/`row` (the caller —
 //!   eventually the box-tree walk — is responsible for auto-flow placement
-//!   honoring previous rows' `rowspan`s). This solver does not build a full
-//!   `rows × columns` occupancy grid (that risks an O(columns × rows)
-//!   allocation from a hostile spec even after the dimension cap); instead it
-//!   tracks the rectangles of already-*accepted* cells and skips (does not
-//!   place) any later cell whose span rectangle intersects one already
-//!   accepted. A skipped cell contributes nothing to column/row sizing and
-//!   gets a zero [`Rect`] (`Rect::default()`) in the output — "clamp/skip
-//!   rather than panic" per the packet brief. Cells are otherwise processed
-//!   in input order, so the earliest cell claiming a slot wins ties.
+//!   honoring previous rows' `rowspan`s). Placement uses a `Vec<bool>`
+//!   occupied-slot bitset sized to the (capped) grid area rather than an
+//!   O(n²) scan against every previously-accepted cell: a hostile spec with
+//!   a huge `cells.len()` (nothing caps that field directly) must not be
+//!   able to hang the process. Beyond the bitset, a shared `placement_budget`
+//!   (initialized to the grid area) is decremented once per occupied-slot
+//!   *read* across the whole placement pass; once it hits zero, all
+//!   remaining/in-progress cells are treated as unplaced. This bounds total
+//!   placement work to O(grid area) — a small constant — regardless of
+//!   `cells.len()` or how an adversary chooses cell spans/origins to
+//!   maximize wasted scan-before-reject work. A cell that can't be placed
+//!   (out of range, overlapping, or the budget ran out) contributes nothing
+//!   to column/row sizing and gets a zero [`Rect`] (`Rect::default()`) in
+//!   the output — "clamp/skip rather than panic" per the packet brief.
+//!   Cells are otherwise processed in input order, so the earliest cell
+//!   claiming a slot wins ties.
 //! - **Out-of-range cells:** a cell whose `col >= columns` or `row >= rows`
 //!   (after the dimension cap) is skipped the same way (not placed; zero
 //!   `Rect` in the output). `colspan`/`rowspan` of `0` is treated as `1` (a
@@ -77,6 +87,15 @@
 //!   `border_spacing_y`) are clamped: NaN or infinite becomes `0.0`, negative
 //!   becomes `0.0`. If a cell's sanitized `max_content < min_content` (a
 //!   malformed cell spec), `max_content` is raised to equal `min_content`.
+//! - **Output scrub:** inputs are sanitized, but the arithmetic in between
+//!   (summing many columns/spans, dividing by a weight sum) can still
+//!   overflow to `inf` or combine to `NaN` for sufficiently extreme
+//!   (near-`f32::MAX`) inputs — not reachable from real measured content, but
+//!   this module's whole premise is totality. As a final step every output
+//!   float (`col_widths`, `row_heights`, and each `Rect`'s `x`/`y`/`w`/`h`)
+//!   is passed back through the same finite-non-negative clamp as the
+//!   inputs, so the "no NaN/inf ever leaks out" claim above is airtight, not
+//!   just true for the cases this module happens to reason through.
 
 use crate::layout::{Point, Rect, Size};
 
@@ -121,12 +140,21 @@ pub struct TableLayout {
     pub cell_rects: Vec<Rect>,
 }
 
-/// Hard cap on the grid dimensions this solver will size arrays to,
+/// Hard cap on each grid dimension this solver will size arrays to,
 /// independent of what a (possibly hostile) `TableSpec` declares. Applied
 /// *before* any `Vec` is allocated with `columns`/`rows` as its length, so a
 /// spec claiming e.g. `columns: usize::MAX` cannot force an aborting
 /// allocation. Far beyond any real HTML table.
 const MAX_GRID_DIM: usize = 4096;
+
+/// Hard cap on the grid *area* (`columns * rows`) this solver will size the
+/// placement occupancy bitset to — applied on top of [`MAX_GRID_DIM`], since
+/// two dimensions each near that per-dimension cap could otherwise multiply
+/// to a large allocation (4096 * 4096 ≈ 16M bools). 512 × 512 (or any
+/// equivalent split), far beyond any real HTML table, keeps the bitset (and
+/// the placement work it bounds, see the module doc's "Placement / overlap"
+/// scope call) a small, fixed-size cost.
+const MAX_GRID_CELLS: usize = 262_144;
 
 /// Clamp a layout-space scalar to finite and non-negative: NaN/±infinity and
 /// negative values all become `0.0`. Used for every numeric input this
@@ -157,32 +185,59 @@ struct Placed {
 /// Total: never panics on any `TableSpec`, however malformed.
 pub fn solve_table(spec: &TableSpec) -> TableLayout {
     let columns = spec.columns.min(MAX_GRID_DIM);
-    let rows = spec.rows.min(MAX_GRID_DIM);
+    // Clamp the grid *area* too (not just each dimension) so the occupancy
+    // bitset below is a bounded allocation even when both dimensions are
+    // independently near MAX_GRID_DIM.
+    let rows = if columns > 0 { spec.rows.min(MAX_GRID_DIM).min(MAX_GRID_CELLS / columns) } else { spec.rows.min(MAX_GRID_DIM) };
     let spacing_x = sanitize_nonneg(spec.border_spacing_x);
     let spacing_y = sanitize_nonneg(spec.border_spacing_y);
     let available_width = sanitize_nonneg(spec.available_width);
 
     // --- Grid placement: sanitize, clamp spans, skip out-of-range/overlap ---
     let mut placed: Vec<Option<Placed>> = Vec::with_capacity(spec.cells.len());
-    // Rectangles (col, row, colspan, rowspan) of already-accepted cells,
-    // checked against each new cell to skip overlaps (see module docs: no
-    // full occupancy grid, to bound memory independent of grid size).
-    let mut accepted: Vec<(usize, usize, usize, usize)> = Vec::new();
+    // Occupied-slot bitset (bounded to `columns * rows <= MAX_GRID_CELLS`)
+    // replaces an O(n²) scan against every previously-accepted cell — see
+    // the module doc's "Placement / overlap" scope call. `placement_budget`
+    // caps the total number of slot *reads* performed across the whole
+    // placement pass (not just per cell), so total placement work is
+    // O(grid area) regardless of `cells.len()` or adversarial span choices.
+    let grid_cells = columns * rows;
+    let mut occupied = vec![false; grid_cells];
+    let mut placement_budget = grid_cells;
 
     for c in &spec.cells {
-        if columns == 0 || rows == 0 || c.col >= columns || c.row >= rows {
+        if columns == 0 || rows == 0 || c.col >= columns || c.row >= rows || placement_budget == 0 {
             placed.push(None);
             continue;
         }
         let colspan = c.colspan.max(1).min(columns - c.col);
         let rowspan = c.rowspan.max(1).min(rows - c.row);
 
-        let overlaps = accepted.iter().any(|&(ac, ar, acs, ars)| {
-            c.col < ac + acs && ac < c.col + colspan && c.row < ar + ars && ar < c.row + rowspan
-        });
+        let mut overlaps = false;
+        'scan: for r in c.row..c.row + rowspan {
+            for cc in c.col..c.col + colspan {
+                if placement_budget == 0 {
+                    // Budget exhausted mid-scan: can't confirm this cell is
+                    // conflict-free, so treat it conservatively as unplaced
+                    // rather than risk placing over an as-yet-unchecked slot.
+                    overlaps = true;
+                    break 'scan;
+                }
+                placement_budget -= 1;
+                if occupied[r * columns + cc] {
+                    overlaps = true;
+                    break 'scan;
+                }
+            }
+        }
         if overlaps {
             placed.push(None);
             continue;
+        }
+        for r in c.row..c.row + rowspan {
+            for cc in c.col..c.col + colspan {
+                occupied[r * columns + cc] = true;
+            }
         }
 
         let min_content = sanitize_nonneg(c.min_content);
@@ -192,7 +247,6 @@ pub fn solve_table(spec: &TableSpec) -> TableLayout {
         }
         let intrinsic_height = sanitize_nonneg(c.intrinsic_height);
 
-        accepted.push((c.col, c.row, colspan, rowspan));
         placed.push(Some(Placed { col: c.col, row: c.row, colspan, rowspan, min_content, max_content, intrinsic_height }));
     }
 
@@ -323,6 +377,21 @@ pub fn solve_table(spec: &TableSpec) -> TableLayout {
             }
         }
     }
+
+    // --- Output scrub: force every output float finite & non-negative ---
+    // Inputs are sanitized, but summation/division on extreme (near
+    // f32::MAX) sanitized values can still overflow to inf or combine to
+    // NaN (module doc's "Output scrub" scope call). This is the final
+    // totality backstop, independent of whatever arithmetic happened above.
+    let col_widths: Vec<f32> = col_widths.into_iter().map(sanitize_nonneg).collect();
+    let row_heights: Vec<f32> = row_heights.into_iter().map(sanitize_nonneg).collect();
+    let cell_rects: Vec<Rect> = cell_rects
+        .into_iter()
+        .map(|r| Rect {
+            origin: Point { x: sanitize_nonneg(r.origin.x), y: sanitize_nonneg(r.origin.y) },
+            size: Size { w: sanitize_nonneg(r.size.w), h: sanitize_nonneg(r.size.h) },
+        })
+        .collect();
 
     TableLayout { col_widths, row_heights, cell_rects }
 }
@@ -661,5 +730,162 @@ mod tests {
         assert_eq!(out.col_widths, vec![0.0, 0.0]);
         assert_eq!(out.row_heights, vec![0.0, 0.0]);
         assert!(out.cell_rects.is_empty());
+    }
+
+    /// A hostile spec with a huge `cells.len()` (nothing caps that field
+    /// directly — only `columns`/`rows` are dimension-capped) must not hang
+    /// the process: placement is bounded to O(grid area) regardless of how
+    /// many cells are offered (see `placement_budget` in `solve_table`).
+    /// This is a correctness + promptness regression test for the O(n²)
+    /// rectangle-scan DoS the coordinator flagged: 100_000 single-slot cells
+    /// used to mean 100_000 * accepted.len() rectangle-intersection checks.
+    #[test]
+    fn huge_cell_count_places_promptly_and_stays_1to1() {
+        const N: usize = 100_000;
+        // A 10-column table; 10 * (N/10 + 1) rows comfortably exceeds the
+        // grid-area cap, so most of these cells land beyond the placement
+        // budget once the (capped) grid fills up — exercising the "beyond
+        // cap" degrade path, not just the happy path.
+        let columns = 10;
+        let rows = N / columns + 1;
+        let mut cells = Vec::with_capacity(N);
+        for i in 0..N {
+            cells.push(cell(i % columns, i / columns, 1, 1, 1.0, 1.0, 1.0));
+        }
+        let spec = TableSpec { columns, rows, cells, available_width: 1000.0, border_spacing_x: 0.0, border_spacing_y: 0.0 };
+        let out = solve_table(&spec);
+        // 1:1 correspondence with the input, regardless of how many placed.
+        assert_eq!(out.cell_rects.len(), N);
+        // Every rect is either the placed (nonzero) tile or the skipped
+        // (zero) default — never a panic, never a partial/garbage value.
+        for r in &out.cell_rects {
+            assert!(r.origin.x.is_finite() && r.origin.y.is_finite());
+            assert!(r.size.w.is_finite() && r.size.h.is_finite());
+        }
+        // At least the cells within the grid-area cap were placed.
+        assert!(out.cell_rects.iter().any(|r| *r != Rect::default()));
+    }
+
+    /// The reviewer's constructed case: a colspan-2 cell's min-excess
+    /// distribution can push a column's min above what the (separate)
+    /// max-excess distribution alone would give that column — without the
+    /// final `max_i >= min_i` clamp, resolving to `max_i` (available_width
+    /// >= sum_max) would then give a NARROWER width than the column's own
+    /// min_content demands. col0: min-path -> ~14.92, max-path alone ->
+    /// ~9.95; the clamp must win, raising col0's resolved max (and thus its
+    /// resolved width here) to ~14.92. col1 needs no clamping (its min-path
+    /// and max-path don't conflict) — asserted as a control.
+    #[test]
+    fn colspan_min_excess_clamps_max_when_it_would_undercut_min() {
+        let spec = TableSpec {
+            columns: 2,
+            rows: 2,
+            cells: vec![
+                cell(0, 0, 1, 1, 5.0, 5.0, 0.0),
+                cell(1, 0, 1, 1, 1.0, 1000.0, 0.0),
+                cell(0, 1, 2, 1, 2000.0, 2000.0, 0.0),
+            ],
+            available_width: f32::MAX, // forces col_widths == max_i (post-clamp)
+            border_spacing_x: 0.0,
+            border_spacing_y: 0.0,
+        };
+        let out = solve_table(&spec);
+        assert!((out.col_widths[0] - 14.920_398).abs() < 0.05, "col0 = {}", out.col_widths[0]);
+        assert!((out.col_widths[1] - 1990.049_75).abs() < 0.05, "col1 = {}", out.col_widths[1]);
+    }
+
+    /// Extreme (near-f32::MAX) magnitudes can overflow to `inf` inside the
+    /// arithmetic (e.g. summing two f32::MAX-sized column widths across a
+    /// colspan) even though every input was already sanitized. The final
+    /// output-scrub pass must catch it: every output stays finite.
+    #[test]
+    fn extreme_magnitudes_scrub_to_finite_output() {
+        let spec = TableSpec {
+            columns: 2,
+            rows: 2,
+            cells: vec![
+                cell(0, 0, 1, 1, f32::MAX, f32::MAX, 0.0),
+                cell(1, 0, 1, 1, f32::MAX, f32::MAX, 0.0),
+                // Spans both f32::MAX-wide columns: col_widths[0] +
+                // col_widths[1] overflows to +inf inside the rect-width sum.
+                cell(0, 1, 2, 1, 1.0, 1.0, 0.0),
+            ],
+            available_width: 100.0, // <= sum_min (inf): forces col_widths == min_col (still finite individually)
+            border_spacing_x: 0.0,
+            border_spacing_y: 0.0,
+        };
+        let out = solve_table(&spec);
+        assert!(out.col_widths.iter().all(|w| w.is_finite() && *w >= 0.0));
+        assert!(out.row_heights.iter().all(|h| h.is_finite() && *h >= 0.0));
+        for r in &out.cell_rects {
+            assert!(r.origin.x.is_finite() && r.origin.x >= 0.0);
+            assert!(r.origin.y.is_finite() && r.origin.y >= 0.0);
+            assert!(r.size.w.is_finite() && r.size.w >= 0.0);
+            assert!(r.size.h.is_finite() && r.size.h >= 0.0);
+        }
+        // Pin the actual overflow site: the spanning cell's width would be
+        // +inf pre-scrub (f32::MAX + f32::MAX); scrubbed, it's exactly 0.0.
+        assert_eq!(out.cell_rects[2].size.w, 0.0);
+    }
+
+    /// rowspan analog of `degenerate_colspans_clamp_not_panic`: rowspan 0
+    /// clamps to 1; rowspan 999 clamps to the remaining rows from its
+    /// origin. No panic, and the resulting rect exactly covers both spanned
+    /// rows.
+    #[test]
+    fn degenerate_rowspans_clamp_not_panic() {
+        let spec = TableSpec {
+            columns: 1,
+            rows: 3,
+            cells: vec![
+                cell(0, 0, 1, 0, 10.0, 10.0, 5.0),    // rowspan 0 -> 1
+                cell(0, 1, 1, 999, 10.0, 10.0, 40.0), // rowspan 999 -> clamped to 2 (rows 1..3)
+            ],
+            available_width: 10.0, // == sum_min == sum_max (single column, min==max==10)
+            border_spacing_x: 0.0,
+            border_spacing_y: 0.0,
+        };
+        let out = solve_table(&spec);
+        assert_eq!(out.row_heights, vec![5.0, 20.0, 20.0]);
+        assert_eq!(out.cell_rects[1], rect(0.0, 5.0, 10.0, 40.0));
+    }
+
+    /// The realistic `<td colspan=2 rowspan=2>` case: one cell spans both
+    /// two columns and two rows in the corner of a 3x3 grid; the column and
+    /// row solves are decoupled, so this should just compose. Values chosen
+    /// so no proportional distribution is needed (the spanning cell's
+    /// min/max/height exactly match the sum of its spanned columns'/rows'
+    /// baselines) — this test is purely about placement/tiling geometry.
+    #[test]
+    fn combined_colspan_and_rowspan_tiles_correctly() {
+        let spec = TableSpec {
+            columns: 3,
+            rows: 3,
+            cells: vec![
+                cell(0, 0, 2, 2, 20.0, 20.0, 20.0), // big: spans col0..2, row0..2
+                cell(2, 0, 1, 1, 10.0, 10.0, 10.0),
+                cell(2, 1, 1, 1, 10.0, 10.0, 10.0),
+                cell(0, 2, 1, 1, 10.0, 10.0, 10.0),
+                cell(1, 2, 1, 1, 10.0, 10.0, 10.0),
+                cell(2, 2, 1, 1, 10.0, 10.0, 10.0),
+            ],
+            available_width: 30.0, // == sum_min == sum_max (10+10+10)
+            border_spacing_x: 0.0,
+            border_spacing_y: 0.0,
+        };
+        let out = solve_table(&spec);
+        assert_eq!(out.col_widths, vec![10.0, 10.0, 10.0]);
+        assert_eq!(out.row_heights, vec![10.0, 10.0, 10.0]);
+        assert_eq!(
+            out.cell_rects,
+            vec![
+                rect(0.0, 0.0, 20.0, 20.0),
+                rect(20.0, 0.0, 10.0, 10.0),
+                rect(20.0, 10.0, 10.0, 10.0),
+                rect(0.0, 20.0, 10.0, 10.0),
+                rect(10.0, 20.0, 10.0, 10.0),
+                rect(20.0, 20.0, 10.0, 10.0),
+            ]
+        );
     }
 }
