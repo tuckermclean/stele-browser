@@ -45,6 +45,18 @@ jobs:
           set -euxo pipefail
           cargo test --workspace --locked
 
+      # A3 (tty golden): host-native, no qemu/i486 involvement, but IS
+      # cargo-dependent — this job carries the pinned toolchain
+      # (rust-toolchain.toml), the `accept` job below does not (qemu-user +
+      # file only). `--tty-only` runs just this check under that pin,
+      # reproducibly (no `+nightly`/floating-toolchain override — charter
+      # C9). A1/A4 (the i486/qemu checks) stay in the `accept` job.
+      - name: Acceptance — A3 tty golden (host, pinned toolchain)
+        run: |
+          set -euxo pipefail
+          chmod +x accept.sh
+          ./accept.sh --tty-only
+
       - name: Build i486 release binary (canonical pipeline)
         run: |
           set -euxo pipefail
@@ -89,6 +101,10 @@ jobs:
           name: stele-i486
           path: target/i486-monolith-linux-musl/release/
 
+      # A1 + A4 live here (the i486 artifact + qemu). A3 (tty golden) already
+      # ran, live, in the `build` job above — this plain-ubuntu job has no
+      # Rust toolchain, so accept.sh's cargo-dependent A3 block degrades to
+      # PENDING here rather than failing (see accept.sh's A3 section).
       - name: Run acceptance (A1 + A4 live)
         run: |
           chmod +x target/i486-monolith-linux-musl/release/stele accept.sh
