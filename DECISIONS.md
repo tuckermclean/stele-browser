@@ -3,6 +3,45 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## P6 — Layout: block flow + inline engine (Wave 2)
+
+### D14 — taffy flex substrate; layout is total via a depth cap; M2 scope calls
+The layout engine is charter §158's "solvers over a flex substrate": **taffy
+0.13** supplies block/flex box-math (block flow = degenerate column flex),
+while inline layout is bespoke off measure-function leaves. Forks taken:
+- **taffy trimmed hard.** `default-features = false`, features
+  `["std","taffy_tree","flexbox","block_layout","content_size"]`. Dropped
+  `grid`/`float_layout`/`detailed_layout_info`/`calc` (and transitive
+  `smallvec`): no CSS grid in the dialect, our floats are bespoke-inline (M4)
+  not taffy-side, no `calc()`. Serves the A2 ≤2MB budget and the C8 vendoring
+  surface. Revisit: if a fixture ever needs CSS grid (it won't — out of
+  dialect) or taffy-native floats.
+- **Layout is total via `DEPTH_CAP = 100`.** The recursive tree walk
+  (`translate`/`flatten_inline`/`emit`) plus taffy's own `compute_layout` had
+  no depth bound; ~200 nested `Container`s overflowed the stack — a
+  guard-page `SIGABRT` that `panic="abort"` cannot catch (uncatchable process
+  death), reachable from a few hundred bytes of hostile/generated HTML.
+  **Choice:** cap descent at depth 100 (well under the ~180–200 empirical
+  floor, with margin for taffy's frames and the musl i486 stack); over-deep
+  subtrees degrade to empty boxes rather than crashing (fallback-ladder
+  ethos: keep the pipeline green). Capping `translate` bounds taffy's compute
+  and `emit` for free (both only see the capped tree). Revisit: if a real
+  document legitimately nests >100 deep (none should — that's already
+  pathological), raise the cap or move to an explicit-stack iterative walk.
+- **M2 scope simplifications (all bounded, none silent data loss on M2
+  fixtures):** margin-collapsing not implemented (each block's margins apply
+  independently); `Replaced` paints as a placeholder `Box` (no pixel data
+  until P9); inline elements get no own background/border box (only block
+  boxes paint); mixed block+inline children fold each maximal inline run into
+  one taffy leaf (an approximation of CSS anonymous block boxes — nothing
+  dropped); empty/whitespace-only text → zero lines; `white-space: pre`
+  parsed but not honored (always collapses). **Deferred to M4** (with the
+  image + float work, when `Replaced` carries pixels): a non-floated inline
+  `<img>` between text sits inline instead of breaking flow, and a `Replaced`
+  grandchild nested in an inline container gets a box instead of being
+  dropped. No M2 fixture (basic.html) exercises inline images. Revisit each
+  at its milestone.
+
 ## P4 — Image decoders (Wave 1)
 
 ### D13 — Decode caps & unsupported-format policy for hostile image bytes
