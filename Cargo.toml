@@ -22,6 +22,7 @@ path = "src/main.rs"
 gif = "0.13"
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
+taffy = "0.13.0"
 
 # Charter C4: the rock does not unwind. Size-first for the 486 budget (A2 ≤ 2.0 MB).
 [profile.release]

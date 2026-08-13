@@ -9,6 +9,9 @@
 
 use crate::style::ComputedStyle;
 
+pub mod block;
+pub mod inline;
+
 /// A width/height pair in layout space (CSS pixels, pre-device-scaling).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Size {
@@ -69,6 +72,14 @@ pub enum FragmentKind {
 }
 
 /// Lay `root` out into a `viewport` and return paint-ordered fragments.
-pub fn layout(_root: &LayoutNode, _viewport: Size) -> Vec<Fragment> {
-    todo!("P6/P8: block flow + inline engine + table column solver")
+///
+/// M2 (P6): block flow (taffy's degenerate-column-flex substrate) + the
+/// bespoke inline engine (`inline` module) for text wrapping. Tables (P8)
+/// are not yet part of this pipeline — a `table`/`tr`/`td` tree lays out as
+/// plain blocks until the column solver lands. Text metrics are the one
+/// `Metrics` impl P5 shipped (`text::BitmapFont`, monospace) — font-family
+/// selection is a later refinement once a proportional font exists.
+pub fn layout(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
+    let font = crate::text::BitmapFont::vga_8x16();
+    block::layout_tree(root, viewport, &font)
 }
