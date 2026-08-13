@@ -171,6 +171,23 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
 /// Write `text`'s characters left-to-right into `rows`, starting at the cell
 /// `fragment.rect.origin` maps to, clipped to the grid's bounds. Shared by
 /// the `Text` and `Image`-placeholder paint paths.
+///
+/// KNOWN LIMITATION (documented, not fixed — I2 in the P7 review, logged to
+/// DECISIONS by the orchestrator): this advances exactly one grid column per
+/// `char`, regardless of the fragment's own font size. `text::BitmapFont::
+/// advance` scales with `size_px` (e.g. an h1 at 32px is 16 real pixels —
+/// two cells — per character; an h2 at 24px is 12px, one and a half cells),
+/// but the fixed 8px tty cell can only place a run's *start* at a size-aware
+/// `origin.x` cell and then walks it forward one column at a time. Two
+/// `Text` fragments of *different* font sizes sharing one line box (e.g.
+/// `<h1>Big <small>text</small></h1>`) would therefore drift out of
+/// alignment (gap or overlap) after the first run — each run's start cell is
+/// correct, but its *own* per-char advance isn't scaled to match its font
+/// size. Invisible in `fixtures/basic.html` (every heading is one uniform
+/// run alone on its line) and in every current M2 fixture, so left
+/// undisturbed: correct tty handling of mixed inline font sizes on one line
+/// is a real design question (partial cells? proportional skipping? render
+/// only the dominant run's size?) for a later packet, not a quick fix here.
 fn write_marker(rows: &mut [Vec<char>], fragment: &Fragment, text: &str, cols: usize) {
     let row = cell_index(fragment.rect.origin.y, CELL_H);
     if row >= rows.len() {
