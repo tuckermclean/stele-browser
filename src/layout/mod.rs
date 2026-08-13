@@ -10,6 +10,7 @@
 use crate::style::ComputedStyle;
 
 pub mod block;
+pub mod box_tree;
 pub mod inline;
 
 /// A width/height pair in layout space (CSS pixels, pre-device-scaling).

@@ -18,6 +18,7 @@
 // peeled off module-by-module as each Wave 1 seam gets wired up.
 #![allow(dead_code)]
 
+pub mod backend;
 pub mod dom;
 pub mod fetch;
 pub mod img;

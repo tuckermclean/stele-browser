@@ -218,6 +218,54 @@ Append-only running log. Newest at the bottom.
 - NEXT: P7 (tty backend) now unblocks against P6's real fragments — the pair
   that lights up M2's first fixture browsing.
 
+## 2026-08-13 — Wave 2 · P7 (tty render pipeline) — M2 backbone
+
+- The first END-TO-END render: `fetch → parse → cascade → box_tree → layout →
+  tty text grid`, exposed as `stele --headless --dump-text <path|url>`. You can
+  now browse a fixture as a deterministic text dump. `basic.html` renders to a
+  clean heading/paragraph/link layout.
+- Closed a real integration gap: nothing in `src/` turned the styled DOM into
+  layout's `LayoutNode` tree (it lived only in a test helper). P7 adds
+  `layout::box_tree::build_box_tree(dom, &styles) -> Option<LayoutNode>`
+  (display:none dropped, text→Text, img→Replaced-with-attr-intrinsic, else
+  Container) — depth-capped at 100 like P6, since it's another recursive DOM
+  walk that would otherwise re-open the stack-overflow class.
+- tty backend (`backend::tty`): maps fragments to an 8×16 char grid
+  (col=round(x/8), row=round(y/16) at line-box top), later-paints-over-earlier,
+  clips at edges, places by `char` (UTF-8-safe). `to_text` trims trailing
+  whitespace. std-only (no dep).
+- Loop: implementer (test-first, red/green pairs `689ce68`→`60a4e75`,
+  `2bddfb5`→`2fa0471`; +`213add4` accept.sh) → reviewer (Spec ✅; **golden
+  COUNTERSIGNED** — every row re-derived from UA sheet + cascade em-resolution
+  + font metrics; **1 Critical + 2 Important**) → fix round 1
+  (`7b717e2`/`bae6d41`/`02fbb66`/`a661f1e`) → scoped re-review (orchestrator:
+  clamp + CI wiring correct, golden byte-identical, frozen intact).
+    - **Critical (caught before main):** unbounded `--cols` drove an
+      allocation abort via a single CLI flag on ANY document (`vec![vec![' ';
+      cols]; rows_needed]` allocates the inner row even when `rows_needed==0`).
+      Fix: `MAX_GRID_COLS=2_000` clamp as the first thing in `render`, plus a
+      `rows_needed==0` early return — worst-case grid now bounded to 80MB.
+      See DECISIONS D17.
+    - **Important:** A3 (tty-golden acceptance) called `cargo +nightly build`
+      but was wired into the cargo-less `accept` CI job — it would fail or use
+      a floating nightly (breaking C9). Fix: A3 runs in the `build` job under
+      the pinned toolchain via `accept.sh --tty-only` (no `+nightly`), and
+      degrades to PENDING where cargo is absent. A1/A4 stay in `accept`.
+    - **Important (documented, deferred):** the tty grid advances one column
+      per char regardless of font-size (advance scales with size), so
+      mixed-font-size inline runs on one line would misalign — invisible for
+      basic.html; flagged in code + D17 for a later fixture.
+- The golden-blessing discipline ran as intended: the implementer filed
+  `goldens/basic.tty.txt` PROPOSED; the reviewer independently countersigned it
+  against the fixture; the orchestrator blesses it here (`accept.sh --bless`
+  reproduces it byte-identically).
+- Also this session: a **recursion-hardening** packet fixed the twin
+  stack-overflow in `style::cascade` (explicit-stack rewrite) that P7's totality
+  work surfaced — see the hardening entry above (D15/D16).
+- **M2 reached** with P6+P7: real fixtures browse as text, total on hostile
+  input end to end. NEXT: P7b interactive tty shell (raw-mode scroll/back; link
+  nav pending a small Fragment freeze amendment for href provenance), then
+  Wave 2's P8 (table column solver) toward M3.
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a

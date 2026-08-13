@@ -9,17 +9,30 @@
 # gate. As each milestone completes, its check flips from PENDING to live here.
 #
 # Usage:
-#   ./accept.sh            run all live checks; exit nonzero on first failure
-#   ./accept.sh --bless    regenerate golden outputs from the current binary
-#                          (never bless your own render blind — see brief §10)
+#   ./accept.sh              run all live checks; exit nonzero on first failure
+#   ./accept.sh --bless      regenerate golden outputs from the current binary
+#                            (never bless your own render blind — see brief §10)
+#   ./accept.sh --tty-only   run ONLY the A3 host-native tty-golden check (no
+#                            i486/qemu involvement at all). For CI: the plain
+#                            `accept` job has no Rust toolchain (qemu-user +
+#                            file only), so a cargo-dependent check has no
+#                            business running there — A3's host build+dump+
+#                            diff instead runs from the `build` job (which
+#                            already carries the pinned toolchain) via this
+#                            flag. `--bless` composes with it.
 #
-# The binary is expected pre-built at:
+# The i486 binary (A1/A4) is expected pre-built at:
 #   target/i486-monolith-linux-musl/release/stele
 # Build it with the canonical pipeline (inside the monolith-builder image):
 #   cargo build --release \
 #     --target targets/i486-monolith-linux-musl.json \
 #     -Zbuild-std=std,panic_abort \
 #     -Zjson-target-spec   # this nightly gates .json target specs behind it
+#
+# A3's host binary is a plain `cargo build --release` (default host target,
+# no `+nightly`/`+<toolchain>` override — that would bypass rust-toolchain.
+# toml's pin and fetch a floating nightly, violating charter C9's "ONE
+# pinned rustc"; plain `cargo` already resolves the pin via the file).
 
 set -uo pipefail
 
@@ -29,7 +42,13 @@ GOLDEN_HELLO="goldens/m0-hello.txt"
 SIZE_BUDGET_BYTES=$(( 2 * 1000 * 1000 ))   # A2: 2.0 MB stripped
 
 BLESS=0
-[ "${1:-}" = "--bless" ] && BLESS=1
+TTY_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --bless) BLESS=1 ;;
+    --tty-only) TTY_ONLY=1 ;;
+  esac
+done
 
 fail=0
 note()  { printf '  %s\n' "$*"; }
@@ -45,12 +64,18 @@ find_qemu() {
   return 1
 }
 
-echo "== Stele acceptance (M0 skeleton) =="
+if [ "$TTY_ONLY" = 1 ]; then
+  echo "== Stele acceptance — A3 tty-golden only (host, pinned toolchain) =="
+else
+  echo "== Stele acceptance (M0 skeleton) =="
+fi
 
 # ---------------------------------------------------------------------------
 # A1 — statically linked, i386-class ELF.
 # ---------------------------------------------------------------------------
-if [ ! -f "$BIN" ]; then
+if [ "$TTY_ONLY" = 1 ]; then
+  :
+elif [ ! -f "$BIN" ]; then
   bad "A1: binary not found at $BIN (build it first — see header)"
 else
   desc="$(file -b "$BIN")"
@@ -68,7 +93,9 @@ fi
 # A4 — the i486 binary runs under qemu-i386 -cpu 486 and prints golden text.
 # This is the point of the whole exercise: catch any non-486 instruction.
 # ---------------------------------------------------------------------------
-if [ ! -f "$BIN" ]; then
+if [ "$TTY_ONLY" = 1 ]; then
+  :
+elif [ ! -f "$BIN" ]; then
   bad "A4: binary not found at $BIN"
 elif ! QEMU="$(find_qemu)"; then
   bad "A4: no qemu-i386 found (install qemu-user); cannot execute the i486 binary"
@@ -92,7 +119,9 @@ fi
 # ---------------------------------------------------------------------------
 # A2 — size budget (≤ 2.0 MB stripped). Informational in M0; a hard gate in M6.
 # ---------------------------------------------------------------------------
-if [ -f "$BIN" ]; then
+if [ "$TTY_ONLY" = 1 ]; then
+  :
+elif [ -f "$BIN" ]; then
   bytes=$(wc -c < "$BIN")
   note "size: ${bytes} bytes (budget ${SIZE_BUDGET_BYTES})"
   if [ "$bytes" -le "$SIZE_BUDGET_BYTES" ]; then
@@ -103,9 +132,70 @@ if [ -f "$BIN" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# A3 — fixture golden renders. The tty-dump half is LIVE as of P7/M2: a
+# host-native (no qemu — --dump-text has no 486-specific instructions; A4
+# already exhaustively probes that) run of `stele --headless --dump-text`
+# over fixtures/basic.html must match the checked-in golden exactly. The
+# mem-Surface PNG half stays PENDING until P9's fb backend lands (M4).
+#
+# Host binary: built via a plain `cargo build --release` (the default host
+# target, NOT the i486 cross target `$BIN` used by A1/A4) since this check
+# only exercises pure Rust logic (parse/cascade/layout/tty), not 486-legal
+# codegen.
+# ---------------------------------------------------------------------------
+HOST_BIN="target/release/stele"
+GOLDEN_TTY="goldens/basic.tty.txt"
+FIXTURE_BASIC="fixtures/basic.html"
+
+# This check is cargo-dependent by nature (it builds and runs a fresh host
+# binary), and NOT every job that runs this script carries a Rust toolchain
+# — the plain `accept` CI job only has qemu-user + file (see --tty-only's
+# usage doc above). Rather than hard-failing there, treat "no cargo" as
+# PENDING: informational, not a rejection. Where cargo IS available (locally,
+# or the `build` job via `--tty-only`), the check is fully live.
+if ! command -v cargo >/dev/null 2>&1; then
+  pend "A3: no cargo in this environment — tty-golden check runs in the build job (pinned toolchain) instead"
+else
+  # Always (re)build: a stale `target/release/stele` from an earlier packet
+  # must never let this check silently pass/fail against old code. Plain
+  # `cargo` (no `+nightly`/`+<toolchain>` override) so rust-toolchain.toml's
+  # pin governs — see the header comment.
+  note "A3: building host binary (cargo build --release)"
+  if ! cargo build --release >/tmp/stele_a3_build.log 2>&1; then
+    bad "A3: host build failed"; sed 's/^/    /' /tmp/stele_a3_build.log
+  fi
+
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3: host binary still not found at $HOST_BIN"
+  elif ! out="$("$HOST_BIN" --headless --dump-text "$FIXTURE_BASIC" 2>/tmp/stele_a3.err)"; then
+    bad "A3: stele --headless --dump-text crashed on $FIXTURE_BASIC"
+    sed 's/^/    /' /tmp/stele_a3.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out" > "$GOLDEN_TTY"
+    pass "A3: blessed tty golden -> $GOLDEN_TTY (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY" <(printf '%s\n' "$out") >/tmp/stele_a3.diff 2>&1; then
+    pass "A3: tty dump of $FIXTURE_BASIC matches golden"
+  else
+    bad "A3: tty dump of $FIXTURE_BASIC differs from $GOLDEN_TTY"
+    sed 's/^/    /' /tmp/stele_a3.diff
+  fi
+fi
+pend "A3: mem-Surface PNG goldens — P9/M4"
+
+if [ "$TTY_ONLY" = 1 ]; then
+  echo "===================================="
+  if [ "$fail" = 0 ]; then
+    echo "ACCEPT (--tty-only): A3 tty-golden check green"
+    exit 0
+  else
+    echo "REJECT (--tty-only): A3 tty-golden check failed"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Not yet live — each flips on at the milestone that earns it.
 # ---------------------------------------------------------------------------
-pend "A3: fixture golden renders (tty dumps + mem-Surface PNGs) — M1..M5"
 pend "A5: first-paint speed budget over kitchen-sink.html — M5/M6"
 if [ -f src/dom/ast.rs ]; then
   # A6 covenant grep, live once the AST exists: no script variant may appear.

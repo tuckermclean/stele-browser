@@ -3,6 +3,35 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## P7 — tty render pipeline (Wave 2 / M2)
+
+### D17 — tty grid bounds + cell-mapping scope calls
+The tty backend renders fragments into a character grid; forks taken to keep
+it total and honest:
+- **Grid allocation is bounded on BOTH axes.** `MAX_GRID_ROWS=10_000`
+  (derived from layout) already bounded rows; `MAX_GRID_COLS=2_000` now bounds
+  columns, which are directly user/attacker-controlled via `--cols` (a single
+  flag drove a multi-GB allocation → capacity-overflow/OOM abort under
+  `panic=abort`, on ANY document). Clamp happens first thing in `render`;
+  `rows_needed==0` short-circuits before sizing a row (`vec![elem;n]` evaluates
+  `elem` once regardless of `n`). Worst case grid = 2000×10000×4B = 80MB —
+  bounded, and 2000 cols is far past any real terminal. Revisit: a fixture
+  legitimately needs a wider grid (none should).
+- **One column per char, ignoring per-glyph advance (known limitation,
+  deferred).** `write_marker` advances one grid column per `char`, but
+  `BitmapFont::advance` scales with font-size (h1@32px is 16px/char). A single
+  uniformly-styled run alone on its line (every heading/para in basic.html) is
+  fine; two `Text` fragments of different font-size sharing one line box would
+  misalign. Inherent to mapping size-scaled layout onto a fixed 8px tty cell;
+  documented in code, not fixed. Revisit: a fixture mixes inline font sizes on
+  one line — then either lay tty out with a uniform cell metric or snap runs.
+- **A3 acceptance runs under the pinned toolchain.** `accept.sh` A3 (tty-golden
+  diff) is cargo-dependent; it runs in the CI `build` job (pinned
+  `nightly-2026-07-15`) via `--tty-only`, with no `+nightly` override (charter
+  C9), and degrades to PENDING where cargo is absent (the `accept` job) rather
+  than failing. Goldens are blessed only via `accept.sh --bless` after an
+  independent reviewer countersigns (brief §10) — an implementer never blesses
+  their own.
 ## Hardening — recursion totality (cascade + parser)
 
 ### D15 — cascade made total by an explicit-stack rewrite, not a depth cap
