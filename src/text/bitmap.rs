@@ -51,10 +51,16 @@ impl BitmapFont {
     /// (12:4-at-16) ascent:descent baseline split as [`Self::vga_8x16`],
     /// scaled to `cell_height`.
     ///
-    /// `cell_width` and `cell_height` must be finite and positive; non-finite
-    /// or non-positive inputs are clamped to `0.0` so every method on the
-    /// resulting font stays total (finite, never panics) rather than
-    /// producing NaN/infinite metrics.
+    /// `cell_width` and `cell_height` must be finite and `>= 1.0` design
+    /// unit; non-finite or sub-1.0 inputs (including tiny-but-positive
+    /// values like `1e-38`, and zero/negative values) are clamped up to
+    /// `1.0`. The clamp is a floor, not just a finite/positive check: a
+    /// near-zero `cell_height` would otherwise make `scale()`'s
+    /// `size_px / cell_height` overflow to infinity for any realistic
+    /// `size_px`, even though `1e-38` itself "passes" a naive
+    /// finite-and-positive test. Flooring at `1.0` keeps every method on
+    /// the resulting font total (finite, never panics) for any positive
+    /// `size_px`, no matter how degenerate the requested geometry.
     pub fn with_cell(cell_width: f32, cell_height: f32) -> Self {
         let cell_width = sanitize(cell_width);
         let cell_height = sanitize(cell_height);
@@ -71,7 +77,8 @@ impl BitmapFont {
 
     /// Scale factor from design units to pixels at `size_px`. Total: returns
     /// `0.0` (never NaN/infinite, never panics) for non-finite, zero, or
-    /// negative `size_px`, or for a degenerate (zero-height) cell.
+    /// negative `size_px`. `cell_height` is always `>= 1.0` by construction
+    /// (see [`Self::with_cell`]'s floor), so division here can't overflow.
     fn scale(&self, size_px: f32) -> f32 {
         if size_px.is_finite() && size_px > 0.0 && self.cell_height > 0.0 {
             size_px / self.cell_height
@@ -81,11 +88,17 @@ impl BitmapFont {
     }
 }
 
+/// Floor a cell dimension to a sane minimum of `1.0` design unit. Rejects
+/// (floors, rather than merely zeroing) non-finite, non-positive, and
+/// sub-1.0-but-positive inputs alike — a `>= 1.0` floor, not just an
+/// `is_finite() && > 0.0` check, is what keeps `scale()`'s division by
+/// `cell_height` from overflowing to infinity for tiny-but-positive
+/// geometry (e.g. `1e-38`).
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() && v > 0.0 {
+    if v.is_finite() && v >= 1.0 {
         v
     } else {
-        0.0
+        1.0
     }
 }
 
