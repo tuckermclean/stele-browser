@@ -169,18 +169,37 @@ fn empty_text_child_does_not_break_flow() {
 #[test]
 fn deeply_nested_tree_does_not_panic() {
     // 100 levels comfortably exceeds any realistic (even gnarly 1996
-    // table-in-table) document nesting depth. Scope note: both taffy's own
-    // `compute_layout` and this crate's `translate`/`emit` walk the tree
-    // recursively, so *extreme* depth (empirically ~180+ levels on this
-    // host's default thread stack) can stack-overflow — an accepted M2
-    // limitation, not guarded against here, since it is far outside any
-    // real document's nesting depth.
+    // table-in-table) document nesting depth.
     let mut node = leaf_container(block_style());
     for _ in 0..100 {
         node = container(block_style(), vec![node]);
     }
     let fragments = layout(&node, Size { w: 400.0, h: 400.0 });
     assert!(!fragments.is_empty());
+}
+
+/// Regression test (code review, Critical 1): before `translate`/`flatten`
+/// capped their recursion depth, a chain of nested `Container`s deep enough
+/// (empirically ~200+ levels, both here and on the reviewer's machine) blew
+/// the thread's stack — a guard-page fault (SIGABRT), not a catchable
+/// `panic!`, so `panic = "abort"` gives no mitigation and the *test process
+/// itself* aborts rather than failing gracefully. Nesting depth is entirely
+/// page-controlled (deeply nested quote threads, WYSIWYG exports, old
+/// nested-table markup), so this is reachable from hostile/generated HTML,
+/// not just a synthetic stress case.
+///
+/// After the depth cap: `layout()` must simply *return* — that completion is
+/// the proof, no special assertion needed beyond "we got a `Vec` back".
+#[test]
+fn extremely_deep_nesting_does_not_abort_the_process() {
+    for depth in [2000usize, 5000] {
+        let mut node = leaf_container(block_style());
+        for _ in 0..depth {
+            node = container(block_style(), vec![node]);
+        }
+        let fragments = layout(&node, Size { w: 400.0, h: 400.0 });
+        assert!(!fragments.is_empty(), "depth {depth} must still produce a fragment vector");
+    }
 }
 
 #[test]
