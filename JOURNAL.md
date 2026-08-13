@@ -218,6 +218,34 @@ Append-only running log. Newest at the bottom.
 - NEXT: P7 (tty backend) now unblocks against P6's real fragments — the pair
   that lights up M2's first fixture browsing.
 
+## 2026-08-13 — Hardening · recursion totality (cascade + parser)
+
+- Surfaced while building P7: the P6 unbounded-recursion crash class had a
+  twin in already-merged code. `style::cascade`'s internal `visit` walked the
+  DOM with plain Rust-call recursion, no depth bound — a DOM nested ~3000
+  deep `SIGABRT`s (guard-page fault, uncatchable under `panic=abort`) during
+  **cascade**, i.e. before layout's `DEPTH_CAP` ever runs. Charter's "the rock
+  does not unwind" made this a real must-fix, not an M6 nicety: nesting depth
+  is entirely page-controlled (quote threads, WYSIWYG exports, nested-table
+  markup).
+- Fix (test-first, `df04f0b` red → `eedb274` green): rewrote `visit` as an
+  **explicit-stack** (`Vec<Frame>` with `Enter`/`Exit` frames) iterative walk
+  — no call-stack recursion, so no depth can overflow it. Chosen over a
+  depth-cap-and-degrade because it keeps cascade **fully correct at any
+  depth**: every node, however deep, still gets its real resolved+inherited
+  style. Semantics are byte-identical to the old recursion (same `ancestors`
+  chain visible at match time via the `Exit` frame, same parent-style
+  propagation, same "text takes parent's style wholesale", same source order
+  via reverse-push). Frozen `cascade`/`ComputedStyle` signatures unchanged.
+- The `dom::parser` was investigated and found **already total** at depth (it
+  drives an explicit `Vec`-backed open-element stack, not per-nesting
+  recursion) — left unchanged, with guard tests added (5000 nested `<div>`s
+  asserting the tree is that deep, not silently truncated; 5000 unclosed-tag
+  soup). Regression tests: cascade total + correct at depth 3000/5000
+  (inheritance verified to reach the innermost node, past any naive cap).
+  See DECISIONS D15. Orchestrator reviewed the transform directly (mechanical,
+  semantics-preserving) before merge; CI gates the i486 build.
+
 ## 2026-08-13 — Wave 1 · P4 (image decoders: PNG/JPEG/GIF + dispatcher)
 
 - P4 `img::{png,jpeg,gif}` behind the frozen `Decode` trait, all output
