@@ -910,6 +910,61 @@ mod tests {
         assert_eq!(text_of(&dom, div), "ab");
     }
 
+    // ------------------------------- pathological depth -----------------------
+
+    /// Hostile/generated input (quote threads, WYSIWYG exports, nested-table
+    /// markup) can nest thousands of tags deep. Unlike `style::cascade`'s
+    /// `visit` walk (which DID recurse via plain Rust calls and reliably
+    /// SIGABRTs at this depth), this parser drives an explicit `Vec`-backed
+    /// open-element stack rather than recursing per nesting level -- these
+    /// tests are a totality guard confirming that holds, not a fix for a
+    /// found bug (empirically the parser was already total at depth; see the
+    /// recursion-hardening packet report for the before/after evidence on
+    /// both stages).
+    #[test]
+    fn parse_is_total_on_5000_nested_divs() {
+        let mut html = String::with_capacity(5000 * 11 + 16);
+        for _ in 0..5000 {
+            html.push_str("<div>");
+        }
+        html.push('x');
+        for _ in 0..5000 {
+            html.push_str("</div>");
+        }
+        let dom = parse(&html);
+        // Prove the tree is actually as deep as expected (not silently
+        // truncated) by walking down iteratively (no test-side recursion
+        // either) counting nested <div> levels.
+        let mut depth = 0usize;
+        let mut id = dom.root();
+        loop {
+            let el = dom.node(id).element().expect("element");
+            if el.children.is_empty() {
+                break;
+            }
+            let child = el.children[0];
+            if dom.node(child).text().is_some() {
+                break;
+            }
+            id = child;
+            depth += 1;
+        }
+        assert_eq!(depth, 5000);
+    }
+
+    #[test]
+    fn parse_is_total_on_5000_deep_unclosed_tag_soup() {
+        // Pathological unclosed-tag soup: 5000 opens, nothing ever closed,
+        // then EOF. Exercises the same nesting depth without giving the
+        // parser any `</div>` close tags to pop the open-element stack on.
+        let mut html = String::with_capacity(5000 * 5);
+        for _ in 0..5000 {
+            html.push_str("<div>");
+        }
+        let dom = parse(&html);
+        let _ = dom.node(dom.root());
+    }
+
     #[test]
     fn does_not_panic_on_hostile_or_truncated_input() {
         let hostiles = [

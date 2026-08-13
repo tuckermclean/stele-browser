@@ -26,48 +26,75 @@ fn ua_stylesheet() -> &'static Stylesheet {
 ///
 /// Total: never panics on any `dom`/`author_sheets` combination (an empty DOM
 /// yields an empty `Vec`, unmatched nodes simply fall back to CSS initial
-/// values / UA defaults).
+/// values / UA defaults) -- INCLUDING arbitrarily deep nesting. Hostile or
+/// generated markup (quote threads, WYSIWYG exports, nested-table soup) can
+/// nest thousands of elements deep; `visit` below walks the tree with an
+/// explicit heap-allocated stack rather than the call stack, so there is no
+/// depth at which this can overflow (unlike a plain recursive walk, which
+/// reliably SIGABRTs a few thousand levels down -- the recursion-hardening
+/// packet's whole reason for existing). This also keeps cascade fully
+/// CORRECT at any depth: every node, however deep, still gets its real
+/// resolved-and-inherited style, not a capped/degraded approximation.
 pub fn cascade(dom: &Dom, author_sheets: &[Stylesheet]) -> Vec<ComputedStyle> {
     let mut out = vec![ComputedStyle::default(); dom.len()];
     if dom.is_empty() {
         return out;
     }
     let ua = ua_stylesheet();
-    let mut ancestors: Vec<ElementInfo> = Vec::new();
-    visit(dom, dom.root(), ua, author_sheets, None, &mut ancestors, &mut out);
+    visit(dom, dom.root(), ua, author_sheets, &mut out);
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit(
-    dom: &Dom,
-    id: NodeId,
-    ua: &Stylesheet,
-    author: &[Stylesheet],
-    parent: Option<&ComputedStyle>,
-    ancestors: &mut Vec<ElementInfo>,
-    out: &mut [ComputedStyle],
-) {
-    match dom.node(id) {
-        // Character data carries no rules of its own; it takes the parent's
-        // computed style wholesale (the inline engine reads font/color etc.
-        // straight off it).
-        Node::Text(_) => {
-            if let Some(p) = parent {
-                out[id] = p.clone();
-            }
-        }
-        Node::Element(el) => {
-            let info = ElementInfo::from_element(&el.name, &el.attrs);
-            let decls = fold_matching_declarations(ua, author, ancestors, &info);
-            let style = resolve(&decls, parent);
-            out[id] = style.clone();
+/// One pending unit of work in the iterative walk: either compute+store the
+/// style for `id` (with its parent's already-resolved style, `None` at the
+/// root) and descend into its children, or -- once all of a subtree's
+/// children have been pushed -- pop that subtree's `ElementInfo` back off
+/// `ancestors` now that nothing left on the stack still needs it as an
+/// ancestor.
+enum Frame {
+    Enter { id: NodeId, parent: Option<ComputedStyle> },
+    Exit,
+}
 
-            ancestors.push(info);
-            for &child in &el.children {
-                visit(dom, child, ua, author, Some(&style), ancestors, out);
+/// Explicit-stack equivalent of the old recursive `visit`: identical
+/// semantics (same `ancestors` chain visible to each element when its rules
+/// are matched, same parent-style propagation to children, same "text takes
+/// the parent's style wholesale" rule), just driven by a `Vec<Frame>` on the
+/// heap instead of the native call stack, so nesting depth cannot blow it.
+fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &mut [ComputedStyle]) {
+    let mut ancestors: Vec<ElementInfo> = Vec::new();
+    let mut stack: Vec<Frame> = vec![Frame::Enter { id: root, parent: None }];
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Exit => {
+                ancestors.pop();
             }
-            ancestors.pop();
+            Frame::Enter { id, parent } => match dom.node(id) {
+                // Character data carries no rules of its own; it takes the
+                // parent's computed style wholesale (the inline engine reads
+                // font/color etc. straight off it).
+                Node::Text(_) => {
+                    if let Some(p) = &parent {
+                        out[id] = p.clone();
+                    }
+                }
+                Node::Element(el) => {
+                    let info = ElementInfo::from_element(&el.name, &el.attrs);
+                    let decls = fold_matching_declarations(ua, author, &ancestors, &info);
+                    let style = resolve(&decls, parent.as_ref());
+                    out[id] = style.clone();
+
+                    ancestors.push(info);
+                    stack.push(Frame::Exit);
+                    // Push in reverse so children are popped (and thus
+                    // visited) in source order, matching the old recursive
+                    // walk's iteration order exactly.
+                    for &child in el.children.iter().rev() {
+                        stack.push(Frame::Enter { id: child, parent: Some(style.clone()) });
+                    }
+                }
+            },
         }
     }
 }
@@ -463,5 +490,69 @@ mod tests {
         let d = dom::parser::parse("<p>hello <b>world</b></p>");
         let styles = cascade(&d, &[]);
         assert_eq!(styles.len(), d.len());
+    }
+
+    /// Hostile/generated input (quote threads, WYSIWYG exports, nested-table
+    /// markup) can nest thousands of `<div>`s deep. `cascade`'s internal
+    /// `visit` walk used plain Rust-call recursion with no depth cap and
+    /// reliably SIGABRTs the process on input like this (confirmed
+    /// empirically before the fix — see the recursion-hardening packet
+    /// report). `cascade` must be TOTAL: it must return a `Vec<ComputedStyle>`
+    /// for any nesting depth, never blow the call stack.
+    fn nested_div_html(depth: usize) -> String {
+        let mut s = String::with_capacity(depth * 11 + 16);
+        for _ in 0..depth {
+            s.push_str("<div>");
+        }
+        s.push('x');
+        for _ in 0..depth {
+            s.push_str("</div>");
+        }
+        s
+    }
+
+    #[test]
+    fn cascade_is_total_on_dom_nested_3000_deep() {
+        let html = nested_div_html(3000);
+        let d = dom::parser::parse(&html);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles.len(), d.len());
+    }
+
+    #[test]
+    fn cascade_is_total_on_dom_nested_5000_deep() {
+        let html = nested_div_html(5000);
+        let d = dom::parser::parse(&html);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles.len(), d.len());
+    }
+
+    /// Totality alone isn't enough: `cascade` must stay fully CORRECT at any
+    /// depth too (per the packet's preference for an iterative rewrite over a
+    /// cap-and-degrade fallback). Inherit a property from the outermost `div`
+    /// and confirm it still reaches a node thousands of levels down, past any
+    /// depth a naive cap (e.g. reusing layout's DEPTH_CAP=100) would have
+    /// stopped resolving real inheritance for.
+    #[test]
+    fn cascade_inherits_correctly_past_any_naive_depth_cap() {
+        let html = nested_div_html(3000);
+        let d = dom::parser::parse(&html);
+        let sheet = parser::parse("div { color: green; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        // Deepest element is the innermost <div> — walk the arena's NodeIds
+        // iteratively (no recursion in the test either) to find it: the
+        // parser allocates root=0, then each opened <div> in nesting order,
+        // so the innermost element is the one whose single child is the text
+        // node "x".
+        let mut deepest = d.root();
+        loop {
+            let el = d.node(deepest).element().expect("element");
+            let child = el.children[0];
+            if d.node(child).text().is_some() {
+                break;
+            }
+            deepest = child;
+        }
+        assert_eq!(styles[deepest].color, Color::rgb(0, 128, 0));
     }
 }

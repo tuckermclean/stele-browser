@@ -32,6 +32,32 @@ it total and honest:
   than failing. Goldens are blessed only via `accept.sh --bless` after an
   independent reviewer countersigns (brief §10) — an implementer never blesses
   their own.
+## Hardening — recursion totality (cascade + parser)
+
+### D15 — cascade made total by an explicit-stack rewrite, not a depth cap
+`style::cascade`'s recursive `visit` had no depth bound and `SIGABRT`ed
+(stack overflow) on a DOM nested ~3000 deep — reachable before layout, so
+layout's `DEPTH_CAP` (D14) didn't protect it. **Options:** (a) reuse the
+D14 depth-cap-and-degrade pattern (cap at 100, fill deeper nodes with a
+degraded inherited/default style); (b) rewrite the walk iteratively with an
+explicit heap stack. **Choice: (b).** Unlike layout — where taffy's own
+recursion also has to be bounded, so a cap is unavoidable and >100-deep
+boxes are genuinely pathological to render — cascade is pure tree walking we
+fully own, so an explicit-stack (`Vec<Frame>`, `Enter`/`Exit`) rewrite
+removes the crash with **zero correctness loss**: every node at any depth
+still resolves its true inherited style, rather than degrading past a cap.
+Semantics preserved exactly (ancestors chain, parent propagation, text-takes-
+parent, source order). Revisit-trigger: none expected; if a profiler ever
+shows the per-node `ComputedStyle` clones into frames hurt on the 486, switch
+frames to carry an index/handle instead of an owned style.
+
+### D16 — parser left as-is (already total at depth); guard-tested
+`dom::parser` was audited for the same crash and found **already total**: it
+drives an explicit `Vec`-backed open-element stack, not per-nesting-level
+recursion, so 5000 nested (or 5000 unclosed) tags parse without overflow.
+**Choice:** change nothing, add totality guard tests so a future refactor
+that reintroduced recursion would be caught. Revisit-trigger: a parser change
+that adds a recursive descent over nesting depth — re-audit then.
 
 ## P6 — Layout: block flow + inline engine (Wave 2)
 
