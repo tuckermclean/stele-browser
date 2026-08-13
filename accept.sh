@@ -103,9 +103,51 @@ if [ -f "$BIN" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# A3 — fixture golden renders. The tty-dump half is LIVE as of P7/M2: a
+# host-native (no qemu — --dump-text has no 486-specific instructions; A4
+# already exhaustively probes that) run of `stele --headless --dump-text`
+# over fixtures/basic.html must match the checked-in golden exactly. The
+# mem-Surface PNG half stays PENDING until P9's fb backend lands (M4).
+#
+# Host binary: built via a plain `cargo build --release` (the default host
+# target, NOT the i486 cross target `$BIN` used by A1/A4) since this check
+# only exercises pure Rust logic (parse/cascade/layout/tty), not 486-legal
+# codegen.
+# ---------------------------------------------------------------------------
+HOST_BIN="target/release/stele"
+GOLDEN_TTY="goldens/basic.tty.txt"
+FIXTURE_BASIC="fixtures/basic.html"
+
+# Always (re)build: a stale `target/release/stele` from an earlier packet
+# must never let this check silently pass/fail against old code.
+note "A3: building host binary (cargo build --release)"
+if command -v cargo >/dev/null 2>&1; then
+  if ! cargo +nightly build --release >/tmp/stele_a3_build.log 2>&1; then
+    bad "A3: host build failed"; sed 's/^/    /' /tmp/stele_a3_build.log
+  fi
+else
+  bad "A3: no cargo found; cannot build $HOST_BIN"
+fi
+
+if [ ! -f "$HOST_BIN" ]; then
+  bad "A3: host binary still not found at $HOST_BIN"
+elif ! out="$("$HOST_BIN" --headless --dump-text "$FIXTURE_BASIC" 2>/tmp/stele_a3.err)"; then
+  bad "A3: stele --headless --dump-text crashed on $FIXTURE_BASIC"
+  sed 's/^/    /' /tmp/stele_a3.err
+elif [ "$BLESS" = 1 ]; then
+  printf '%s\n' "$out" > "$GOLDEN_TTY"
+  pass "A3: blessed tty golden -> $GOLDEN_TTY (never bless your own render blind — see brief §10)"
+elif diff -u "$GOLDEN_TTY" <(printf '%s\n' "$out") >/tmp/stele_a3.diff 2>&1; then
+  pass "A3: tty dump of $FIXTURE_BASIC matches golden"
+else
+  bad "A3: tty dump of $FIXTURE_BASIC differs from $GOLDEN_TTY"
+  sed 's/^/    /' /tmp/stele_a3.diff
+fi
+pend "A3: mem-Surface PNG goldens — P9/M4"
+
+# ---------------------------------------------------------------------------
 # Not yet live — each flips on at the milestone that earns it.
 # ---------------------------------------------------------------------------
-pend "A3: fixture golden renders (tty dumps + mem-Surface PNGs) — M1..M5"
 pend "A5: first-paint speed budget over kitchen-sink.html — M5/M6"
 if [ -f src/dom/ast.rs ]; then
   # A6 covenant grep, live once the AST exists: no script variant may appear.
