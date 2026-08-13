@@ -46,8 +46,11 @@ const DEFAULT_IMG_INTRINSIC: Size = Size { w: 0.0, h: 0.0 };
 /// `dom::parser::parse` + `style::cascade::cascade` (the styles slice is
 /// always exactly `dom.len()` long from that pipeline; this function is
 /// still defensive against a shorter slice via `styles.get`).
-pub fn build_box_tree(_dom: &Dom, _styles: &[ComputedStyle]) -> Option<LayoutNode> {
-    todo!("P7 RED: build_box_tree")
+pub fn build_box_tree(dom: &Dom, styles: &[ComputedStyle]) -> Option<LayoutNode> {
+    if dom.is_empty() {
+        return None;
+    }
+    build_node(dom, styles, dom.root(), 0)
 }
 
 fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> Option<LayoutNode> {
