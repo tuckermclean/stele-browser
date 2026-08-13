@@ -14,6 +14,15 @@ path = "src/lib.rs"
 name = "stele"
 path = "src/main.rs"
 
+# Image decoders (P4). i486-conscious features: jpeg-decoder without rayon
+# (single-threaded — charter/brief §9: no async, no thread pool). These must
+# build for the i486 floor under -Zbuild-std; that is exactly what this packet
+# verifies. Fallbacks per brief §6 L4 (zune-* / defer a format) if any refuses.
+[dependencies]
+gif = "0.13"
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.17"
+
 # Charter C4: the rock does not unwind. Size-first for the 486 budget (A2 ≤ 2.0 MB).
 [profile.release]
 opt-level = "z"
