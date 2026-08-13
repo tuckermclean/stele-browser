@@ -3,6 +3,28 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## P4 — Image decoders (Wave 1)
+
+### D13 — Decode caps & unsupported-format policy for hostile image bytes
+Image bytes are attacker-controlled and the target is `panic=abort` (any
+reachable panic/OOM is a hard, uncatchable crash), so the decoders enforce a
+budget and degrade — never trust a decoder-declared dimension. **Choices:**
+(a) a shared 64M-px cap (`MAX_DECODE_PIXELS`) rejects decompression-bomb
+dimensions as `DecodeError::Unsupported` *before* any proportional allocation;
+critically, JPEG checks it against the SOF frame header (`read_info`) **before**
+`decode()`, because a progressive JPEG allocates its full coefficient buffer off
+the untrusted width×height up front (a review Critical — a crafted 25-byte file
+otherwise drove a multi-GB allocation). (b) The `gif` crate's own per-frame
+memory limit is pinned to `MAX_DECODE_PIXELS*4` bytes so `check_pixel_cap`, not
+the crate's stricter 50MB default, is the single authoritative gate. (c) Formats
+recognized-but-unimplemented are `DecodeError::Unsupported(_)` so the caller
+falls back to `alt` text (brief §6 L4), never a panic or garbage pixels:
+**CMYK/YCCK JPEG** (no color-managed CMYK→RGB in v0) and 16-bit `L16` JPEG are
+Unsupported; **APNG** is not decoded (only GIF animation is required by the
+brief). Revisit-trigger: a real fixture needs a bigger cap, CMYK JPEG, or APNG —
+raise the cap / add a color transform / add an APNG path then; low urgency for
+the document web of 1996.
+
 ## P3 — Fetch (Wave 1)
 
 ### D12 — Cookie `Domain=` validated against the responding host; no PSL
