@@ -58,9 +58,13 @@
 //! `render` never panics: non-finite/negative coordinates are clamped to
 //! cell `0`; `cols == 0` yields an empty grid; a pathologically huge
 //! fragment bottom (e.g. from a hostile huge-margin declaration reaching all
-//! the way through layout) is capped at [`MAX_GRID_ROWS`] rather than
-//! attempting an unbounded allocation — the 486 target has little memory to
-//! spare for an attacker-inflated grid.
+//! the way through layout) is capped at [`MAX_GRID_ROWS`]. `cols` itself —
+//! directly caller-controlled (`--cols` on the CLI, reachable on ANY
+//! document, not just a hostile one) — is independently clamped to
+//! [`MAX_GRID_COLS`] before anything allocates; a content-free layout
+//! (`rows_needed == 0`) also short-circuits before ever sizing a row. Every
+//! axis of the grid allocation is bounded — the 486 target has little memory
+//! to spare for an attacker- or user-inflated grid.
 
 use crate::layout::{Fragment, FragmentKind};
 
@@ -72,6 +76,20 @@ const CELL_H: f32 = 16.0;
 /// so a hostile/degenerate layout (huge margins, huge coordinates) can't
 /// drive an unbounded allocation. See module docs.
 const MAX_GRID_ROWS: usize = 10_000;
+
+/// Hard cap on grid columns, independent of the caller-supplied `cols`.
+/// `cols` is directly attacker/user-controlled (it's `--cols` on the CLI,
+/// reachable on ANY document, not just a hostile one) — unlike
+/// [`MAX_GRID_ROWS`], which only bounds a value *derived* from layout, this
+/// axis had NO bound at all (C1: a `--cols 999999999` alone drove a
+/// multi-gigabyte allocation, capacity-overflow panic or OOM abort under
+/// `panic=abort`, regardless of document content). 2,000 columns is already
+/// far past any real terminal (even "ultra-wide" virtual ttys top out
+/// nowhere near this); combined with `MAX_GRID_ROWS`, the worst-case grid is
+/// `2_000 * 10_000 * size_of::<char>()` = 80MB — bounded, not necessarily
+/// cheap, but a `--cols` flag alone can no longer drive an unbounded
+/// allocation.
+const MAX_GRID_COLS: usize = 2_000;
 
 /// A rendered character grid: rows of columns, ready to print.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +130,11 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
     if cols == 0 {
         return TextGrid { rows: Vec::new() };
     }
+    // Clamp FIRST, before anything else touches `cols` — this is the only
+    // choke point every caller (CLI, tests, any future backend user) goes
+    // through, so it's the one place that has to hold the line. See
+    // MAX_GRID_COLS's doc comment (C1).
+    let cols = cols.min(MAX_GRID_COLS);
 
     let mut rows_needed = 0usize;
     for f in fragments {
@@ -120,6 +143,14 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
         rows_needed = rows_needed.max(top_row + 1).max(bottom_row);
     }
     rows_needed = rows_needed.min(MAX_GRID_ROWS);
+
+    if rows_needed == 0 {
+        // Nothing to draw: return early rather than materializing even one
+        // `vec![' '; cols]` row we'd immediately throw away — `vec![elem;
+        // n]` evaluates `elem` once regardless of `n`, so without this guard
+        // a content-free document still paid for a `cols`-wide allocation.
+        return TextGrid { rows: Vec::new() };
+    }
 
     let mut rows: Vec<Vec<char>> = vec![vec![' '; cols]; rows_needed];
 
@@ -297,6 +328,36 @@ mod tests {
     #[test]
     fn empty_fragment_list_yields_empty_text() {
         let grid = render(&[], 80);
+        assert_eq!(grid.to_text(), "");
+    }
+
+    /// C1 regression (reviewer-caught Critical): `cols` is caller-controlled
+    /// (directly from `--cols` on the CLI, reachable on ANY document) and
+    /// was never bounded — only rows had a `MAX_GRID_ROWS` clamp. Because
+    /// `vec![elem; n]`'s `elem` is evaluated once regardless of `n`, even a
+    /// content-free document (`rows_needed == 0`) still drove the huge
+    /// `vec![' '; cols]` allocation. Must clamp `cols` (and skip the alloc
+    /// entirely when there's nothing to draw) so this never panics/aborts.
+    #[test]
+    fn absurdly_large_cols_is_clamped_not_a_panic() {
+        let fragments = vec![text_fragment(0.0, 0.0, 16.0, 16.0, "hi")];
+        let grid = render(&fragments, 999_999_999);
+        // Must not panic (capacity overflow / OOM abort) and must actually
+        // clamp to a bounded width, not merely "not crash while still being
+        // huge" — assert the printed line stays within a sane bound.
+        let text = grid.to_text();
+        for line in text.lines() {
+            assert!(line.chars().count() <= MAX_GRID_COLS, "line width exceeds MAX_GRID_COLS: {}", line.chars().count());
+        }
+        assert!(text.starts_with("hi"));
+    }
+
+    #[test]
+    fn absurdly_large_cols_with_no_content_is_also_clamped_not_a_panic() {
+        // Same hostile `cols`, but with NO fragments at all (`rows_needed ==
+        // 0`): the pre-fix bug fired here too, since `vec![elem; n]`
+        // evaluates `elem` before `n` is even consulted.
+        let grid = render(&[], 999_999_999);
         assert_eq!(grid.to_text(), "");
     }
 
