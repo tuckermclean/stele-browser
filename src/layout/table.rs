@@ -139,11 +139,192 @@ fn sanitize_nonneg(x: f32) -> f32 {
     }
 }
 
+/// A sanitized, successfully-placed cell (grid-clamped span, finite/non-neg
+/// measurements). Cells that were skipped (out of range, or overlapping an
+/// already-accepted cell) have no `Placed` entry.
+struct Placed {
+    col: usize,
+    row: usize,
+    colspan: usize,
+    rowspan: usize,
+    min_content: f32,
+    max_content: f32,
+    intrinsic_height: f32,
+}
+
 /// Solve a table's column widths, row heights, and cell rects per the
 /// two-pass min/max-content automatic table layout algorithm (module docs).
 /// Total: never panics on any `TableSpec`, however malformed.
-pub fn solve_table(_spec: &TableSpec) -> TableLayout {
-    todo!("P8 RED: implement the two-pass min/max-content column solver")
+pub fn solve_table(spec: &TableSpec) -> TableLayout {
+    let columns = spec.columns.min(MAX_GRID_DIM);
+    let rows = spec.rows.min(MAX_GRID_DIM);
+    let spacing_x = sanitize_nonneg(spec.border_spacing_x);
+    let spacing_y = sanitize_nonneg(spec.border_spacing_y);
+    let available_width = sanitize_nonneg(spec.available_width);
+
+    // --- Grid placement: sanitize, clamp spans, skip out-of-range/overlap ---
+    let mut placed: Vec<Option<Placed>> = Vec::with_capacity(spec.cells.len());
+    // Rectangles (col, row, colspan, rowspan) of already-accepted cells,
+    // checked against each new cell to skip overlaps (see module docs: no
+    // full occupancy grid, to bound memory independent of grid size).
+    let mut accepted: Vec<(usize, usize, usize, usize)> = Vec::new();
+
+    for c in &spec.cells {
+        if columns == 0 || rows == 0 || c.col >= columns || c.row >= rows {
+            placed.push(None);
+            continue;
+        }
+        let colspan = c.colspan.max(1).min(columns - c.col);
+        let rowspan = c.rowspan.max(1).min(rows - c.row);
+
+        let overlaps = accepted.iter().any(|&(ac, ar, acs, ars)| {
+            c.col < ac + acs && ac < c.col + colspan && c.row < ar + ars && ar < c.row + rowspan
+        });
+        if overlaps {
+            placed.push(None);
+            continue;
+        }
+
+        let min_content = sanitize_nonneg(c.min_content);
+        let mut max_content = sanitize_nonneg(c.max_content);
+        if max_content < min_content {
+            max_content = min_content;
+        }
+        let intrinsic_height = sanitize_nonneg(c.intrinsic_height);
+
+        accepted.push((c.col, c.row, colspan, rowspan));
+        placed.push(Some(Placed { col: c.col, row: c.row, colspan, rowspan, min_content, max_content, intrinsic_height }));
+    }
+
+    // --- Column min/max-content widths ---
+    let mut min_col = vec![0.0f32; columns];
+    let mut max_col = vec![0.0f32; columns];
+    for p in placed.iter().flatten() {
+        if p.colspan == 1 {
+            min_col[p.col] = min_col[p.col].max(p.min_content);
+            max_col[p.col] = max_col[p.col].max(p.max_content);
+        }
+    }
+
+    let mut multi_span: Vec<&Placed> = placed.iter().flatten().filter(|p| p.colspan > 1).collect();
+    multi_span.sort_by_key(|p| p.colspan);
+
+    // Min-content excess distribution, proportional to current max_i (even
+    // split if that weight sum is zero). Fully before max-distribution so
+    // max weights aren't polluted by min excess.
+    for p in &multi_span {
+        let start = p.col;
+        let end = p.col + p.colspan;
+        let sum_min: f32 = min_col[start..end].iter().sum();
+        let excess = p.min_content - sum_min;
+        if excess > 0.0 {
+            let weight_sum: f32 = max_col[start..end].iter().sum();
+            let n = p.colspan as f32;
+            for c in start..end {
+                let add = if weight_sum > 0.0 { excess * (max_col[c] / weight_sum) } else { excess / n };
+                min_col[c] += add;
+            }
+        }
+    }
+    // Max-content excess distribution, proportional to current max_i.
+    for p in &multi_span {
+        let start = p.col;
+        let end = p.col + p.colspan;
+        let sum_max: f32 = max_col[start..end].iter().sum();
+        let excess = p.max_content - sum_max;
+        if excess > 0.0 {
+            let weight_sum = sum_max; // weight is the same array being grown
+            let n = p.colspan as f32;
+            for c in start..end {
+                let add = if weight_sum > 0.0 { excess * (max_col[c] / weight_sum) } else { excess / n };
+                max_col[c] += add;
+            }
+        }
+    }
+    // A spanning cell's min excess can push a column's min above its own
+    // (singly-spanning-derived) max; keep the invariant max_i >= min_i.
+    for c in 0..columns {
+        if max_col[c] < min_col[c] {
+            max_col[c] = min_col[c];
+        }
+    }
+
+    // --- Table width resolution ---
+    let col_gaps = columns.saturating_sub(1) as f32;
+    let sum_min: f32 = min_col.iter().sum::<f32>() + col_gaps * spacing_x;
+    let sum_max: f32 = max_col.iter().sum::<f32>() + col_gaps * spacing_x;
+
+    let col_widths: Vec<f32> = if available_width <= sum_min {
+        min_col.clone()
+    } else if available_width >= sum_max {
+        max_col.clone()
+    } else {
+        let range = sum_max - sum_min;
+        if range <= 0.0 {
+            min_col.clone()
+        } else {
+            let t = (available_width - sum_min) / range;
+            min_col.iter().zip(max_col.iter()).map(|(&mn, &mx)| mn + (mx - mn) * t).collect()
+        }
+    };
+
+    // --- Row heights ---
+    let mut row_heights = vec![0.0f32; rows];
+    for p in placed.iter().flatten() {
+        if p.rowspan == 1 {
+            row_heights[p.row] = row_heights[p.row].max(p.intrinsic_height);
+        }
+    }
+    let mut multi_row: Vec<&Placed> = placed.iter().flatten().filter(|p| p.rowspan > 1).collect();
+    multi_row.sort_by_key(|p| p.rowspan);
+    for p in &multi_row {
+        let start = p.row;
+        let end = p.row + p.rowspan;
+        let sum_h: f32 = row_heights[start..end].iter().sum();
+        let excess = p.intrinsic_height - sum_h;
+        if excess > 0.0 {
+            let add = excess / p.rowspan as f32;
+            for r in start..end {
+                row_heights[r] += add;
+            }
+        }
+    }
+
+    // --- Cell rects: prefix-sum column x-offsets / row y-offsets ---
+    let mut col_x = vec![0.0f32; columns];
+    {
+        let mut acc = 0.0f32;
+        for (i, x) in col_x.iter_mut().enumerate() {
+            *x = acc;
+            acc += col_widths[i] + spacing_x;
+        }
+    }
+    let mut row_y = vec![0.0f32; rows];
+    {
+        let mut acc = 0.0f32;
+        for (i, y) in row_y.iter_mut().enumerate() {
+            *y = acc;
+            acc += row_heights[i] + spacing_y;
+        }
+    }
+
+    let mut cell_rects = Vec::with_capacity(spec.cells.len());
+    for p_opt in &placed {
+        match p_opt {
+            None => cell_rects.push(Rect::default()),
+            Some(p) => {
+                let x = col_x[p.col];
+                let y = row_y[p.row];
+                let w = col_widths[p.col..p.col + p.colspan].iter().sum::<f32>()
+                    + p.colspan.saturating_sub(1) as f32 * spacing_x;
+                let h = row_heights[p.row..p.row + p.rowspan].iter().sum::<f32>()
+                    + p.rowspan.saturating_sub(1) as f32 * spacing_y;
+                cell_rects.push(Rect { origin: Point { x, y }, size: Size { w, h } });
+            }
+        }
+    }
+
+    TableLayout { col_widths, row_heights, cell_rects }
 }
 
 #[cfg(test)]
@@ -244,14 +425,18 @@ mod tests {
     fn colspan_min_excess_distributes_proportionally_to_max() {
         let spec = TableSpec {
             columns: 3,
-            rows: 1,
+            rows: 2,
             cells: vec![
+                // Baseline (single-column) cells establish col0/col1/col2's
+                // min/max in row 0.
                 cell(0, 0, 1, 1, 5.0, 20.0, 0.0),
                 cell(1, 0, 1, 1, 5.0, 60.0, 0.0),
                 cell(2, 0, 1, 1, 5.0, 5.0, 0.0),
-                cell(0, 0, 2, 1, 50.0, 50.0, 0.0), // spans col0..col2, min=50 vs baseline sum 10
+                // A colspan-2 cell in row 1 (so it doesn't overlap the row-0
+                // singles) spans col0..col2, min=50 vs baseline sum 10.
+                cell(0, 1, 2, 1, 50.0, 50.0, 0.0),
             ],
-            available_width: 50.0, // == sum_min (15+35+5), forces col_widths == min_i
+            available_width: 0.0, // <= sum_min always, forces col_widths == min_i
             border_spacing_x: 0.0,
             border_spacing_y: 0.0,
         };
@@ -267,14 +452,18 @@ mod tests {
     fn colspan_max_excess_distributes_proportionally_to_max() {
         let spec = TableSpec {
             columns: 3,
-            rows: 1,
+            rows: 2,
             cells: vec![
+                // Baseline (single-column) cells in row 0.
                 cell(0, 0, 1, 1, 5.0, 5.0, 0.0),
                 cell(1, 0, 1, 1, 5.0, 15.0, 0.0),
                 cell(2, 0, 1, 1, 1.0, 1.0, 0.0),
-                cell(0, 0, 2, 1, 5.0, 100.0, 0.0), // min doesn't force excess (5 <= 10); max does (100 vs 20)
+                // Colspan-2 cell in row 1 (no overlap with the row-0
+                // singles): min doesn't force excess (5 <= 10); max does
+                // (100 vs 20).
+                cell(0, 1, 2, 1, 5.0, 100.0, 0.0),
             ],
-            available_width: 500.0, // >> sum_max, forces col_widths == max_i
+            available_width: f32::MAX, // >= sum_max always, forces col_widths == max_i
             border_spacing_x: 0.0,
             border_spacing_y: 0.0,
         };
