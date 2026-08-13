@@ -136,3 +136,19 @@ Append-only running log. Newest at the bottom.
   signature changed. No new deps: `Cargo.toml`/`Cargo.lock` unchanged.
 - **75 tests green** (`cargo +nightly test`: 41 lib incl. 12 cookie
   contract tests + 4 file + 17 http1 + 13 url), 0 failed.
+## 2026-08-12 — Wave 1 · P2 (CSS parser + cascade), subagent-driven
+
+- P2 `style::{tokenizer,selector,value,parser,cascade,ua}`: bespoke CSS tokenizer +
+  parser (full syntax, error recovery, ignore-unknown counting per C2), selectors
+  (element/.class/#id/descendant/grouping/a:link/:visited + specificity), and the
+  cascade (built-in UA sheet + author sheets → per-node `ComputedStyle`, inheritance,
+  em/% font-size resolution). std-only, total (200k-iter CSS fuzz, no panics).
+- `@media` DEFERRED to M5: parsed but not evaluated (viewport isn't threaded through
+  the frozen `parse`/`cascade` signatures). Future orchestrator freeze amendment.
+- Loop: implementer (92 green) → reviewer (Spec ❌: 2 Critical + 1 Important, each
+  empirically confirmed in a throwaway worktree) → fix round 1 (same agent) → scoped
+  re-review (all addressed, no new breakage) → **100 tests green**. Bugs caught
+  before main: (a) cross-sheet specificity ignored (later sheet always won);
+  (b) `line-height: %` collapsed to 0px; (c) shorthand silently absorbed garbage
+  tokens → wrong per-edge values + uncounted.
+- Frozen files untouched (`computed.rs`/`ast.rs`/`surface`); covenant clean.
