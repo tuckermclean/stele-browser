@@ -464,4 +464,68 @@ mod tests {
         let styles = cascade(&d, &[]);
         assert_eq!(styles.len(), d.len());
     }
+
+    /// Hostile/generated input (quote threads, WYSIWYG exports, nested-table
+    /// markup) can nest thousands of `<div>`s deep. `cascade`'s internal
+    /// `visit` walk used plain Rust-call recursion with no depth cap and
+    /// reliably SIGABRTs the process on input like this (confirmed
+    /// empirically before the fix — see the recursion-hardening packet
+    /// report). `cascade` must be TOTAL: it must return a `Vec<ComputedStyle>`
+    /// for any nesting depth, never blow the call stack.
+    fn nested_div_html(depth: usize) -> String {
+        let mut s = String::with_capacity(depth * 11 + 16);
+        for _ in 0..depth {
+            s.push_str("<div>");
+        }
+        s.push('x');
+        for _ in 0..depth {
+            s.push_str("</div>");
+        }
+        s
+    }
+
+    #[test]
+    fn cascade_is_total_on_dom_nested_3000_deep() {
+        let html = nested_div_html(3000);
+        let d = dom::parser::parse(&html);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles.len(), d.len());
+    }
+
+    #[test]
+    fn cascade_is_total_on_dom_nested_5000_deep() {
+        let html = nested_div_html(5000);
+        let d = dom::parser::parse(&html);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles.len(), d.len());
+    }
+
+    /// Totality alone isn't enough: `cascade` must stay fully CORRECT at any
+    /// depth too (per the packet's preference for an iterative rewrite over a
+    /// cap-and-degrade fallback). Inherit a property from the outermost `div`
+    /// and confirm it still reaches a node thousands of levels down, past any
+    /// depth a naive cap (e.g. reusing layout's DEPTH_CAP=100) would have
+    /// stopped resolving real inheritance for.
+    #[test]
+    fn cascade_inherits_correctly_past_any_naive_depth_cap() {
+        let html = nested_div_html(3000);
+        let d = dom::parser::parse(&html);
+        let sheet = parser::parse("div { color: green; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        // Deepest element is the innermost <div> — walk the arena's NodeIds
+        // iteratively (no recursion in the test either) to find it: the
+        // parser allocates root=0, then each opened <div> in nesting order,
+        // so the innermost element is the one whose single child is the text
+        // node "x".
+        let mut deepest = d.root();
+        loop {
+            let el = d.node(deepest).element().expect("element");
+            let child = el.children[0];
+            if d.node(child).text().is_some() {
+                break;
+            }
+            deepest = child;
+        }
+        assert_eq!(styles[deepest].color, Color::rgb(0, 128, 0));
+    }
 }
