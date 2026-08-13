@@ -170,6 +170,54 @@ Append-only running log. Newest at the bottom.
 - Process note: implementers no longer edit JOURNAL/DECISIONS (orchestrator owns
   them) to avoid cross-packet append conflicts.
 
+## 2026-08-13 — Wave 2 · P6 (layout: block flow + inline engine v1)
+
+- The long pole. `layout::{block,inline}` implements the frozen
+  `layout(root, viewport) -> Vec<Fragment>` per charter §158 "solvers over a
+  flex substrate": **taffy 0.13** as the box-math primitive (block flow =
+  degenerate column flex), with a **bespoke, Metrics-generic inline
+  line-breaker** hanging off taffy measure-function leaves — the soul of the
+  program, no crate provides it. M2 scope: text runs + line wrapping, **no
+  floats** (M4), no tables (P8/M3), no frames (P10).
+- **Taffy cleared the i486 floor** (the packet's headline risk): CI `build`
+  cross-compiled taffy + the engine for `i486-monolith-linux-musl` under
+  `-Zbuild-std`, and `accept` ran it under `qemu-i386 -cpu 486` — green. The
+  charter's flex-substrate bet holds on real 486-legal code; no L3 hand-roll
+  needed. Brief §6 L3 (hand-roll row/column flex) retired for now.
+- Inline engine: whitespace collapsing (CSS normal), soft-wrap at break
+  opportunities, half-leading baseline math, cross-run glued-word atomicity
+  (`<b>x</b>y` = one unbreakable unit, still two styled runs). Unit-tested
+  against a synthetic fixed-metrics impl so every wrap decision / x-position /
+  baseline is exactly assertable.
+- Loop: implementer (147 lib + 12 layout tests, test-first `68cb9e1` red →
+  `4e05b4e` green) → reviewer (Spec ✅; **1 Critical + 2 Important**, the
+  Critical empirically reproduced) → fix round 1 (`08bf67f`) → scoped
+  re-review (orchestrator: depth cap + feature trim correct, frozen
+  `layout/mod.rs` byte-identical) → green.
+    - **Critical (caught before main):** the recursive tree walk
+      (`translate`/`flatten_inline`/`emit` + taffy's own `compute_layout`)
+      had no depth limit — a chain of ~200 nested `Container`s overflowed the
+      stack (`SIGABRT`, a guard-page fault `panic=abort` can't catch). ~200
+      nested tags is a few hundred bytes of hostile/generated HTML into our
+      tag-soup parser. Fix: `DEPTH_CAP = 100`, over-deep subtrees degrade to
+      empty boxes; regression test at depth 2000/5000 now returns instead of
+      aborting. See DECISIONS D14.
+    - **Important:** trimmed taffy to `default-features = false` +
+      `["std","taffy_tree","flexbox","block_layout","content_size"]` —
+      dropped unused `grid`/`float_layout`/`detailed_layout_info`/`calc` (and
+      transitive `smallvec`) for the A2 size budget + vendoring surface.
+    - **Important (documented, deferred to M4):** a non-floated inline `<img>`
+      between text breaks flow instead of sitting in the line, and a
+      `Replaced` grandchild inside a nested inline container is dropped — both
+      flagged in code, both land with M4's image + float work (no M2 fixture
+      has inline images). See D14.
+  Reviewer empirically **disproved** the two subtle bugs most feared:
+  border-box-vs-content-box text measurement is correct, and the wrap-width
+  comparison is correct — the engine measures inline text against the content
+  width, not the border-box.
+- NEXT: P7 (tty backend) now unblocks against P6's real fragments — the pair
+  that lights up M2's first fixture browsing.
+
 ## 2026-08-13 — Wave 1 · P4 (image decoders: PNG/JPEG/GIF + dispatcher)
 
 - P4 `img::{png,jpeg,gif}` behind the frozen `Decode` trait, all output

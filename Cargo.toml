@@ -22,6 +22,20 @@ path = "src/main.rs"
 gif = "0.13"
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
+# Trimmed to what block.rs/inline.rs actually use (charter §158: block flow
+# = degenerate column flex + flexbox; no CSS grid, no taffy-side floats —
+# floats are bespoke inline work, M4; no CSS calc() in the dialect). Default
+# features also pull `grid` (and smallvec transitively via `grid`),
+# `float_layout`, `calc`, and `detailed_layout_info` — all dead weight here;
+# dropping them shrinks the binary (A2 <= 2.0 MB) and the vendoring/audit
+# surface.
+taffy = { version = "0.13", default-features = false, features = [
+    "std",
+    "taffy_tree",
+    "flexbox",
+    "block_layout",
+    "content_size",
+] }
 
 # Charter C4: the rock does not unwind. Size-first for the 486 budget (A2 ≤ 2.0 MB).
 [profile.release]
