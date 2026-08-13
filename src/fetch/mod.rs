@@ -4,6 +4,9 @@
 //! blocking IO is correct for a single-threaded program (brief §9).
 
 pub mod cookies;
+pub mod file;
+pub mod http1;
+pub mod url;
 
 /// A minimal URL. P3 decides bespoke-vs-crate for the real parser and may swap
 /// the internals; this newtype is the frozen shape callers hold.
