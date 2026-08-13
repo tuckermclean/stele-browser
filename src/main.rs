@@ -81,8 +81,18 @@ fn parse_args(argv: &[String]) -> Args {
 /// paths are resolved against the current working directory first, since
 /// `fetch::file::file_path` expects `file:///abs/path` shaped input (a bare
 /// `file://relative/path` would misparse the first path segment as a host).
-fn resolve_url(_raw: &str) -> Url {
-    todo!("P7 RED: resolve_url")
+fn resolve_url(raw: &str) -> Url {
+    let scheme = Url::new(raw).scheme();
+    if scheme == "http" || scheme == "file" {
+        return Url::new(raw);
+    }
+    let path = std::path::Path::new(raw);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map(|cwd| cwd.join(path)).unwrap_or_else(|_| path.to_path_buf())
+    };
+    Url::new(format!("file://{}", abs.display()))
 }
 
 /// Fetch `url`'s body over whichever of the two live schemes it names.
@@ -106,8 +116,21 @@ fn fetch_body(url: &Url) -> Result<Vec<u8>, String> {
 /// error, non-UTF-8 body (lossily recovered), empty document, or
 /// `display: none` root all resolve to a clean empty string rather than a
 /// panic — the caller prints whatever comes back verbatim.
-fn dump_text(_source: &str, _cols: usize) -> String {
-    todo!("P7 RED: dump_text")
+fn dump_text(source: &str, cols: usize) -> String {
+    let url = resolve_url(source);
+    let body = match fetch_body(&url) {
+        Ok(b) => b,
+        Err(_) => return String::new(),
+    };
+    let html = String::from_utf8_lossy(&body);
+    let dom_tree = dom::parser::parse(&html);
+    let styles = cascade::cascade(&dom_tree, &[]);
+    let Some(root) = build_box_tree(&dom_tree, &styles) else {
+        return String::new();
+    };
+    let viewport = Size { w: cols as f32 * 8.0, h: HEADLESS_VIEWPORT_HEIGHT };
+    let fragments = layout::layout(&root, viewport);
+    tty::render(&fragments, cols).to_text()
 }
 
 fn main() {
