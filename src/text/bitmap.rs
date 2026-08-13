@@ -265,4 +265,37 @@ mod tests {
         assert_eq!(f.descent(12.0), 3.0);
         assert_eq!(f.advance('x', 12.0), 6.0);
     }
+
+    #[test]
+    fn degenerate_cell_geometry_stays_finite() {
+        // A tiny-but-positive cell_height (or width) must not slip past
+        // sanitize()'s finite/positive check and blow scale() up to
+        // infinity: scale(size_px) = size_px / cell_height, so a
+        // near-zero cell_height alone is enough to overflow. Every
+        // BitmapFont, however constructed, must keep the totality
+        // guarantee its own doc comments promise.
+        let tiny_height = BitmapFont::with_cell(6.0, 1e-38);
+        let adv = tiny_height.advance('x', 16.0);
+        assert!(adv.is_finite(), "advance was {adv}");
+        assert!(adv > 0.0, "advance should still be a real, nonzero cell width");
+        let m = tiny_height.measure("hi", 16.0);
+        assert!(m.is_finite(), "measure was {m}");
+        assert!(m > 0.0);
+
+        let tiny_width = BitmapFont::with_cell(1e-38, 16.0);
+        assert!(tiny_width.advance('x', 16.0).is_finite());
+        assert!(tiny_width.ascent(16.0).is_finite());
+        assert!(tiny_width.descent(16.0).is_finite());
+        assert!(tiny_width.line_height(16.0).is_finite());
+
+        let both_tiny = BitmapFont::with_cell(1e-40, 1e-40);
+        assert!(both_tiny.advance('x', 16.0).is_finite());
+        assert!(both_tiny.line_height(16.0).is_finite());
+
+        let subnormal = BitmapFont::with_cell(f32::MIN_POSITIVE, f32::MIN_POSITIVE);
+        assert!(subnormal.advance('x', 200.0).is_finite());
+        assert!(subnormal.ascent(200.0).is_finite());
+        assert!(subnormal.descent(200.0).is_finite());
+        assert!(subnormal.line_height(200.0).is_finite());
+    }
 }
