@@ -152,3 +152,20 @@ Append-only running log. Newest at the bottom.
   (b) `line-height: %` collapsed to 0px; (c) shorthand silently absorbed garbage
   tokens → wrong per-edge values + uncounted.
 - Frozen files untouched (`computed.rs`/`ast.rs`/`surface`); covenant clean.
+
+## 2026-08-13 — Wave 1 · P5 (text metrics) + image-dep verification
+
+- Image-decoder crates verified for the i486 floor (PR #9): `gif`/`jpeg-decoder`
+  (no rayon)/`png` + `crc32fast`/`miniz_oxide`/`fdeflate`/`weezl` all compile for
+  `i486-monolith-linux-musl` under `-Zbuild-std` — the brief's §6 L4 risk retired
+  before P4 depends on them. Full `cargo vendor` (C8) deferred to release hardening.
+- P5 `text::bitmap`: monospace `BitmapFont` implementing the frozen `Metrics`
+  trait (advance/ascent/descent/line-height, all total for any char + positive
+  size). std-only. Glyph rasterization / atlas + fontdue-vs-atlas comparison
+  DEFERRED to P9 (fb backend) where pixels are consumed; v0 is monospace.
+- Loop: implementer (134 green) → reviewer (Spec ✅, Approved; 1 Important) →
+  fix round 1 (floor degenerate cell geometry at 1.0 so metrics stay finite) →
+  orchestrator-verified → **135 tests green**. Stale `text/mod.rs` module doc
+  reconciled by the orchestrator.
+- Process note: implementers no longer edit JOURNAL/DECISIONS (orchestrator owns
+  them) to avoid cross-packet append conflicts.

@@ -1,9 +1,17 @@
 //! Text metrics: the seam between the font layer and the inline engine.
 //!
-//! P5 (Wave 1) implements [`Metrics`] two ways and keeps the winner: a fontdue
-//! glue path and an embedded bitmap-atlas path (likely the better fit on a 486).
-//! Shaping-free: Latin-1/UTF-8 advance widths, no complex-script shaping — the
-//! inline engine (P6) breaks lines given these advances.
+//! P5 (Wave 1) implements [`Metrics`] with a monospace [`bitmap::BitmapFont`]
+//! model (std-only, i486-safe; the brief's bitmap-font lean over a TTF). It is
+//! metrics only — glyph rasterization / the atlas, and any fontdue-vs-atlas
+//! render comparison, are deferred to the fb backend packet (P9), where pixels
+//! are actually consumed. Shaping-free: Latin-1/UTF-8 advance widths, no
+//! complex-script shaping — the inline engine (P6) breaks lines given these
+//! advances. v0 is monospace (matches tty cells); double-width scripts and
+//! proportional fonts are later refinements.
+
+pub mod bitmap;
+
+pub use bitmap::BitmapFont;
 
 /// Per-font, size-parameterized metrics. All returns are in pixels at `size_px`.
 pub trait Metrics {
