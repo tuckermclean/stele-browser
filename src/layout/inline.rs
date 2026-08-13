@@ -2,10 +2,29 @@
 //! (text runs, each carrying its own [`ComputedStyle`]) into line boxes at a
 //! given available width, using [`Metrics`] for glyph advances.
 //!
-//! RED skeleton: types are fixed so the test suite below compiles; the
-//! actual line-breaking algorithm is `todo!()` pending the green commit.
+//! Out of scope for M2 (see packet brief): floats / `img align=left` text
+//! wrapping (later milestone), text-align other than the default left flow
+//! (justify/center/right are a paint-time nicety, not attempted here),
+//! bidi/complex shaping (the `Metrics` seam is shaping-free by design).
+//!
+//! Whitespace handling: consecutive whitespace collapses to a single space
+//! (CSS `white-space: normal`), matching the curated `WhiteSpace` property's
+//! only two states (`Normal`/`Pre`) — `Pre` is not yet honored (documented
+//! scope call: v1 always collapses; a `Pre` fast-path is a follow-up). Line
+//! breaking only happens at those collapsed-space opportunities: a single
+//! "word" (including one that is itself wider than the available width)
+//! never splits — it just overflows onto its own line, which keeps the
+//! engine total (no panics) on any input.
+//!
+//! An inline "word" may itself be glued together out of pieces from more
+//! than one source run when no whitespace separates them in the source
+//! (e.g. `<b>bold</b>text` — no space between the two). Such glued pieces
+//! are tracked as one atomic unit for the fits-on-this-line decision (so the
+//! visual word is never split across lines) while still being emitted as
+//! separate [`PositionedRun`]s so each retains its own style.
 
-use crate::layout::{Rect, Size};
+use crate::layout::{Point, Rect, Size};
+use crate::style::computed::LineHeight;
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
 
@@ -49,10 +68,197 @@ pub struct InlineLayout {
     pub lines: Vec<LineBox>,
 }
 
+/// One maximal run of non-whitespace characters from a single source run,
+/// tagged with whether whitespace preceded it in the (flattened) token
+/// stream. Glued cross-run words (no whitespace at the run boundary) are
+/// separate `Word`s with `space_before = false`, so they cluster together
+/// below.
+struct Word {
+    run: usize,
+    text: String,
+    space_before: bool,
+}
+
+/// Split the flattened text of `runs` into whitespace-delimited `Word`s,
+/// collapsing any run of whitespace (even one spanning a run boundary) into
+/// a single break opportunity. Total: handles empty runs, all-whitespace
+/// runs, and runs with no whitespace at all without panicking.
+fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
+    let mut words = Vec::new();
+    let mut pending_space = false;
+    let mut cur: Option<(usize, String)> = None;
+
+    let flush = |cur: &mut Option<(usize, String)>, pending_space: &mut bool, words: &mut Vec<Word>| {
+        if let Some((run, text)) = cur.take() {
+            words.push(Word { run, text, space_before: *pending_space });
+            *pending_space = false;
+        }
+    };
+
+    for (i, r) in runs.iter().enumerate() {
+        for ch in r.text.chars() {
+            if ch.is_whitespace() {
+                flush(&mut cur, &mut pending_space, &mut words);
+                pending_space = true;
+            } else {
+                match &mut cur {
+                    Some((run, text)) if *run == i => text.push(ch),
+                    _ => {
+                        flush(&mut cur, &mut pending_space, &mut words);
+                        cur = Some((i, ch.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    flush(&mut cur, &mut pending_space, &mut words);
+    words
+}
+
+/// A maximal group of `Word`s with no whitespace between them: the
+/// line-breaking atom (never split across lines). `space_before` says
+/// whether a collapsed whitespace opportunity precedes this cluster.
+struct Cluster {
+    space_before: bool,
+    words: Vec<Word>,
+}
+
+fn cluster(words: Vec<Word>) -> Vec<Cluster> {
+    let mut clusters: Vec<Cluster> = Vec::new();
+    for w in words {
+        if !w.space_before {
+            if let Some(last) = clusters.last_mut() {
+                last.words.push(w);
+                continue;
+            }
+        }
+        let space_before = w.space_before;
+        clusters.push(Cluster { space_before, words: vec![w] });
+    }
+    clusters
+}
+
+fn resolved_line_height<M: Metrics>(style: &ComputedStyle, metrics: &M) -> f32 {
+    match style.line_height {
+        LineHeight::Normal => metrics.line_height(style.font_size),
+        LineHeight::Px(v) if v.is_finite() && v > 0.0 => v,
+        LineHeight::Px(_) => metrics.line_height(style.font_size),
+    }
+}
+
 /// Break `runs` into lines that fit within `available_width`, using `metrics`
-/// for advances. See module docs; body pending (RED skeleton).
-pub fn layout_runs<M: Metrics>(_runs: &[InlineRun], _available_width: f32, _metrics: &M) -> InlineLayout {
-    todo!("P6: bespoke inline line-breaking (M2)")
+/// for advances. Total over any input: empty `runs`, empty/whitespace-only
+/// text, non-finite/negative `available_width`, and single words wider than
+/// the available width (they overflow their line rather than panicking or
+/// splitting) are all handled.
+///
+/// An empty (or all-whitespace) `runs` slice produces zero lines and a zero
+/// [`Size`] — a documented scope call (brief allows either "one empty line
+/// or zero lines"; zero keeps empty text nodes from consuming vertical
+/// space, matching most engines' handling of whitespace-only text nodes).
+pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics: &M) -> InlineLayout {
+    let available_width = if available_width.is_finite() && available_width > 0.0 { available_width } else { 0.0 };
+
+    let clusters = cluster(tokenize(runs));
+    if clusters.is_empty() {
+        return InlineLayout::default();
+    }
+
+    let mut lines: Vec<LineBox> = Vec::new();
+    let mut y = 0.0f32;
+
+    // Current line accumulator state.
+    let mut cur_x = 0.0f32;
+    let mut cur_positioned: Vec<PositionedRun> = Vec::new();
+    let mut open: Option<PositionedRun> = None;
+    let mut max_ascent = 0.0f32;
+    let mut max_descent = 0.0f32;
+    let mut max_line_height = 0.0f32;
+    let mut max_width = 0.0f32;
+
+    fn close_run(open: &mut Option<PositionedRun>, cur_positioned: &mut Vec<PositionedRun>) {
+        if let Some(r) = open.take() {
+            cur_positioned.push(r);
+        }
+    }
+
+    for c in &clusters {
+        let cluster_width: f32 =
+            c.words.iter().map(|w| metrics.measure(&w.text, runs[w.run].style.font_size)).sum();
+        let space_style = &runs[c.words[0].run].style;
+        let space_w = if c.space_before { metrics.advance(' ', space_style.font_size) } else { 0.0 };
+        let space_w = if space_w.is_finite() { space_w.max(0.0) } else { 0.0 };
+        let cluster_width = if cluster_width.is_finite() { cluster_width.max(0.0) } else { 0.0 };
+
+        let would_add = if cur_x > 0.0 { space_w } else { 0.0 } + cluster_width;
+        if cur_x > 0.0 && cur_x + would_add > available_width {
+            // Wrap: flush the current line, start a fresh one.
+            close_run(&mut open, &mut cur_positioned);
+            max_width = max_width.max(cur_x);
+            let line_height = max_line_height.max(max_ascent + max_descent);
+            let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
+            lines.push(LineBox {
+                rect: Rect { origin: Point { x: 0.0, y }, size: Size { w: cur_x, h: line_height } },
+                baseline,
+                runs: std::mem::take(&mut cur_positioned),
+            });
+            y += line_height;
+            cur_x = 0.0;
+            max_ascent = 0.0;
+            max_descent = 0.0;
+            max_line_height = 0.0;
+        }
+
+        let use_space = cur_x > 0.0 && c.space_before;
+        for (wi, w) in c.words.iter().enumerate() {
+            let style = &runs[w.run].style;
+            let word_w = metrics.measure(&w.text, style.font_size);
+            let word_w = if word_w.is_finite() { word_w.max(0.0) } else { 0.0 };
+            // A leading space only ever precedes the cluster's first word —
+            // subsequent words within a glued cluster never get one (there
+            // was none in the source, that's why they're glued).
+            let leading = if wi == 0 && use_space { " " } else { "" };
+            let leading_w = if !leading.is_empty() { space_w } else { 0.0 };
+
+            let start_x = cur_x;
+            cur_x += leading_w + word_w;
+
+            max_ascent = max_ascent.max(metrics.ascent(style.font_size).max(0.0));
+            max_descent = max_descent.max(metrics.descent(style.font_size).max(0.0));
+            max_line_height = max_line_height.max(resolved_line_height(style, metrics).max(0.0));
+
+            match &mut open {
+                Some(o) if o.run_index == w.run => {
+                    o.text.push_str(leading);
+                    o.text.push_str(&w.text);
+                    o.width = cur_x - o.x;
+                }
+                _ => {
+                    close_run(&mut open, &mut cur_positioned);
+                    let mut text = String::new();
+                    text.push_str(leading);
+                    text.push_str(&w.text);
+                    open = Some(PositionedRun { run_index: w.run, text, x: start_x, width: cur_x - start_x });
+                }
+            }
+        }
+    }
+
+    // Flush the final line.
+    close_run(&mut open, &mut cur_positioned);
+    if !cur_positioned.is_empty() {
+        max_width = max_width.max(cur_x);
+        let line_height = max_line_height.max(max_ascent + max_descent);
+        let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
+        lines.push(LineBox {
+            rect: Rect { origin: Point { x: 0.0, y }, size: Size { w: cur_x, h: line_height } },
+            baseline,
+            runs: cur_positioned,
+        });
+        y += line_height;
+    }
+
+    InlineLayout { size: Size { w: max_width, h: y }, lines }
 }
 
 #[cfg(test)]
