@@ -5,6 +5,10 @@
 //! Shaping-free: Latin-1/UTF-8 advance widths, no complex-script shaping — the
 //! inline engine (P6) breaks lines given these advances.
 
+pub mod bitmap;
+
+pub use bitmap::BitmapFont;
+
 /// Per-font, size-parameterized metrics. All returns are in pixels at `size_px`.
 pub trait Metrics {
     /// Distance from baseline up to the top of typical glyphs.
