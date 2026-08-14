@@ -3,6 +3,34 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M3 — Forms
+
+### D22 — form submit as a pure serializer; controls render as tty text placeholders
+`form::serialize_submit` implements HTML 4.01 §17.13.2 as a PURE function (no
+event wiring — a no-JS browser never runs `onsubmit`; a future interactive
+shell calls this on the activating control). Form controls render as
+synthesized TEXT (not empty boxes, which are invisible in the tty backend per
+D17). v0 choices:
+- **Blank text field filler is `_`, not spaces** — the inline engine collapses
+  whitespace runs unconditionally in v1, so a space-padded field would collapse
+  to one char. Placeholder glyphs: `[value]`/`[____]` inputs (password masked
+  `*`), `[x]`/`[ ]` checkbox, `(*)`/`( )` radio, `[ label ]` buttons,
+  `[ text v]` select, textarea first line truncated. Controls get
+  `display:inline` (UA sheet) so they flow after their labels.
+- **`type=file` → filename only, no multipart**; **`type=image` → plain named
+  submit** (no click coordinates exist in a no-mouse/no-JS browser — treated
+  like a plain submit when it's the activator, documented rather than faking
+  `.x`/`.y`); **checkbox/radio absent `value` → `on`** (universal browser
+  practice). `<select multiple>` contributes one pair per selected option;
+  single-select contributes the selected (else first) option. GET replaces the
+  action's query; POST sends the urlencoded body. Self-rolled percent-encoding
+  (space→`+`, unreserved kept, else `%XX`). Revisit: a fixture needs multipart
+  file upload (needs an interactive file picker — out of scope for the document
+  web) or real image-button coordinates (needs a pointer).
+- **Shared DOM-walk helpers live in crate-private `dom_util`** (one
+  `DEPTH_CAP=100`, OOB-guarded `node_checked`), used by both `form` and
+  `layout::box_tree`, so the two can't drift.
+
 ## M3 — Table layout
 
 ### D21 — tables as a bespoke measure-leaf; bounded + cached per-cell measurement

@@ -13,6 +13,10 @@
 //! `fixtures/tables.html`/`goldens/tables.tty.txt` (table-layout packet, M3)
 //! are the same discipline, ALSO PROPOSED, ALSO not self-blessed — see that
 //! packet's report.
+//!
+//! `fixtures/forms.html`/`goldens/forms.tty.txt` (form-rendering packet,
+//! P-forms) are the same discipline again: PROPOSED, not self-blessed — see
+//! that packet's report for the countersign/bless request.
 
 use stele::backend::tty;
 use stele::dom;
@@ -21,6 +25,7 @@ use stele::style::cascade;
 
 const BASIC_HTML: &str = include_str!("../fixtures/basic.html");
 const TABLES_HTML: &str = include_str!("../fixtures/tables.html");
+const FORMS_HTML: &str = include_str!("../fixtures/forms.html");
 const COLS: usize = 80;
 
 fn dump(html: &str, cols: usize) -> String {
@@ -49,6 +54,13 @@ fn tables_fixture_tty_dump_matches_golden() {
     let actual = dump(TABLES_HTML, COLS);
     let golden = include_str!("../goldens/tables.tty.txt");
     assert_eq!(actual, golden.trim_end_matches('\n'), "tty dump of fixtures/tables.html changed from the PROPOSED golden");
+}
+
+#[test]
+fn forms_fixture_tty_dump_matches_golden() {
+    let actual = dump(FORMS_HTML, COLS);
+    let golden = include_str!("../goldens/forms.tty.txt");
+    assert_eq!(actual, golden.trim_end_matches('\n'), "tty dump of fixtures/forms.html changed from the PROPOSED golden");
 }
 
 #[test]

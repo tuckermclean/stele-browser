@@ -54,4 +54,19 @@ li { display: block; }
 
 blockquote { margin: 1em 40px; }
 hr { margin: 0.5em 0; }
+
+/* Form controls (P-forms): `inline` is CSS's own initial `display` value
+   already (`ComputedStyle::default().display == Display::Inline`), so this
+   rule is redundant with that default -- it is spelled out anyway so the
+   choice is a documented decision, not an accident of what the initial
+   value happens to be. `layout::box_tree::build_form_control` synthesizes
+   each control's visible placeholder text (real widget geometry is the fb
+   backend's job, M4); `inline` here just governs how that placeholder
+   flows relative to surrounding text -- letting `Name: [__________]` sit
+   on one line after its label, rather than every control forcing its own
+   line the way `block` would (real CSS's closest match, `inline-block`,
+   isn't in this dialect's curated `Display` set -- see the packet report). */
+input, select, textarea, button {
+  display: inline;
+}
 "#;

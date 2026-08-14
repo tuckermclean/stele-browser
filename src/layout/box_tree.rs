@@ -24,6 +24,7 @@
 //!     instead of aborting the process.
 
 use crate::dom::{Dom, Element, Node, NodeId};
+use crate::dom_util;
 use crate::layout::{BoxContent, LayoutNode, Size};
 use crate::style::computed::Display;
 use crate::style::ComputedStyle;
@@ -72,6 +73,9 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
                     children: Vec::new(),
                 });
             }
+            if is_form_control(el) {
+                return build_form_control(dom, el, style);
+            }
             let children = if depth >= DEPTH_CAP {
                 Vec::new()
             } else {
@@ -115,6 +119,244 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// Form-control rendering (P-forms, part 2).
+//
+// Real form widgets (a text field you can type into, a real dropdown) are
+// the fb backend's job (M4) -- there is no pixel surface here, only a box
+// tree that eventually becomes tty text. `backend::tty` paints NOTHING for
+// a plain `Box` fragment (DECISIONS D17), so a control left as an empty
+// generated box would be invisible in the golden. Instead, each control
+// synthesizes a small `Container` holding exactly one synthesized
+// `BoxContent::Text` placeholder label (mirroring the `img` -> `Replaced`
+// mapping above: a DOM element becomes a leaf-ish box carrying a stand-in,
+// not its literal DOM children) -- the label flows through the ordinary
+// inline/text pipeline and shows up as real characters in the tty dump.
+//
+// Placeholder convention (documented for the DECISIONS ledger -- see the
+// packet report):
+//   - text-like `<input>` (`text`/`password`/`search`/`email`/`url`/`tel`/
+//     `number`, or no `type` at all): `[<value>]`, tight brackets; with no
+//     `value`, `[<underscores sized to the `size` attr, default 10>]` --
+//     UNDERSCORES, not literal spaces: `layout::inline`'s bespoke
+//     whitespace-collapsing is unconditional in v1 ("v1 always collapses; a
+//     Pre fast-path is a follow-up", per that module's own docs) -- it
+//     collapses ANY run of whitespace to a single space regardless of a
+//     node's `white-space` style, so a run of literal spaces here would
+//     silently collapse down to one space by the time it reaches the tty
+//     grid, defeating the whole point of a size-sized placeholder. `_` is
+//     never whitespace, so it survives that collapsing untouched, and reads
+//     just as clearly as a blank field (`[____________]`) in a text-mode
+//     dump -- arguably more so, since bare spaces between `[`/`]` are
+//     visually indistinguishable from the surrounding background anyway.
+//     `password` masks its value with one `*` per character instead of the
+//     literal text (no `value` still falls back to the same underscore
+//     blank -- nothing to mask).
+//   - `<input type=checkbox>`: `[x]` checked, `[ ]` unchecked.
+//   - `<input type=radio>`: `(*)` checked, `( )` unchecked.
+//   - `<input type=submit|image>`, `<input type=reset>`, `<input
+//     type=button>`, and `<button>` (any/no `type`): `[ <label> ]` --
+//     spaced brackets, distinct from the tight text-field brackets so a
+//     document with both a text field and a submit button doesn't read as
+//     visually identical. Label priority: `value` attribute, else (for
+//     `<button>` only, which can hold markup) its child text, else a
+//     default ("Submit" for submit/image/`<button>`, "Reset" for reset,
+//     "Button" for the `button` input type).
+//   - `<input type=hidden>`: no box, no text at all -- hidden really means
+//     invisible, even in a text-mode dump.
+//   - `<textarea>`: its own text content verbatim if short and single-line;
+//     otherwise the first line, hard-truncated to
+//     [`MAX_TEXTAREA_CHARS`] characters, with a trailing `[...]` marker
+//     (also appended, untruncated, when the first line is short but more
+//     lines follow) -- "first line + [...] if long", per the packet brief.
+//   - `<select>`: `[ <selected option's text> v]` -- the `v` is a crude
+//     ASCII stand-in for a dropdown affordance. The selected option is the
+//     first descendant `<option selected>`; with none marked, the first
+//     `<option>` at all (matching every real browser's fallback, not
+//     spec-mandated but universal practice); with no options whatsoever,
+//     the text is simply empty (`[  v]`) -- total, not a special case.
+//
+// `display` for all of these (UUA sheet, `style/ua.rs`): `inline`. This is
+// CSS's own initial value already (`ComputedStyle::default().display ==
+// Display::Inline`), so the explicit UA rule is redundant with that
+// default -- it's added anyway, spelled out, so the choice is a documented
+// decision rather than an accident of what the initial value happens to
+// be. Inline lets a control flow naturally after its `<label>` text on the
+// same line (`Name: [__________]`), which is legible in a text-mode dump;
+// `block` would force every control onto its own line, wasting vertical
+// space a 25x80 terminal doesn't have to spare. Real widget geometry
+// (fixed pixel width matching `size`, a real dropdown affordance) is the
+// fb backend's job (M4) -- this is a text placeholder, not a form widget.
+// ---------------------------------------------------------------------------
+
+/// Default `<input>` "visible width" (the `size` attribute) when absent --
+/// matches the packet brief's "default ~10".
+const DEFAULT_CONTROL_SIZE: usize = 10;
+/// Upper bound on a (possibly hostile) `size` attribute, so a document
+/// author (or attacker) can't make this synthesize an arbitrarily long
+/// placeholder string. Far past any real form field.
+const MAX_CONTROL_SIZE: usize = 100;
+/// How many characters of a `<textarea>`'s first line are shown before
+/// truncating with `[...]` -- generous enough to be legible, short enough
+/// to keep a form fixture's golden readable in an 80-column dump.
+const MAX_TEXTAREA_CHARS: usize = 20;
+
+fn is_form_control(el: &Element) -> bool {
+    matches!(el.name.as_str(), "input" | "button" | "textarea" | "select")
+}
+
+/// Build a form control's box: a childless-in-DOM `Container` holding
+/// exactly one synthesized `Text` child (the placeholder label). Returns
+/// `None` for `<input type=hidden>` (and, defensively, any future control
+/// kind added to [`is_form_control`] without a matching arm below) -- no
+/// box at all, matching `display: none`'s own "absent entirely" contract
+/// so a hidden field can never leak its value into the tty dump.
+fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle) -> Option<LayoutNode> {
+    let label = control_label(dom, el)?;
+    Some(LayoutNode {
+        content: BoxContent::Container,
+        children: vec![LayoutNode { style: style.clone(), content: BoxContent::Text(label), children: Vec::new() }],
+        style,
+    })
+}
+
+fn control_label(dom: &Dom, el: &Element) -> Option<String> {
+    match el.name.as_str() {
+        "input" => input_label(el),
+        "button" => Some(bracket_spaced(&button_label(dom, el))),
+        "textarea" => Some(textarea_label(dom, el)),
+        "select" => Some(select_label(dom, el)),
+        _ => None,
+    }
+}
+
+fn input_label(el: &Element) -> Option<String> {
+    let ty = el.attrs.get("type").unwrap_or("text").to_ascii_lowercase();
+    Some(match ty.as_str() {
+        "hidden" => return None,
+        "checkbox" => {
+            if dom_util::is_checked(el) {
+                "[x]".to_string()
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        "radio" => {
+            if dom_util::is_checked(el) {
+                "(*)".to_string()
+            } else {
+                "( )".to_string()
+            }
+        }
+        "submit" | "image" => bracket_spaced(&attr_or(el, "value", "Submit")),
+        "reset" => bracket_spaced(&attr_or(el, "value", "Reset")),
+        "button" => bracket_spaced(&attr_or(el, "value", "Button")),
+        "password" => bracket_tight(&password_mask(el)),
+        // text/search/email/url/tel/number, and any unrecognized/future
+        // type, all render as a plain text field.
+        _ => bracket_tight(&text_field_value(el)),
+    })
+}
+
+fn bracket_tight(s: &str) -> String {
+    format!("[{s}]")
+}
+
+fn bracket_spaced(s: &str) -> String {
+    format!("[ {s} ]")
+}
+
+fn attr_or(el: &Element, name: &str, default: &str) -> String {
+    match el.attrs.get(name) {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => default.to_string(),
+    }
+}
+
+/// `size` attribute, defaulted and clamped -- see [`DEFAULT_CONTROL_SIZE`]/
+/// [`MAX_CONTROL_SIZE`]. `0` (technically meaningless as a field width) and
+/// anything unparseable also fall back to the default rather than
+/// synthesizing an empty/zero-width placeholder.
+fn control_size(el: &Element) -> usize {
+    el.attrs
+        .get("size")
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .map(|n| n.min(MAX_CONTROL_SIZE))
+        .unwrap_or(DEFAULT_CONTROL_SIZE)
+}
+
+/// Blank-field filler character -- see the module doc comment's "Placeholder
+/// convention" section for why this is `_` rather than a literal space.
+const BLANK_FILL: &str = "_";
+
+fn text_field_value(el: &Element) -> String {
+    match el.attrs.get("value") {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => BLANK_FILL.repeat(control_size(el)),
+    }
+}
+
+fn password_mask(el: &Element) -> String {
+    match el.attrs.get("value") {
+        Some(v) if !v.is_empty() => "*".repeat(v.chars().count()),
+        _ => BLANK_FILL.repeat(control_size(el)),
+    }
+}
+
+/// `<button>`'s label: an explicit `value` attribute wins if present
+/// (mirroring `<input type=submit>`'s own value-attribute-first rule so the
+/// two stay consistent), else the button's own child text (it's the one
+/// form control that can hold markup/text content), else "Submit" -- HTML's
+/// own default `type` for a `<button>` with no `type` attribute at all.
+fn button_label(dom: &Dom, el: &Element) -> String {
+    if let Some(v) = el.attrs.get("value") {
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    let text = dom_util::collect_text(dom, el);
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        trimmed.to_string()
+    } else {
+        "Submit".to_string()
+    }
+}
+
+/// See the module-level "Placeholder convention" doc comment above for the
+/// exact truncation rule.
+fn textarea_label(dom: &Dom, el: &Element) -> String {
+    let text = dom_util::collect_text(dom, el);
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("");
+    let has_more_lines = lines.next().is_some();
+    let char_count = first.chars().count();
+    if char_count > MAX_TEXTAREA_CHARS {
+        let truncated: String = first.chars().take(MAX_TEXTAREA_CHARS).collect();
+        format!("{truncated}[...]")
+    } else if has_more_lines {
+        format!("{first}[...]")
+    } else {
+        first.to_string()
+    }
+}
+
+/// Rendering convention for a `<select>`, single- or multi-valued alike:
+/// always show just the FIRST selected `<option>`'s text (or the first
+/// option at all, with none marked `selected`) — this is a text-mode
+/// placeholder, not a real scrollable widget (that's the fb backend's job,
+/// M4), so there's no legible way to show "3 of 7 options selected" in one
+/// line without real widget geometry. `dom_util::collect_options` (shared
+/// with `form.rs`, which DOES need every selected option for real multi-
+/// select submission) is reused here for just its first-match lookup.
+fn select_label(dom: &Dom, el: &Element) -> String {
+    let options = dom_util::collect_options(dom, el, 0);
+    let chosen = options.iter().find(|o| o.selected).or_else(|| options.first());
+    let text = chosen.map(|o| o.text.as_str()).unwrap_or("");
+    format!("[ {text} v]")
 }
 
 /// Max `colspan`/`rowspan` a table cell is allowed to carry, per the HTML
@@ -414,6 +656,221 @@ mod tests {
         let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
         assert!(build_box_tree(&d, &styles).is_none());
     }
+
+    // ------------------------------------------------------------------
+    // Form-control rendering (P-forms, part 2): each control synthesizes a
+    // placeholder `Text` label instead of laying out its DOM children (which
+    // for `<input>` don't exist at all -- it's a void element -- and for
+    // `<button>`/`<textarea>`/`<select>` are submission-only content, not
+    // meant to be walked as ordinary boxes). See `build_form_control`'s doc
+    // comment for the exact bracket convention asserted below.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn text_input_renders_bracketed_value() {
+        let d = dom::parser::parse(r#"<input type="text" name="a" value="hi">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[hi]").is_some());
+    }
+
+    #[test]
+    fn text_input_without_type_defaults_to_text_behavior() {
+        let d = dom::parser::parse(r#"<input name="a" value="hi">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[hi]").is_some());
+    }
+
+    #[test]
+    fn text_input_without_value_renders_underscores_sized_to_size_attr() {
+        // Underscores, not literal spaces: `layout::inline` unconditionally
+        // collapses whitespace runs in v1 (see that module's own docs), so
+        // a run of plain spaces here would collapse down to one space by
+        // the time it reaches the tty grid -- `_` is never whitespace, so
+        // it survives untouched. See `build_form_control`'s module doc
+        // comment ("Placeholder convention") for the full rationale.
+        let d = dom::parser::parse(r#"<input type="text" name="a" size="4">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[____]").is_some(), "expected 4 underscores inside brackets");
+    }
+
+    #[test]
+    fn text_input_without_value_or_size_defaults_to_ten_underscores() {
+        let d = dom::parser::parse(r#"<input type="text" name="a">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        let expected = format!("[{}]", "_".repeat(10));
+        assert!(find_text(&root, &expected).is_some());
+    }
+
+    #[test]
+    fn password_input_masks_value_with_asterisks() {
+        let d = dom::parser::parse(r#"<input type="password" name="p" value="secret">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[******]").is_some());
+    }
+
+    #[test]
+    fn checkbox_shows_x_when_checked_and_blank_when_not() {
+        let d = dom::parser::parse(r#"<input type="checkbox" name="c" checked>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[x]").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="checkbox" name="c">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ ]").is_some());
+    }
+
+    #[test]
+    fn radio_shows_star_when_checked_and_blank_when_not() {
+        let d = dom::parser::parse(r#"<input type="radio" name="r" checked>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "(*)").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="radio" name="r">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "( )").is_some());
+    }
+
+    #[test]
+    fn submit_input_shows_value_or_default_submit_label() {
+        let d = dom::parser::parse(r#"<input type="submit" value="Go">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Go ]").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="submit">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ Submit ]").is_some());
+    }
+
+    #[test]
+    fn reset_and_button_type_inputs_show_bracketed_labels() {
+        let d = dom::parser::parse(r#"<input type="reset">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Reset ]").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="button" value="Click">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ Click ]").is_some());
+    }
+
+    #[test]
+    fn hidden_input_renders_nothing() {
+        let d = dom::parser::parse(r#"<div>before<input type="hidden" name="x" value="topsecret123"><span>after</span></div>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "before").is_some());
+        assert!(find_text(&root, "after").is_some());
+        assert!(find_text(&root, "topsecret123").is_none(), "hidden input's value must never appear");
+    }
+
+    #[test]
+    fn button_element_shows_value_then_child_text_then_default() {
+        let d = dom::parser::parse(r#"<button>Send</button>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Send ]").is_some());
+
+        let d2 = dom::parser::parse(r#"<button value="X">Ignored</button>"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ X ]").is_some(), "value attr takes priority over child text");
+
+        let d3 = dom::parser::parse(r#"<button></button>"#);
+        let styles3 = cascade::cascade(&d3, &[]);
+        let root3 = build_box_tree(&d3, &styles3).expect("root present");
+        assert!(find_text(&root3, "[ Submit ]").is_some(), "default when no value/child text");
+    }
+
+    #[test]
+    fn textarea_shows_short_text_verbatim() {
+        let d = dom::parser::parse(r#"<textarea name="n">hello</textarea>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "hello").is_some());
+    }
+
+    #[test]
+    fn textarea_truncates_long_first_line() {
+        let d = dom::parser::parse(r#"<textarea name="n">this line is definitely longer than twenty chars</textarea>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[...]").is_some(), "long content should be truncated with an ellipsis marker");
+    }
+
+    #[test]
+    fn textarea_marks_multiline_content_even_if_first_line_is_short() {
+        let d = dom::parser::parse("<textarea name=\"n\">line one\nline two</textarea>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "line one[...]").is_some());
+    }
+
+    #[test]
+    fn select_shows_selected_option_text() {
+        let d = dom::parser::parse(
+            r#"<select name="color"><option value="r">Red</option><option value="g" selected>Green</option></select>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Green v]").is_some());
+    }
+
+    #[test]
+    fn select_with_no_selected_option_defaults_to_first() {
+        let d = dom::parser::parse(
+            r#"<select name="color"><option value="r">Red</option><option value="g">Green</option></select>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Red v]").is_some());
+    }
+
+    #[test]
+    fn select_with_no_options_renders_without_panicking() {
+        let d = dom::parser::parse(r#"<select name="color"></select>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[  v]").is_some());
+    }
+
+    #[test]
+    fn form_controls_never_recurse_into_their_own_dom_children_as_generic_boxes() {
+        // A <select>'s <option>s must not show up as their own independent
+        // Container/Text boxes distinct from the synthesized label -- the
+        // whole control is exactly one Container + one Text child.
+        let d = dom::parser::parse(r#"<select name="c"><option>Only</option></select>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+
+        fn find_select_box(node: &LayoutNode) -> Option<&LayoutNode> {
+            let is_select_shaped = node.children.len() == 1
+                && matches!(&node.children[0].content, BoxContent::Text(t) if t.contains('[') && t.contains('v'));
+            if is_select_shaped {
+                return Some(node);
+            }
+            for c in &node.children {
+                if let Some(found) = find_select_box(c) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let select_box = find_select_box(&root).expect("select-shaped container present");
+        assert_eq!(select_box.children.len(), 1, "select must synthesize exactly one label child");
+    }
+
 
     #[test]
     fn deeply_nested_dom_does_not_abort_and_returns() {
