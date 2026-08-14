@@ -179,6 +179,57 @@ impl TextGrid {
         self.rows.len()
     }
 
+    /// This grid's column count (`0` for an empty grid). `pub(crate)` — the
+    /// interactive shell (`crate::browser`) needs it to size its viewport
+    /// window at exactly the page grid's own width; not part of the public
+    /// API surface (mirrors [`Cell`]'s own visibility posture).
+    pub(crate) fn cols(&self) -> usize {
+        self.rows.first().map(|r| r.len()).unwrap_or(0)
+    }
+
+    /// The cell at `(row, col)`, or [`Cell::default`] when out of bounds —
+    /// total, never panics, matching every other accessor in this module.
+    /// `pub(crate)`: the interactive shell reads cells to build its own
+    /// focus-highlight overlay (see [`Self::window`]/[`Self::set`]).
+    pub(crate) fn get(&self, row: usize, col: usize) -> Cell {
+        self.rows.get(row).and_then(|r| r.get(col)).copied().unwrap_or_default()
+    }
+
+    /// Overwrite the cell at `(row, col)`, a silent no-op when out of bounds
+    /// (same totality posture as [`Self::blit`]). `pub(crate)`: the
+    /// interactive shell's focus-highlight overlay writes through this
+    /// rather than reaching into `rows` directly, keeping `Cell`/`rows`
+    /// themselves private storage details of this module.
+    pub(crate) fn set(&mut self, row: usize, col: usize, cell: Cell) {
+        if let Some(c) = self.rows.get_mut(row).and_then(|r| r.get_mut(col)) {
+            *c = cell;
+        }
+    }
+
+    /// Crop a `row_count`-tall window starting at `row_start`, same width as
+    /// `self`, padding with blank (`Cell::default`) rows when `self` is
+    /// shorter than the requested window (e.g. a short document scrolled to
+    /// its very bottom, or a totally empty grid) — never panics, unlike
+    /// naive slicing. This is the interactive shell's scroll-viewport
+    /// primitive (`crate::browser::frame::render_frame`): a `Page`'s grid
+    /// holds the WHOLE rendered document, and each drawn frame needs just
+    /// the `rows`-tall slice starting at the current `scroll_row`.
+    pub(crate) fn window(&self, row_start: usize, row_count: usize) -> TextGrid {
+        let cols = self.cols();
+        let mut out = TextGrid::blank(cols, row_count);
+        for r in 0..row_count {
+            let Some(src_row) = self.rows.get(row_start + r) else { break };
+            if let Some(dst_row) = out.rows.get_mut(r) {
+                for (c, cell) in src_row.iter().enumerate() {
+                    if let Some(dst) = dst_row.get_mut(c) {
+                        *dst = *cell;
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Blit `other` into `self` at cell offset `(col_off, row_off)`, clipped
     /// to `self`'s own bounds in both axes — cells of `other` that would
     /// land outside `self` are silently dropped rather than panicking (an
@@ -799,6 +850,60 @@ mod tests {
         let mut canvas = TextGrid::blank(3, 3);
         canvas.blit(&small, 100, 100);
         assert_eq!(canvas.to_text(), "");
+    }
+
+    // --------------------------------------- cols/get/set/window (P7 shell)
+
+    #[test]
+    fn cols_reports_the_grids_width_zero_when_empty() {
+        assert_eq!(TextGrid::blank(5, 3).cols(), 5);
+        assert_eq!(TextGrid::blank(0, 0).cols(), 0);
+    }
+
+    #[test]
+    fn get_out_of_bounds_returns_the_default_cell_not_a_panic() {
+        let grid = TextGrid::blank(2, 2);
+        assert_eq!(grid.get(0, 0), Cell::default());
+        assert_eq!(grid.get(99, 99), Cell::default());
+    }
+
+    #[test]
+    fn set_writes_a_cell_in_bounds_and_is_a_silent_no_op_out_of_bounds() {
+        let mut grid = TextGrid::blank(2, 2);
+        let navy = Color::rgb(0, 0, 128);
+        grid.set(0, 1, Cell { ch: 'x', fg: Color::BLACK, bg: navy });
+        assert_eq!(grid.get(0, 1).ch, 'x');
+        grid.set(99, 99, Cell { ch: 'z', fg: Color::BLACK, bg: navy }); // must not panic
+    }
+
+    #[test]
+    fn window_crops_a_sub_range_of_rows_at_the_same_width() {
+        let fragments =
+            vec![text_fragment(0.0, 0.0, 8.0, 16.0, "a"), text_fragment(0.0, 16.0, 8.0, 16.0, "b"), text_fragment(0.0, 32.0, 8.0, 16.0, "c")];
+        let grid = render(&fragments, 4);
+        let win = grid.window(1, 2);
+        assert_eq!(win.rows_len(), 2);
+        assert_eq!(win.row_text(0), "b   ");
+        assert_eq!(win.row_text(1), "c   ");
+    }
+
+    #[test]
+    fn window_pads_with_blank_rows_past_the_grids_own_height() {
+        let fragments = vec![text_fragment(0.0, 0.0, 8.0, 16.0, "a")];
+        let grid = render(&fragments, 4); // 1 row tall
+        let win = grid.window(0, 3);
+        assert_eq!(win.rows_len(), 3);
+        assert_eq!(win.row_text(0), "a   ");
+        assert_eq!(win.row_text(1), "    ");
+        assert_eq!(win.row_text(2), "    ");
+    }
+
+    #[test]
+    fn window_starting_past_the_grids_end_is_all_blank_not_a_panic() {
+        let grid = TextGrid::blank(3, 2);
+        let win = grid.window(50, 2);
+        assert_eq!(win.rows_len(), 2);
+        assert_eq!(win.to_text(), "");
     }
 
     #[test]
