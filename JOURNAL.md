@@ -404,6 +404,31 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M6 · list-item markers
+
+- Closes the one real dialect gap the kitchen-sink exposed: `<ul>/<ol>/<li>`
+  rendered with NO bullets/numbers (markers were never implemented). `box_tree`
+  now prepends a synthesized marker `Text` to each `<li>` (same stand-in
+  mechanism as details/form-control markers), keyed on the nearest list parent.
+- Support: `disc`/`circle`/`square` → ASCII bullets `* `/`o `/`# ` (ASCII, not
+  Unicode `•`, since the bitmap font is ASCII-only — keeps BOTH the PNG and tty
+  outputs meaningful); `decimal` → `N. `; `lower/upper-alpha` → bijective
+  base-26; `none` → no marker. `lower/upper-roman` absent from the frozen
+  `ListStyleType` enum (nothing to add). `<ol start="N">` honored; nested lists
+  restart ordinals at 1 (per-list counter); `display:none` items don't consume
+  an ordinal (no gaps). Total on li-outside-list, empty/huge/deep lists.
+- Goldens: `fixtures/lists.html` + `goldens/lists.tty.txt` (bullets/decimals/
+  nested-restart/none/start=5, all blessed). `goldens/kitchen-sink.png` +
+  `.tty.txt` REGENERATED (lists now show `* ` and `1./2.`) — orchestrator
+  re-VIEWED + re-blessed; every other golden confirmed byte-identical.
+- Frozen paths empty-diff; no deps; no unsafe. 410 lib + list/golden tests
+  green; accept.sh A3m. See D33.
+- **M6 remaining is release ceremony, not features:** A7 attestation (`cargo
+  vendor` + `cargo-auditable`/`audit` — needs the audit tooling added to the
+  monolith-builder image, so flagged for the operator), the A5 instruction-speed
+  budget, and REPORT.md finalized. The browser itself is feature-complete for
+  v0.1.
+
 ## 2026-08-14 — M6 · hardening core (kitchen-sink + fuzz)
 
 - Release hardening, part 1. `fixtures/kitchen-sink.html` — the everything-page
