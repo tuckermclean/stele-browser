@@ -165,6 +165,19 @@ impl MemSurface {
     /// iterating source pixels and filling a variable-sized band) handles
     /// non-integer `scale` (e.g. a 24px heading, scale 1.5) with no gaps or
     /// overlaps in the output, for upscale AND downscale alike.
+    ///
+    /// Review fix (Important #1): `MAX_GLYPH_PX` alone bounds ONE glyph's
+    /// pixel loop to a fixed worst case (~1024*1024 iterations at a
+    /// saturating `scale`), but does nothing about a glyph placed entirely
+    /// off-canvas — every iteration's `put_pixel` would still run, just to
+    /// be silently clipped. A long document with a huge author `font-size`
+    /// (reachable input: the response body cap is 64MiB, plenty of room for
+    /// a lot of off-screen text) turns that into `O(chars * 1024^2)` wasted
+    /// work regardless of how little (or nothing) is actually visible — an
+    /// aggregate CPU-hang vector, not just a per-glyph one. So: compute the
+    /// glyph's screen-space bounding box up front and bail out in O(1) if it
+    /// doesn't intersect the surface at all, before ever entering the pixel
+    /// loop below.
     fn draw_glyph(&mut self, bitmap: [u8; GLYPH_H], x0: f32, baseline: f32, scale: f32, color: Color) {
         let w_px = ((GLYPH_W as f32 * scale).round().clamp(0.0, MAX_GLYPH_PX)) as i32;
         let h_px = ((GLYPH_H as f32 * scale).round().clamp(0.0, MAX_GLYPH_PX)) as i32;
@@ -173,6 +186,18 @@ impl MemSurface {
         }
         let y0 = baseline - h_px as f32;
         if !x0.is_finite() || !y0.is_finite() {
+            return;
+        }
+
+        // O(1) screen-bbox-vs-surface intersection check: an entirely
+        // off-canvas glyph (past the right/bottom edge, or past the
+        // left/top edge) returns here instead of paying for the pixel loop
+        // at all. `put_pixel` would have clipped every write anyway; this
+        // just stops doing `w_px * h_px` wasted work to get there.
+        let (surface_w, surface_h) = (self.width as f32, self.height as f32);
+        let x1 = x0 + w_px as f32;
+        let y1 = y0 + h_px as f32;
+        if x1 <= 0.0 || y1 <= 0.0 || x0 >= surface_w || y0 >= surface_h {
             return;
         }
 

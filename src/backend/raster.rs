@@ -86,14 +86,22 @@ fn paint_box(surface: &mut dyn Surface, rect: &LayoutRect, style: &ComputedStyle
 
 /// `Some((pixel_width, color))` for a border edge that should actually
 /// paint: `style == Solid` (brief §4: only `solid` is honored in v0 — see
-/// `BorderStyle`'s own doc comment) and a `width` that rounds to `>= 1px`.
-/// `None` (no fill_rect call at all) for `BorderStyle::None`, a non-finite/
-/// negative width, or a sub-half-pixel width that rounds down to `0`.
+/// `BorderStyle`'s own doc comment), a `width` that rounds to `>= 1px`, and
+/// a non-fully-transparent color. `None` (no `fill_rect` call at all) for
+/// `BorderStyle::None`, a non-finite/negative width, a sub-half-pixel width
+/// that rounds down to `0`, or `color.a == 0` (review Minor #2: a `Solid`
+/// border whose color is fully transparent would otherwise still cost a
+/// full-edge `fill_rect` that blends every pixel to a no-op — harmless
+/// today, but wasted work with no visible effect, so it's rejected here
+/// alongside the other "nothing would actually paint" cases).
 fn border_px(side: &BorderSide) -> Option<(u32, Color)> {
     if side.style != BorderStyle::Solid {
         return None;
     }
     if !side.width.is_finite() || side.width <= 0.0 {
+        return None;
+    }
+    if side.color.a == 0 {
         return None;
     }
     let w = side.width.round().clamp(0.0, MAX_COORD) as u32;
@@ -160,6 +168,22 @@ pub fn encode_png(surface: &MemSurface) -> Vec<u8> {
 
 fn encode_png_unchecked(surface: &MemSurface) -> Vec<u8> {
     let (w, h) = surface.size();
+    // `MemSurface`'s own documented invariant (`pixels: width * height * 4`
+    // bytes, RGBA8) is exactly what makes `write_image_data` infallible here
+    // in practice (see below). Review fix (Minor #3): that invariant was
+    // previously only asserted in a comment; a `debug_assert_eq!` makes a
+    // future change that breaks it (on either side: `MemSurface` or this
+    // function) fail loudly in debug/test builds instead of silently
+    // encoding a corrupt PNG (or writing partial bytes) with no signal. Not
+    // a `assert!`/panic in release: the release-profile totality contract
+    // (`panic = "abort"`, brief's "no reachable panic" bar) shouldn't gate
+    // on an invariant that's cheap to verify here in debug and otherwise
+    // unreachable given `MemSurface::new`'s own construction.
+    debug_assert_eq!(
+        surface.bytes().len(),
+        (w as usize) * (h as usize) * 4,
+        "MemSurface invariant violated: bytes().len() must be width * height * 4 (RGBA8)"
+    );
     let mut buf = Vec::new();
     let mut encoder = png::Encoder::new(&mut buf, w, h);
     encoder.set_color(png::ColorType::Rgba);
@@ -167,10 +191,11 @@ fn encode_png_unchecked(surface: &MemSurface) -> Vec<u8> {
     if let Ok(mut writer) = encoder.write_header() {
         // Both `write_header` and `write_image_data` are fallible only for
         // I/O errors or a size mismatch; writing into a `Vec<u8>` with
-        // exactly `w * h * 4` bytes (MemSurface's own invariant) can't hit
-        // either in practice. Degrading to whatever bytes were written so
-        // far (rather than unwrapping) keeps this function panic-free
-        // regardless.
+        // exactly `w * h * 4` bytes (MemSurface's own invariant, asserted
+        // above) can't hit either in practice. Degrading to whatever bytes
+        // were written so far (rather than unwrapping) keeps this function
+        // panic-free regardless (release builds have no debug_assert to
+        // catch a violation, so this fallback is the real backstop there).
         let _ = writer.write_image_data(surface.bytes());
     }
     buf
@@ -242,6 +267,21 @@ mod tests {
     fn none_style_border_paints_nothing_even_with_nonzero_width() {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 3.0, style: BorderStyle::None, color: Color::rgb(255, 0, 0) };
+        let style = box_style(Color::TRANSPARENT, border);
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style } }];
+        paint(&mut s, &fragments);
+        assert_eq!(px(&s, 0, 0), Color::WHITE);
+    }
+
+    /// Review fix (Minor #2): a `Solid` border whose color is fully
+    /// transparent (`a == 0`) should short-circuit in `border_px` rather
+    /// than reaching a `fill_rect` call that blends every edge pixel to a
+    /// no-op. Behaviorally identical either way (harmless, just wasteful
+    /// pre-fix) -- this pins the no-op result.
+    #[test]
+    fn solid_border_with_fully_transparent_color_paints_nothing() {
+        let mut s = MemSurface::new(10, 10, Color::WHITE);
+        let border = BorderSide { width: 3.0, style: BorderStyle::Solid, color: Color::rgba(255, 0, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style } }];
         paint(&mut s, &fragments);
