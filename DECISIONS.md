@@ -3,6 +3,26 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M5 — @media
+
+### D30 — @media evaluated in a viewport pre-pass (no frozen-signature change)
+`@media` blocks were parsed-then-discarded (only `media_at_rules` counted).
+**Choice:** the parser now STORES them (`Stylesheet.media_rules`: condition +
+nested rules, sharing the global rule `order` counter), and a `flatten_media(
+sheet, viewport)` pre-pass evaluates each query against the render viewport,
+producing a media-free `Stylesheet` that `cascade` consumes unchanged — so the
+frozen `parse`/`cascade` signatures stay put (`cascade` diff is literally
+zero). Sharing one `order` counter across top-level and `@media`-body rules
+makes a matching block cascade exactly as if written inline (later `@media`
+beats earlier equal-specificity), no positional fixups. **Supported subset:**
+media types `all`/`screen`, width features `(min-width|max-width|width: px)`,
+`and`, comma=OR; `print`, `not`, unknown features/types, and malformed
+conditions **fail closed** (never match), never panic. **Viewport width** per
+render mode: tty `cols*8`, png 800, fb device width, frames per-region.
+`min/max-height` out of scope (all modes lay out at content-driven unbounded
+height). Revisit: `<link>` external CSS (still deferred), height/orientation
+features, `!important`.
+
 ## M5 — flex-polite (flexbox pixel-green)
 
 ### D29 — flexbox renders to pixels; whitespace-only text is not a flex item

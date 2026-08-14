@@ -3,9 +3,32 @@
 //! scope: element, `.class`, `#id`, descendant, grouping, `a:link`/`:visited`
 //! (brief §4).
 
+use crate::style::media::MediaQuery;
 use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
 use crate::style::tokenizer::{tokenize, Token};
 use crate::style::value::{self, Declarations};
+
+/// One parsed `@media` block: its condition (an unevaluated [`MediaQuery`] —
+/// evaluating it against a viewport is `style::media::flatten_media`'s job,
+/// not the parser's, since `parse`'s frozen signature carries no viewport)
+/// and the ordinary [`StyleRule`]s from its body, parsed exactly like
+/// top-level rules (same selector/declaration grammar, same recovery).
+///
+/// `source_index` is the GLOBAL rule-order counter's value at the point the
+/// `@media` keyword was encountered — every [`StyleRule`] in `rules` below
+/// was itself assigned an `order` from that SAME shared counter (see
+/// `parse`'s doc comment), so a flattened block's rules slot into the
+/// correct position relative to top-level rules purely via their own
+/// `order` fields; `source_index` is kept on `MediaRule` itself mainly for
+/// debuggability/symmetry with the design brief, not because flattening
+/// needs to consult it.
+#[derive(Debug, Clone)]
+pub(crate) struct MediaRule {
+    pub query: MediaQuery,
+    pub rules: Vec<StyleRule>,
+    #[allow(dead_code)]
+    pub source_index: u32,
+}
 
 /// One rule after comma-grouping has been expanded: a single selector, its
 /// source-order index (for cascade tie-breaking), and the declarations it
@@ -25,16 +48,21 @@ pub struct Stylesheet {
     /// Declarations parsed successfully but outside the curated set, or
     /// syntactically broken beyond recovery (brief §10 error recovery).
     pub ignored_declarations: u32,
-    /// `@media` blocks: parsed syntactically (their nested rules are fully
-    /// tokenized so a malformed one can't wedge the parser) but never
-    /// evaluated or applied — that needs a viewport the frozen `parse`/
-    /// `cascade` signatures don't carry (scoped to M5).
-    /// TODO(M5): evaluate @media against surface size instead of discarding.
+    /// `@media` blocks encountered while parsing (count only — see
+    /// `media_rules` below for the actual parsed condition + nested rules).
     pub media_at_rules: u32,
     /// Any other at-rule (`@import`, `@font-face`, `@keyframes`, …): parsed
     /// syntactically and discarded — none are in the curated dialect (§4).
     pub ignored_at_rules: u32,
     pub(crate) rules: Vec<StyleRule>,
+    /// M5: `@media` blocks, parsed but NOT yet evaluated against a
+    /// viewport — `parse`'s frozen signature carries no viewport, so a
+    /// `Stylesheet` fresh out of `parse` still behaves exactly as it did
+    /// pre-M5 if fed straight to `cascade` (these never leak into `rules`).
+    /// `style::media::flatten_media` is the separate pre-pass that
+    /// evaluates each query against a real viewport width and folds the
+    /// matching ones into an ordinary media-free `Stylesheet`.
+    pub(crate) media_rules: Vec<MediaRule>,
 }
 
 /// Parse a stylesheet. Total: never panics, on any input. Full CSS syntax is
@@ -58,11 +86,18 @@ pub fn parse(css: &str) -> Stylesheet {
             Token::AtKeyword(name) => {
                 let is_media = name.eq_ignore_ascii_case("media");
                 pos += 1;
-                skip_at_rule_body(&tokens, &mut pos, is_media, &mut sheet);
+                if is_media {
+                    parse_media_at_rule(&tokens, &mut pos, &mut sheet, &mut order);
+                } else {
+                    skip_at_rule_body(&tokens, &mut pos, &mut sheet);
+                }
             }
             // A stray close-brace at the top level: nothing to close, drop it.
             Token::RBrace => pos += 1,
-            _ => parse_rule(&tokens, &mut pos, &mut sheet, &mut order),
+            _ => {
+                let rules = parse_rule(&tokens, &mut pos, &mut sheet, &mut order);
+                sheet.rules.extend(rules);
+            }
         }
     }
     sheet
@@ -109,17 +144,21 @@ fn skip_ws(tokens: &[Token], pos: &mut usize) {
     }
 }
 
-/// Consume one at-rule's body after its keyword: either up to and including
-/// a top-level `;`, or — if a `{` appears first — a balanced-brace block
-/// (needed for `@media { ... }`, whose block contains whole nested rules).
-/// Never panics; if neither terminator appears, consumes to EOF.
-fn skip_at_rule_body(tokens: &[Token], pos: &mut usize, is_media: bool, sheet: &mut Stylesheet) {
+/// Consume one NON-media at-rule's body after its keyword: either up to and
+/// including a top-level `;`, or — if a `{` appears first — a balanced-brace
+/// block. Never panics; if neither terminator appears, consumes to EOF.
+/// `@media` is handled separately by [`parse_media_at_rule`] (it needs to
+/// keep the block contents, not discard them); this always counts against
+/// `ignored_at_rules` — also used for a nested at-rule found INSIDE an
+/// `@media` body (nested `@media`/other at-rules are out of the curated
+/// scope; see `parse_media_body`).
+fn skip_at_rule_body(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet) {
     let len = tokens.len();
     while *pos < len {
         match &tokens[*pos] {
             Token::Semicolon => {
                 *pos += 1;
-                bump_at_rule_counter(sheet, is_media);
+                sheet.ignored_at_rules += 1;
                 return;
             }
             Token::LBrace => {
@@ -133,29 +172,110 @@ fn skip_at_rule_body(tokens: &[Token], pos: &mut usize, is_media: bool, sheet: &
                     }
                     *pos += 1;
                 }
-                bump_at_rule_counter(sheet, is_media);
+                sheet.ignored_at_rules += 1;
                 return;
             }
             _ => *pos += 1,
         }
     }
     // Ran off the end without a terminator — still counts; nothing left to skip.
-    bump_at_rule_counter(sheet, is_media);
+    sheet.ignored_at_rules += 1;
 }
 
-fn bump_at_rule_counter(sheet: &mut Stylesheet, is_media: bool) {
-    if is_media {
-        sheet.media_at_rules += 1;
-    } else {
-        sheet.ignored_at_rules += 1;
+/// Parse one `@media` block after its keyword has already been consumed:
+/// the condition tokens up to `{`/`;`, and — if a `{` was actually reached —
+/// its balanced-brace body, parsed as ordinary rules via
+/// [`parse_media_body`] and stored (with the unevaluated [`MediaQuery`]) as
+/// a new [`MediaRule`] on `sheet`. `media_at_rules` is bumped either way
+/// (malformed input — no reachable `{`, e.g. `@media screen;` or a
+/// truncated `@media` at EOF — still counts, matching the pre-M5 counting
+/// behavior, but stores no `MediaRule`: brief §10 recovery, never a panic).
+fn parse_media_at_rule(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet, order: &mut u32) {
+    let len = tokens.len();
+    let cond_start = *pos;
+    while *pos < len && tokens[*pos] != Token::LBrace && tokens[*pos] != Token::Semicolon {
+        *pos += 1;
     }
+    let condition_tokens = tokens[cond_start..*pos].to_vec();
+    let source_index = *order;
+
+    if *pos >= len || tokens[*pos] == Token::Semicolon {
+        if *pos < len {
+            *pos += 1; // consume the ';'
+        }
+        sheet.media_at_rules += 1;
+        return;
+    }
+
+    // tokens[*pos] == LBrace
+    *pos += 1;
+    let body_start = *pos;
+    let mut depth = 1i32;
+    while *pos < len && depth > 0 {
+        match &tokens[*pos] {
+            Token::LBrace => depth += 1,
+            Token::RBrace => depth -= 1,
+            _ => {}
+        }
+        *pos += 1;
+    }
+    // If the block closed cleanly, exclude the closing '}' itself; if it ran
+    // off the end unbalanced, the body is everything remaining (tolerated).
+    let body_end = if depth == 0 { *pos - 1 } else { *pos };
+    let body_tokens = tokens[body_start..body_end].to_vec();
+
+    let query = MediaQuery::parse(&condition_tokens);
+    let rules = parse_media_body(&body_tokens, sheet, order);
+    sheet.media_at_rules += 1;
+    sheet.media_rules.push(MediaRule { query, rules, source_index });
+}
+
+/// Parse an `@media` block's body tokens (already extracted, balanced) as a
+/// sequence of ordinary rules — same selector/declaration-block grammar and
+/// recovery as the top level (`parse`'s own loop), sharing the SAME `order`
+/// counter so every rule in the whole stylesheet (top-level or nested) gets
+/// a globally comparable source-order value (see `MediaRule`'s doc comment
+/// for why that's what lets `flatten_media` skip any position-based
+/// reordering). A nested at-rule inside the block (including a nested
+/// `@media`) is out of the curated scope — tokenized defensively via
+/// `skip_at_rule_body` (never a panic) and counted as an ignored at-rule,
+/// never treated as a second `MediaRule`.
+fn parse_media_body(tokens: &[Token], sheet: &mut Stylesheet, order: &mut u32) -> Vec<StyleRule> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    let len = tokens.len();
+    while pos < len {
+        skip_ws(tokens, &mut pos);
+        if pos >= len {
+            break;
+        }
+        match &tokens[pos] {
+            Token::AtKeyword(_) => {
+                pos += 1;
+                skip_at_rule_body(tokens, &mut pos, sheet);
+            }
+            Token::RBrace => pos += 1,
+            _ => {
+                let rules = parse_rule(tokens, &mut pos, sheet, order);
+                out.extend(rules);
+            }
+        }
+    }
+    out
 }
 
 /// Parse one rule: a selector list (comma-separated), then a `{ ... }`
 /// declaration block. If no `{` is reachable before a boundary that can't be
 /// part of a selector (`}`, `;`, or EOF), the whole prelude is a bad rule —
 /// recover by skipping to the next `}` per brief §10.
-fn parse_rule(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet, order: &mut u32) {
+///
+/// Returns the parsed [`StyleRule`]s (one per selector in a comma-grouped
+/// list; empty on a bad rule) rather than pushing them directly onto a
+/// `Stylesheet`'s `rules`, so the same function serves both the top-level
+/// parse loop (destination: `sheet.rules`) and an `@media` body
+/// (destination: that block's own `Vec`, later folded in — or not — by
+/// `style::media::flatten_media`) without aliasing `sheet` mutably twice.
+fn parse_rule(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet, order: &mut u32) -> Vec<StyleRule> {
     let len = tokens.len();
     let selectors = parse_selector_list(tokens, pos);
     skip_ws(tokens, pos);
@@ -167,7 +287,7 @@ fn parse_rule(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet, order: 
         if *pos < len {
             *pos += 1; // consume the recovering '}'
         }
-        return;
+        return Vec::new();
     }
 
     *pos += 1; // consume '{'
@@ -175,13 +295,10 @@ fn parse_rule(tokens: &[Token], pos: &mut usize, sheet: &mut Stylesheet, order: 
 
     let this_order = *order;
     *order += 1;
-    for sel in selectors {
-        sheet.rules.push(StyleRule {
-            selector: sel,
-            order: this_order,
-            declarations: decls.clone(),
-        });
-    }
+    selectors
+        .into_iter()
+        .map(|sel| StyleRule { selector: sel, order: this_order, declarations: decls.clone() })
+        .collect()
 }
 
 fn parse_selector_list(tokens: &[Token], pos: &mut usize) -> Vec<Selector> {
@@ -647,17 +764,73 @@ mod tests {
     }
 
     #[test]
-    fn media_query_is_parsed_but_never_applied() {
+    fn media_query_is_parsed_and_never_leaks_into_rules_without_flattening() {
         let sheet = parse("@media (min-width: 800px) { p { color: red; } } p { color: blue; }");
         assert_eq!(sheet.media_at_rules, 1);
         // The rule inside @media must not leak into the flat rule list —
-        // it is inert until M5 wires up viewport evaluation.
+        // `cascade` reads `rules` directly and never sees `media_rules`
+        // (that's `style::media::flatten_media`'s job, a separate pre-pass).
         assert_eq!(sheet.rules.len(), 1);
 
         let dom = crate::dom::parser::parse("<p>t</p>");
         let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
         let p = find(&dom, "p").unwrap();
         assert_eq!(styles[p].color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn media_query_is_now_stored_not_just_counted() {
+        // M5: the @media block's condition + nested rule must actually be
+        // STORED (not discarded like pre-M5), even though `rules` stays
+        // media-free (see the test above).
+        let sheet = parse("@media (min-width: 800px) { p { color: red; } } p { color: blue; }");
+        assert_eq!(sheet.media_rules.len(), 1);
+        let media_rule = &sheet.media_rules[0];
+        assert_eq!(media_rule.rules.len(), 1);
+        assert_eq!(media_rule.rules[0].declarations.color, Some(Color::rgb(255, 0, 0)));
+        assert!(media_rule.query.matches(1024.0));
+        assert!(!media_rule.query.matches(640.0));
+    }
+
+    #[test]
+    fn grouped_selectors_inside_media_each_get_a_stored_rule() {
+        let sheet = parse("@media screen { p, span { color: red; } }");
+        assert_eq!(sheet.media_rules.len(), 1);
+        assert_eq!(sheet.media_rules[0].rules.len(), 2);
+    }
+
+    #[test]
+    fn malformed_media_at_eof_does_not_panic_and_stores_nothing() {
+        for css in ["@media", "@media screen", "@media (min-width: 800px)", "@media;", "@media screen;"] {
+            let sheet = parse(css);
+            assert_eq!(sheet.media_at_rules, 1, "for {css:?}");
+            assert!(sheet.media_rules.is_empty(), "for {css:?}");
+        }
+    }
+
+    #[test]
+    fn pathological_5000_media_rules_does_not_panic() {
+        let mut css = String::new();
+        for i in 0..5000 {
+            css.push_str(&format!("@media (min-width: {i}px) {{ .c{i} {{ color: red; }} }}\n"));
+        }
+        let sheet = parse(&css);
+        assert_eq!(sheet.media_at_rules, 5000);
+        assert_eq!(sheet.media_rules.len(), 5000);
+    }
+
+    #[test]
+    fn deeply_nested_garbage_braces_inside_media_does_not_panic() {
+        let mut css = String::from("@media (min-width: 1px) { ");
+        for _ in 0..2000 {
+            css.push('{');
+        }
+        for _ in 0..2000 {
+            css.push('}');
+        }
+        css.push_str(" p { color: red; } }");
+        let sheet = parse(&css);
+        assert_eq!(sheet.media_at_rules, 1);
     }
 
     #[test]
@@ -714,6 +887,13 @@ mod tests {
             "*{color:red}",
             "@import url(x.css);",
             "@charset \"utf-8\";",
+            "@media",
+            "@media {",
+            "@media (",
+            "@media (min-width:",
+            "@media screen and (max-width: 500px",
+            "@media , , , { p { color: red; } }",
+            "@media not screen and (max-width: 500px) { p { color: red; } }",
         ];
         for i in inputs {
             let _ = parse(i);

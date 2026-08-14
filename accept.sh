@@ -337,6 +337,50 @@ else
     bad "A3g: PNG dump of $FIXTURE_FLEX differs from $GOLDEN_PNG_FLEX"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_FLEX") actual=$(wc -c < /tmp/stele_a3g.png)"
   fi
+
+  # A3h/A3i -- the @media packet's own tty goldens (M5): fixtures/media-
+  # query.html rendered at TWO widths through the real --dump-text pipeline
+  # (which now flattens @media against `cols * 8px` before cascade runs --
+  # see style::media::flatten_media / style::collect_author_sheets_for_
+  # viewport). A3h is the default-80-cols/640px dump (the `(max-width:
+  # 500px)` query does NOT match: sidebar visible, narrow-notice absent);
+  # A3i is the `--cols 40`/320px dump (the query DOES match: sidebar
+  # hidden, narrow-notice visible) -- together they're the one live proof
+  # in this shell-level acceptance script that @media actually responds to
+  # the viewport, not just a hardcoded Rust unit test. Same blessing
+  # discipline as every other tty golden here.
+  GOLDEN_TTY_MEDIA_WIDE="goldens/media-query-wide.tty.txt"
+  GOLDEN_TTY_MEDIA_NARROW="goldens/media-query-narrow.tty.txt"
+  FIXTURE_MEDIA="fixtures/media-query.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3h: host binary still not found at $HOST_BIN"
+  elif ! out_media_wide="$("$HOST_BIN" --headless --dump-text "$FIXTURE_MEDIA" 2>/tmp/stele_a3h.err)"; then
+    bad "A3h: stele --headless --dump-text crashed on $FIXTURE_MEDIA"
+    sed 's/^/    /' /tmp/stele_a3h.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_media_wide" > "$GOLDEN_TTY_MEDIA_WIDE"
+    pass "A3h: blessed media-query WIDE tty golden -> $GOLDEN_TTY_MEDIA_WIDE (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_MEDIA_WIDE" <(printf '%s\n' "$out_media_wide") >/tmp/stele_a3h.diff 2>&1; then
+    pass "A3h: tty dump of $FIXTURE_MEDIA at 80 cols (640px, query does not match) matches golden"
+  else
+    bad "A3h: tty dump of $FIXTURE_MEDIA at 80 cols differs from $GOLDEN_TTY_MEDIA_WIDE"
+    sed 's/^/    /' /tmp/stele_a3h.diff
+  fi
+
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3i: host binary still not found at $HOST_BIN"
+  elif ! out_media_narrow="$("$HOST_BIN" --headless --dump-text "$FIXTURE_MEDIA" --cols 40 2>/tmp/stele_a3i.err)"; then
+    bad "A3i: stele --headless --dump-text crashed on $FIXTURE_MEDIA --cols 40"
+    sed 's/^/    /' /tmp/stele_a3i.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_media_narrow" > "$GOLDEN_TTY_MEDIA_NARROW"
+    pass "A3i: blessed media-query NARROW tty golden -> $GOLDEN_TTY_MEDIA_NARROW (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_MEDIA_NARROW" <(printf '%s\n' "$out_media_narrow") >/tmp/stele_a3i.diff 2>&1; then
+    pass "A3i: tty dump of $FIXTURE_MEDIA at 40 cols (320px, query matches) matches golden"
+  else
+    bad "A3i: tty dump of $FIXTURE_MEDIA at 40 cols differs from $GOLDEN_TTY_MEDIA_NARROW"
+    sed 's/^/    /' /tmp/stele_a3i.diff
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

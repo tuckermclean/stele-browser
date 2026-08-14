@@ -198,8 +198,11 @@ fn dump_text(source: &str, cols: usize) -> String {
     // in document order — see style::author's own doc comment for why
     // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
     // extra wiring: cascade reads it straight off each Element it already
-    // walks.
-    let author_sheets = style::collect_author_sheets(&dom_tree);
+    // walks. M5 media: viewport WIDTH for a tty dump is `cols * 8px` (the
+    // tty cell width) — `collect_author_sheets_for_viewport` flattens any
+    // `@media` in those sheets against that width before cascade ever runs.
+    let viewport_width = cols as f32 * 8.0;
+    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_width);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // A tty dump never paints pixels, so skip the image fetch+decode
     // pre-pass entirely (an empty map — every <img> stays its `[alt]`-style
@@ -207,7 +210,7 @@ fn dump_text(source: &str, cols: usize) -> String {
     let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return String::new();
     };
-    let viewport = Size { w: cols as f32 * 8.0, h: HEADLESS_VIEWPORT_HEIGHT };
+    let viewport = Size { w: viewport_width, h: HEADLESS_VIEWPORT_HEIGHT };
     let fragments = layout::layout(&root, viewport);
     tty::render(&fragments, cols).to_text()
 }
@@ -251,8 +254,10 @@ fn dump_png(source: &str) -> Vec<u8> {
     // in document order — see style::author's own doc comment for why
     // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
     // extra wiring: cascade reads it straight off each Element it already
-    // walks.
-    let author_sheets = style::collect_author_sheets(&dom_tree);
+    // walks. M5 media: `--dump-png`'s viewport width is the fixed
+    // `DEFAULT_PNG_WIDTH` (below) — flatten any `@media` against THAT, not
+    // the pre-M5 unconditional pass-through.
+    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, DEFAULT_PNG_WIDTH as f32);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // Pixels matter on this path: fetch+decode every <img src> up front
     // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
@@ -330,8 +335,9 @@ fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
     // in document order — see style::author's own doc comment for why
     // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
     // extra wiring: cascade reads it straight off each Element it already
-    // walks.
-    let author_sheets = style::collect_author_sheets(&dom_tree);
+    // walks. M5 media: `--render-fb`'s viewport width is the real
+    // framebuffer width (`width` param) — flatten any `@media` against that.
+    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, width as f32);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {

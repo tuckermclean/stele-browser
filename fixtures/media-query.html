@@ -1,0 +1,17 @@
+<html>
+<head>
+<style>
+  .sidebar { display: block; }
+  .note { display: none; }
+  @media (max-width: 500px) {
+    .sidebar { display: none; }
+    .note { display: block; }
+  }
+</style>
+</head>
+<body>
+<div class="sidebar">SIDEBAR VISIBLE AT WIDE WIDTH</div>
+<p>Main article text stays visible at every width.</p>
+<div class="note">NARROW WIDTH NOTICE BELOW 500PX</div>
+</body>
+</html>

@@ -1,0 +1,4 @@
+
+ SIDEBAR VISIBLE AT WIDE WIDTH
+
+ Main article text stays visible at every width.

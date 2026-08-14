@@ -404,6 +404,34 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M5 · @media — responsive CSS responds
+
+- `@media` queries now WORK. They were parsed only to be COUNTED and discarded
+  (`media_at_rules`); this packet parses + STORES the query + its rules and
+  evaluates them against the render viewport in a PRE-PASS — so `cascade`'s
+  frozen signature never needs a viewport (its diff vs main is zero).
+- `style::media` (new): `MediaQuery` parser + `matches(viewport_width)` (types
+  `all`/`screen`, `(min/max/width: px)`, `and`, `,`=OR; `print`/unknown/`not`/
+  malformed fail closed) + `flatten_media(sheet, viewport) -> Stylesheet`.
+  Parser stores `Stylesheet.media_rules`; `parse_rule` refactored to share a
+  single global `order` counter across top-level and `@media`-body rules, so a
+  matching `@media` block folds in at exactly its source position (a later
+  `@media` still beats an earlier equal-specificity top-level rule) with no
+  positional fixups. Pipeline: `collect_author_sheets_for_viewport` →
+  `flatten_media` → `cascade`. Viewport width per mode: dump_text `cols*8`,
+  dump_png 800, fb device width, frames per-region width.
+- Goldens (blessed) — `fixtures/media-query.html` at two widths prove both
+  branches: WIDE (640px) → `(max-width:500px)` doesn't fire, sidebar visible;
+  NARROW (320px, `--cols 40`) → fires, sidebar `display:none` and a narrow
+  notice appears. Tested through the REAL viewport-aware pipeline (+ a baseline
+  test proving the flatten is load-bearing).
+- `min/max-height` out of scope (every mode lays out at content-driven
+  effectively-unbounded height — no meaningful height viewport). Orchestrator-
+  reviewed directly + goldens countersigned; frozen zero-diff; no deps/unsafe.
+  388 lib tests green; accept.sh A3h/A3i. See D30.
+- **M5 progressing:** author CSS ✅ · flexbox ✅ · @media ✅. NEXT:
+  `details`/`summary`, `noscript`, full entity coverage, `--stats` counter.
+
 ## 2026-08-14 — M5 · flex-polite pixel-green — MODERN FLEX ON A 486
 
 - The charter's headline promise, delivered and VISIBLE: a modern no-JS blog
