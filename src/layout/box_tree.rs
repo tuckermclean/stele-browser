@@ -24,6 +24,7 @@
 //!     instead of aborting the process.
 
 use crate::dom::{Dom, Element, Node, NodeId};
+use crate::dom_util;
 use crate::layout::{BoxContent, LayoutNode, Size};
 use crate::style::computed::Display;
 use crate::style::ComputedStyle;
@@ -236,14 +237,14 @@ fn input_label(el: &Element) -> Option<String> {
     Some(match ty.as_str() {
         "hidden" => return None,
         "checkbox" => {
-            if is_checked(el) {
+            if dom_util::is_checked(el) {
                 "[x]".to_string()
             } else {
                 "[ ]".to_string()
             }
         }
         "radio" => {
-            if is_checked(el) {
+            if dom_util::is_checked(el) {
                 "(*)".to_string()
             } else {
                 "( )".to_string()
@@ -257,10 +258,6 @@ fn input_label(el: &Element) -> Option<String> {
         // type, all render as a plain text field.
         _ => bracket_tight(&text_field_value(el)),
     })
-}
-
-fn is_checked(el: &Element) -> bool {
-    el.attrs.get("checked").is_some()
 }
 
 fn bracket_tight(s: &str) -> String {
@@ -320,7 +317,7 @@ fn button_label(dom: &Dom, el: &Element) -> String {
             return v.to_string();
         }
     }
-    let text = collect_text(dom, el);
+    let text = dom_util::collect_text(dom, el);
     let trimmed = text.trim();
     if !trimmed.is_empty() {
         trimmed.to_string()
@@ -332,7 +329,7 @@ fn button_label(dom: &Dom, el: &Element) -> String {
 /// See the module-level "Placeholder convention" doc comment above for the
 /// exact truncation rule.
 fn textarea_label(dom: &Dom, el: &Element) -> String {
-    let text = collect_text(dom, el);
+    let text = dom_util::collect_text(dom, el);
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
     let has_more_lines = lines.next().is_some();
@@ -347,74 +344,19 @@ fn textarea_label(dom: &Dom, el: &Element) -> String {
     }
 }
 
+/// Rendering convention for a `<select>`, single- or multi-valued alike:
+/// always show just the FIRST selected `<option>`'s text (or the first
+/// option at all, with none marked `selected`) — this is a text-mode
+/// placeholder, not a real scrollable widget (that's the fb backend's job,
+/// M4), so there's no legible way to show "3 of 7 options selected" in one
+/// line without real widget geometry. `dom_util::collect_options` (shared
+/// with `form.rs`, which DOES need every selected option for real multi-
+/// select submission) is reused here for just its first-match lookup.
 fn select_label(dom: &Dom, el: &Element) -> String {
-    let options = collect_options(dom, el, 0);
+    let options = dom_util::collect_options(dom, el, 0);
     let chosen = options.iter().find(|o| o.selected).or_else(|| options.first());
     let text = chosen.map(|o| o.text.as_str()).unwrap_or("");
     format!("[ {text} v]")
-}
-
-struct SelectOption {
-    text: String,
-    selected: bool,
-}
-
-/// Depth-first collect every `<option>` reachable under `el` (handles the
-/// common flat case and `<optgroup>`-wrapped options alike, since any
-/// non-`option` element in between is simply recursed through). Bounded by
-/// [`DEPTH_CAP`] against pathologically nested/hostile markup, exactly like
-/// every other recursive walk in this module.
-fn collect_options(dom: &Dom, el: &Element, depth: usize) -> Vec<SelectOption> {
-    let mut out = Vec::new();
-    collect_options_into(dom, el, depth, &mut out);
-    out
-}
-
-fn collect_options_into(dom: &Dom, el: &Element, depth: usize, out: &mut Vec<SelectOption>) {
-    if depth >= DEPTH_CAP {
-        return;
-    }
-    for &child in &el.children {
-        if child >= dom.len() {
-            continue;
-        }
-        if let Node::Element(ce) = dom.node(child) {
-            if ce.name.as_str() == "option" {
-                out.push(SelectOption {
-                    text: collect_text(dom, ce).trim().to_string(),
-                    selected: ce.attrs.get("selected").is_some(),
-                });
-            } else {
-                collect_options_into(dom, ce, depth + 1, out);
-            }
-        }
-    }
-}
-
-/// Concatenate every text-node descendant of `el`. `<textarea>` is a
-/// RAWTEXT element in this parser's dialect (a single already-decoded
-/// `Text` child), so this degenerates to reading that one child in the
-/// common case; it also handles `<button>`/`<option>`'s ordinary (possibly
-/// mixed-markup) children unchanged. Bounded by [`DEPTH_CAP`].
-fn collect_text(dom: &Dom, el: &Element) -> String {
-    let mut out = String::new();
-    collect_text_into(dom, el, 0, &mut out);
-    out
-}
-
-fn collect_text_into(dom: &Dom, el: &Element, depth: usize, out: &mut String) {
-    if depth >= DEPTH_CAP {
-        return;
-    }
-    for &child in &el.children {
-        if child >= dom.len() {
-            continue;
-        }
-        match dom.node(child) {
-            Node::Text(t) => out.push_str(t),
-            Node::Element(e) => collect_text_into(dom, e, depth + 1, out),
-        }
-    }
 }
 
 /// Max `colspan`/`rowspan` a table cell is allowed to carry, per the HTML
