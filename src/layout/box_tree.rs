@@ -415,6 +415,215 @@ mod tests {
         assert!(build_box_tree(&d, &styles).is_none());
     }
 
+    // ------------------------------------------------------------------
+    // Form-control rendering (P-forms, part 2): each control synthesizes a
+    // placeholder `Text` label instead of laying out its DOM children (which
+    // for `<input>` don't exist at all -- it's a void element -- and for
+    // `<button>`/`<textarea>`/`<select>` are submission-only content, not
+    // meant to be walked as ordinary boxes). See `build_form_control`'s doc
+    // comment for the exact bracket convention asserted below.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn text_input_renders_bracketed_value() {
+        let d = dom::parser::parse(r#"<input type="text" name="a" value="hi">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[hi]").is_some());
+    }
+
+    #[test]
+    fn text_input_without_type_defaults_to_text_behavior() {
+        let d = dom::parser::parse(r#"<input name="a" value="hi">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[hi]").is_some());
+    }
+
+    #[test]
+    fn text_input_without_value_renders_spaces_sized_to_size_attr() {
+        let d = dom::parser::parse(r#"<input type="text" name="a" size="4">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[    ]").is_some(), "expected 4 spaces inside brackets");
+    }
+
+    #[test]
+    fn text_input_without_value_or_size_defaults_to_ten_spaces() {
+        let d = dom::parser::parse(r#"<input type="text" name="a">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        let expected = format!("[{}]", " ".repeat(10));
+        assert!(find_text(&root, &expected).is_some());
+    }
+
+    #[test]
+    fn password_input_masks_value_with_asterisks() {
+        let d = dom::parser::parse(r#"<input type="password" name="p" value="secret">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[******]").is_some());
+    }
+
+    #[test]
+    fn checkbox_shows_x_when_checked_and_blank_when_not() {
+        let d = dom::parser::parse(r#"<input type="checkbox" name="c" checked>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[x]").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="checkbox" name="c">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ ]").is_some());
+    }
+
+    #[test]
+    fn radio_shows_star_when_checked_and_blank_when_not() {
+        let d = dom::parser::parse(r#"<input type="radio" name="r" checked>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "(*)").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="radio" name="r">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "( )").is_some());
+    }
+
+    #[test]
+    fn submit_input_shows_value_or_default_submit_label() {
+        let d = dom::parser::parse(r#"<input type="submit" value="Go">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Go ]").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="submit">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ Submit ]").is_some());
+    }
+
+    #[test]
+    fn reset_and_button_type_inputs_show_bracketed_labels() {
+        let d = dom::parser::parse(r#"<input type="reset">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Reset ]").is_some());
+
+        let d2 = dom::parser::parse(r#"<input type="button" value="Click">"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ Click ]").is_some());
+    }
+
+    #[test]
+    fn hidden_input_renders_nothing() {
+        let d = dom::parser::parse(r#"<div>before<input type="hidden" name="x" value="topsecret123"><span>after</span></div>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "before").is_some());
+        assert!(find_text(&root, "after").is_some());
+        assert!(find_text(&root, "topsecret123").is_none(), "hidden input's value must never appear");
+    }
+
+    #[test]
+    fn button_element_shows_value_then_child_text_then_default() {
+        let d = dom::parser::parse(r#"<button>Send</button>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Send ]").is_some());
+
+        let d2 = dom::parser::parse(r#"<button value="X">Ignored</button>"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        assert!(find_text(&root2, "[ X ]").is_some(), "value attr takes priority over child text");
+
+        let d3 = dom::parser::parse(r#"<button></button>"#);
+        let styles3 = cascade::cascade(&d3, &[]);
+        let root3 = build_box_tree(&d3, &styles3).expect("root present");
+        assert!(find_text(&root3, "[ Submit ]").is_some(), "default when no value/child text");
+    }
+
+    #[test]
+    fn textarea_shows_short_text_verbatim() {
+        let d = dom::parser::parse(r#"<textarea name="n">hello</textarea>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "hello").is_some());
+    }
+
+    #[test]
+    fn textarea_truncates_long_first_line() {
+        let d = dom::parser::parse(r#"<textarea name="n">this line is definitely longer than twenty chars</textarea>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[...]").is_some(), "long content should be truncated with an ellipsis marker");
+    }
+
+    #[test]
+    fn textarea_marks_multiline_content_even_if_first_line_is_short() {
+        let d = dom::parser::parse("<textarea name=\"n\">line one\nline two</textarea>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "line one[...]").is_some());
+    }
+
+    #[test]
+    fn select_shows_selected_option_text() {
+        let d = dom::parser::parse(
+            r#"<select name="color"><option value="r">Red</option><option value="g" selected>Green</option></select>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Green v]").is_some());
+    }
+
+    #[test]
+    fn select_with_no_selected_option_defaults_to_first() {
+        let d = dom::parser::parse(
+            r#"<select name="color"><option value="r">Red</option><option value="g">Green</option></select>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[ Red v]").is_some());
+    }
+
+    #[test]
+    fn select_with_no_options_renders_without_panicking() {
+        let d = dom::parser::parse(r#"<select name="color"></select>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+        assert!(find_text(&root, "[  v]").is_some());
+    }
+
+    #[test]
+    fn form_controls_never_recurse_into_their_own_dom_children_as_generic_boxes() {
+        // A <select>'s <option>s must not show up as their own independent
+        // Container/Text boxes distinct from the synthesized label -- the
+        // whole control is exactly one Container + one Text child.
+        let d = dom::parser::parse(r#"<select name="c"><option>Only</option></select>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+
+        fn find_select_box(node: &LayoutNode) -> Option<&LayoutNode> {
+            let is_select_shaped = node.children.len() == 1
+                && matches!(&node.children[0].content, BoxContent::Text(t) if t.contains('[') && t.contains('v'));
+            if is_select_shaped {
+                return Some(node);
+            }
+            for c in &node.children {
+                if let Some(found) = find_select_box(c) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let select_box = find_select_box(&root).expect("select-shaped container present");
+        assert_eq!(select_box.children.len(), 1, "select must synthesize exactly one label child");
+    }
+
+
     #[test]
     fn deeply_nested_dom_does_not_abort_and_returns() {
         let depth = 3000;
