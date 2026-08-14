@@ -590,11 +590,28 @@ const MAX_SGR_MOUSE_LEN: usize = 64;
 /// any OTHER byte in between that isn't a digit or `;` is garbage — dropped
 /// (consuming through the offending byte, so the same byte is never
 /// reparsed and can't cause an infinite loop), never a panic.
-fn parse_sgr_mouse(_buf: &[u8]) -> ParseOutcome {
-    // RED stub (packet/shell-mouse, test-first): SGR mouse decoding isn't
-    // implemented yet -- treat it the same as any other unrecognized CSI
-    // sequence for now.
-    ParseOutcome::Invalid(2)
+fn parse_sgr_mouse(buf: &[u8]) -> ParseOutcome {
+    let mut i = 3;
+    while i < buf.len() {
+        match buf[i] {
+            b'M' | b'm' => break,
+            b'0'..=b'9' | b';' => i += 1,
+            _ => return ParseOutcome::Invalid(i + 1),
+        }
+    }
+    if i >= buf.len() {
+        if i - 3 > MAX_SGR_MOUSE_LEN {
+            return ParseOutcome::Invalid(i); // never terminated -- give up on what's buffered so far
+        }
+        return ParseOutcome::Incomplete;
+    }
+    let is_release = buf[i] == b'm';
+    let consumed = i + 1;
+    let body = &buf[3..i];
+    match decode_sgr_body(body, is_release) {
+        Some(event) => ParseOutcome::Complete(InputEvent::Mouse(event), consumed),
+        None => ParseOutcome::Invalid(consumed),
+    }
 }
 
 /// Parse the `Cb;Cx;Cy` body (ASCII, already isolated from its `ESC [ <`
@@ -679,8 +696,14 @@ impl GpmConnect {
     /// Serialize to the exact 16-byte little-endian record gpm expects on
     /// the wire — see [`GpmConnect`]'s own doc comment for the byte layout.
     pub fn to_bytes(&self) -> [u8; GPM_CONNECT_SIZE] {
-        // RED stub (packet/shell-mouse, test-first).
-        [0u8; GPM_CONNECT_SIZE]
+        let mut out = [0u8; GPM_CONNECT_SIZE];
+        out[0..2].copy_from_slice(&self.event_mask.to_le_bytes());
+        out[2..4].copy_from_slice(&self.default_mask.to_le_bytes());
+        out[4..6].copy_from_slice(&self.min_mod.to_le_bytes());
+        out[6..8].copy_from_slice(&self.max_mod.to_le_bytes());
+        out[8..12].copy_from_slice(&self.pid.to_le_bytes());
+        out[12..16].copy_from_slice(&self.vc.to_le_bytes());
+        out
     }
 }
 
@@ -739,9 +762,27 @@ pub const GPM_UP: i32 = 8;
 /// `GPM_EVENT_SIZE` — a short/garbled read (the totality contract the
 /// packet brief calls for: "a short/garbled record from the socket ->
 /// skip, no panic") rather than an out-of-bounds index panic.
-pub fn parse_gpm_event(_buf: &[u8]) -> Option<GpmEvent> {
-    // RED stub (packet/shell-mouse, test-first).
-    None
+pub fn parse_gpm_event(buf: &[u8]) -> Option<GpmEvent> {
+    if buf.len() < GPM_EVENT_SIZE {
+        return None;
+    }
+    let u16_at = |i: usize| u16::from_le_bytes([buf[i], buf[i + 1]]);
+    let i16_at = |i: usize| i16::from_le_bytes([buf[i], buf[i + 1]]);
+    let i32_at = |i: usize| i32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+    Some(GpmEvent {
+        buttons: buf[0],
+        modifiers: buf[1],
+        vc: u16_at(2),
+        dx: i16_at(4),
+        dy: i16_at(6),
+        x: i16_at(8),
+        y: i16_at(10),
+        event_type: i32_at(12),
+        clicks: i32_at(16),
+        margin: i32_at(20),
+        wdx: i16_at(24),
+        wdy: i16_at(26),
+    })
 }
 
 /// Map a decoded `Gpm_Event` to a [`MouseEvent`] in the SAME 0-based
@@ -753,8 +794,34 @@ pub fn parse_gpm_event(_buf: &[u8]) -> Option<GpmEvent> {
 /// physical event. `x`/`y` of `0` or negative (shouldn't happen on a real
 /// gpm stream, but nothing stops a garbled record from claiming it) ->
 /// `None`, never an underflow panic on the `- 1`.
-pub fn gpm_event_to_mouse(_ev: &GpmEvent) -> Option<MouseEvent> {
-    // RED stub (packet/shell-mouse, test-first).
+pub fn gpm_event_to_mouse(ev: &GpmEvent) -> Option<MouseEvent> {
+    if ev.x < 1 || ev.y < 1 {
+        return None;
+    }
+    let col = (ev.x - 1) as usize;
+    let row = (ev.y - 1) as usize;
+    if ev.wdy != 0 {
+        let kind = if ev.wdy > 0 { MouseKind::WheelUp } else { MouseKind::WheelDown };
+        return Some(MouseEvent { col, row, kind });
+    }
+    let button = if ev.buttons & GPM_B_LEFT != 0 {
+        Some(MouseButton::Left)
+    } else if ev.buttons & GPM_B_RIGHT != 0 {
+        Some(MouseButton::Right)
+    } else if ev.buttons & GPM_B_MIDDLE != 0 {
+        Some(MouseButton::Middle)
+    } else {
+        None
+    };
+    if ev.event_type & GPM_DOWN != 0 {
+        return button.map(|b| MouseEvent { col, row, kind: MouseKind::Press(b) });
+    }
+    if ev.event_type & GPM_UP != 0 {
+        return button.map(|b| MouseEvent { col, row, kind: MouseKind::Release(b) });
+    }
+    if ev.event_type & (GPM_MOVE | GPM_DRAG) != 0 {
+        return Some(MouseEvent { col, row, kind: MouseKind::Move });
+    }
     None
 }
 
@@ -879,9 +946,16 @@ const WHEEL_SCROLL_LINES: i64 = 3;
 /// Total over any `ViewState`/`Page`/`MouseEvent` — an empty page, an
 /// off-grid `row`/`col`, a click on the status line — see each branch/
 /// helper's own comment.
-pub fn apply_mouse(_ev: MouseEvent, view: ViewState, _page: &Page) -> (ViewState, Command) {
-    // RED stub (packet/shell-mouse, test-first).
-    (view, Command::None)
+pub fn apply_mouse(ev: MouseEvent, view: ViewState, page: &Page) -> (ViewState, Command) {
+    match ev.kind {
+        MouseKind::WheelUp => (scroll_by(view, page, -WHEEL_SCROLL_LINES), Command::None),
+        MouseKind::WheelDown => (scroll_by(view, page, WHEEL_SCROLL_LINES), Command::None),
+        MouseKind::Press(MouseButton::Left) => mouse_click(ev.col, ev.row, view, page),
+        // Right/middle press, any release, and Move/Drag: no behavior is
+        // defined by this packet's brief (click-to-follow + wheel-to-scroll
+        // only) -- a documented no-op, not a silently-dropped bug.
+        MouseKind::Press(_) | MouseKind::Release(_) | MouseKind::Move => (view, Command::None),
+    }
 }
 
 /// A left click/press at viewport `(col, row)`: `row >= view.rows` is the
