@@ -9,7 +9,7 @@ pub(crate) const UA_CSS: &str = r#"
 html, body, div, p,
 h1, h2, h3, h4, h5, h6,
 ul, ol, li, dl, dt, dd,
-blockquote, pre, table, tr, td, th, caption,
+blockquote, pre, table, caption,
 form, fieldset, hr,
 article, section, nav, header, footer, main, aside,
 figure, figcaption, details, summary, address, center {
@@ -19,6 +19,16 @@ figure, figcaption, details, summary, address, center {
 head, style, title, script, meta, link, base {
   display: none;
 }
+
+/* CSS table display values (freeze amendment, packet P8 follow-up): these
+   are the marker the layout engine keys off to run the bespoke table column
+   solver (`layout::table::solve_table`). `table` above still gets the
+   generic `display: block` rule, so it's overridden here to the correct
+   `display: table`. */
+table { display: table; }
+tr { display: table-row; }
+td, th { display: table-cell; }
+thead, tbody, tfoot { display: table-row-group; }
 
 body { margin: 8px; }
 p { margin: 1em 0; }

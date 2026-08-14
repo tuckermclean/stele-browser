@@ -9,10 +9,13 @@
 //! types (`TableSpec`/`CellSpec`). It does not measure text or read the
 //! styled DOM — a cell's `min_content`/`max_content`/`intrinsic_height` are
 //! supplied already-measured by the caller (the inline engine, eventually).
-//! It is **not** wired into `layout()` yet: the frozen `ComputedStyle::Display`
-//! has no `Table`/`TableRow`/`TableCell` variants, so box-tree integration is
-//! deferred to M3 + a freeze amendment. The only caller of this module today
-//! is its own contract test suite below.
+//! It is **not** wired into `layout()` yet: a display-table freeze amendment
+//! has since landed `Display::Table`/`TableRow`/`TableCell`/`TableRowGroup`
+//! as markers (parsed from CSS + the UA sheet), but every consumer —
+//! including `layout::block::map_display` — still falls back to
+//! block-equivalent behavior. Real box-tree integration with this solver is
+//! deferred to the next (table-layout) packet. The only caller of this
+//! module today is its own contract test suite below.
 //!
 //! ## Totality (`panic = "abort"`)
 //!

@@ -535,6 +535,22 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 d.display = Some(Display::Flex);
                 true
             }
+            Some("table") => {
+                d.display = Some(Display::Table);
+                true
+            }
+            Some("table-row") => {
+                d.display = Some(Display::TableRow);
+                true
+            }
+            Some("table-cell") => {
+                d.display = Some(Display::TableCell);
+                true
+            }
+            Some("table-row-group") => {
+                d.display = Some(Display::TableRowGroup);
+                true
+            }
             _ => false,
         },
         "width" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.width = Some(l)).is_some(),
@@ -841,6 +857,39 @@ mod tests {
     fn unknown_property_is_not_applied() {
         let mut d = Declarations::default();
         assert!(!apply_property("flibbertigibbet", &toks("1"), &mut d));
+    }
+
+    #[test]
+    fn parses_table_display_values() {
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table"), &mut d));
+        assert_eq!(d.display, Some(Display::Table));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table-row"), &mut d));
+        assert_eq!(d.display, Some(Display::TableRow));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table-cell"), &mut d));
+        assert_eq!(d.display, Some(Display::TableCell));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table-row-group"), &mut d));
+        assert_eq!(d.display, Some(Display::TableRowGroup));
+
+        // Case-insensitive, like the other display keywords.
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("TABLE-CELL"), &mut d));
+        assert_eq!(d.display, Some(Display::TableCell));
+    }
+
+    #[test]
+    fn unknown_display_value_is_still_ignored() {
+        // Charter C2: an unrecognized value must not apply, and must not be
+        // confused with any table variant.
+        let mut d = Declarations::default();
+        assert!(!apply_property("display", &toks("table-column"), &mut d));
+        assert_eq!(d.display, None);
     }
 
     #[test]

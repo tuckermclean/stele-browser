@@ -3,6 +3,26 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M3 — Freeze amendment: CSS table Display values
+
+### D19 — table display values land as a marker, block-fallback until integration
+Real table layout needs the layout engine to RECOGNIZE table subtrees, but the
+frozen `Display` enum had no table values and `LayoutNode` carries no table
+marker. **Options:** (a) recognize tables purely by element tag in box_tree;
+(b) add `display: table/table-row/table-cell` values (CSS-idiomatic, "element
+semantics live in the UA sheet" per charter). **Choice: (b)** — a sanctioned,
+additive freeze amendment (brief §10): `Display::{Table, TableRow, TableCell,
+TableRowGroup}` appended (existing variants/order/initial-value unchanged), the
+value parser + UA sheet wired. To keep the tree green with zero regressions,
+`block::map_display` (the only exhaustive `Display` match) maps all four to
+taffy `Block` for now — so a `<table>` currently renders as stacked block boxes
+(visually wrong, but total and green). Explicit arms, no catch-all `_`, so the
+real table-layout packet gets compiler-guided TODOs. Revisit: the next packet
+wires `solve_table` (cell min/max measurement → column widths → fixed flex
+bases) behind these markers. Note: `table` is left in the generic block
+selector group and overridden to `display:table` by UA source order (equal
+specificity, later wins) — standard cascade behavior, cascade-tested.
+
 ## P8 — Table column solver (Wave 2)
 
 ### D18 — standalone pre-placed table solver; bounded on hostile specs
