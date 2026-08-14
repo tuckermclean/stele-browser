@@ -318,10 +318,25 @@ mod tests {
     // ----------------------------------------------------------- paint: Image
 
     #[test]
-    fn image_fragment_is_skipped_not_blitted() {
-        // MemSurface::blit is still todo!() (next packet) -- if `paint`
-        // called it, this test would panic. Skipping it is the documented
-        // M4 scope call.
+    fn image_fragment_is_blitted_into_its_rect() {
+        let mut s = MemSurface::new(10, 10, Color::WHITE);
+        let mut image = RgbaImage::new(2, 2);
+        image.pixels = [255u8, 0, 0, 255].repeat(4); // solid opaque red, 2x2
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image } }];
+        paint(&mut s, &fragments);
+        assert_eq!(px(&s, 0, 0), Color::rgb(255, 0, 0));
+        assert_eq!(px(&s, 3, 3), Color::rgb(255, 0, 0));
+        assert_eq!(px(&s, 5, 5), Color::WHITE, "outside the image's rect stays background");
+    }
+
+    #[test]
+    fn fully_transparent_image_fragment_paints_nothing() {
+        // Distinct from the skip-entirely M2 scope call this replaces:
+        // `paint` now always calls `blit`, but a fully transparent source
+        // image (RgbaImage::new's own default: zeroed pixels, alpha 0)
+        // still results in no visible change, via blit's own alpha blend
+        // (put_pixel is a no-op for alpha 0) -- not because `paint` special-
+        // cased it.
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let fragments =
             vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image: RgbaImage::new(2, 2) } }];
