@@ -19,6 +19,25 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — Background-image
+
+### D39 — background-image tiled in pixel backends; one frozen field + side-map
+`background-image: url(...)` + the `background` shorthand url now render.
+**Freeze amendment:** one field, `ComputedStyle.background_image:
+Option<Box<str>>` (raw url; not inherited — resolved like `background_color`).
+The decoded image reaches the painter via a driver-level SIDE-MAP
+(`bg_images::collect_bg_images -> HashMap<raw-url, Rc<RgbaImage>>`, mirroring
+`images.rs`), NOT another fragment/LayoutNode amendment — `raster::paint` takes
+a `bg_images` param (impl sig). **Bounded:** dedup by resolved url,
+`MAX_BG_IMAGES=32` + the shared aggregate-byte budget; decode failure → falls
+back to background-color. **Reasonable, not fussy:** repeat-only, top-left
+origin, no `background-size`/`-position`/other `-repeat` variants (deferred);
+tiling is a bespoke `put_pixel` loop clipped to the surface (a hostile box
+can't blow up). **Pixel-only** (`--dump-png`/`--render-fb`); tty shows
+background-color via ANSI, not images. **`--no-bg-images`** flag (default OFF =
+on) skips the pre-pass → color-only render. Revisit: background-size/position,
+non-repeat, bg-image in the fb-interactive shell.
+
 ## UI — Mouse (gpm + xterm)
 
 ### D38 — first-class mouse via bespoke gpm socket + xterm SGR

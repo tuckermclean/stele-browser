@@ -426,6 +426,32 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-5 · background-image (+ --no-bg-images)
+
+- CSS `background-image: url(...)` (and the `background` shorthand's url) now
+  renders in the pixel backends: the image is fetched, decoded (P4), and TILED
+  (repeat, top-left) behind a box's content. Freeze amendment: one field,
+  `ComputedStyle.background_image: Option<Box<str>>` (raw url, not inherited).
+  Decoded pixels reach the painter via a side-map (`bg_images::collect_bg_images
+  -> HashMap<url, Rc<RgbaImage>>`, driver-level like `images::collect_images`),
+  so no fragment/LayoutNode amendment — `raster::paint` gains a `bg_images`
+  param. Bounded: dedup by resolved url, `MAX_BG_IMAGES=32` + the shared
+  aggregate-byte budget; decode failures fall back to background-color; tiling
+  is a bespoke `put_pixel` loop intersected with the surface bounds (a hostile
+  huge box costs ≤ one iteration per on-surface pixel).
+- **`--no-bg-images`** kill switch (default OFF = images ON): skips the pre-pass
+  entirely → boxes show only their background-color. Tested to yield a distinct
+  image-free render (hostile pages' image backgrounds nuked with one flag).
+  Pixel-only (tty shows background-color via ANSI, not images — documented).
+- Golden `goldens/bg-image.png` (800×195, orchestrator-VIEWED + blessed): a
+  red-bordered tile repeated across a box with white text layered on top —
+  tiling + text-over-bg both correct. Existing goldens byte-identical; frozen =
+  the one `ComputedStyle` field; no deps; no unsafe. 551 lib tests green.
+  See D39.
+- **The requested round is COMPLETE**: GPL-3.0 license, `<link>` CSS,
+  backgrounds (color in tty, color+image in pixels), and an interactive shell
+  driven by KEYBOARD + MOUSE (gpm console + xterm) on a 486.
+
 ## 2026-08-14 — UI-4 · mouse (gpm + xterm) — point and click
 
 - Mouse is first-class, on a bare Linux VT via **gpm** AND in terminal
