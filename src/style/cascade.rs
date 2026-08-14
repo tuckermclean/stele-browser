@@ -192,8 +192,14 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
     ComputedStyle {
         color: inherited!(color),
         background_color: own!(background_color),
-        // TODO(bg-image, red): not wired up yet.
-        background_image: None,
+        // Not `Copy` (unlike every other `own!`-eligible field), and not
+        // inherited (CSS: `background-image` is a box-level property, same
+        // treatment as `background_color` right above) — cloned by hand
+        // rather than through the `own!` macro. `Declarations::default()`'s
+        // `background_image` is already `None`, matching
+        // `ComputedStyle::default().background_image`, so there's no
+        // separate "default" to fall back to the way `own!` needs one.
+        background_image: d.background_image.clone(),
         font_family: inherited!(font_family),
         font_size,
         font_weight: inherited!(font_weight),

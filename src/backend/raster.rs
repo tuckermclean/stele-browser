@@ -80,8 +80,11 @@ fn paint_box(surface: &mut dyn Surface, rect: &LayoutRect, style: &ComputedStyle
     // fragments in painter's-algorithm order — see `paint`'s own doc
     // comment): real CSS background painting order is background-color,
     // then background-image, then border, then content.
-    // TODO(bg-image, red): not painted yet.
-    let _ = (style.background_image.as_deref(), bg_images);
+    if let Some(url) = style.background_image.as_deref() {
+        if let Some(image) = bg_images.get(url) {
+            paint_tiled_background(surface, prect, image);
+        }
+    }
 
     let top = border_px(&style.border.top);
     let right = border_px(&style.border.right);

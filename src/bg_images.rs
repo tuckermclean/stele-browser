@@ -141,11 +141,6 @@ fn collect_bg_images_bounded(
     max_images: usize,
     max_total_bytes: usize,
 ) -> HashMap<String, Rc<RgbaImage>> {
-    // TODO(bg-image, red): not implemented yet.
-    let _ = (styles, base, max_images, max_total_bytes);
-    return HashMap::new();
-    #[allow(unreachable_code)]
-    {
     let mut out = HashMap::new();
     let mut cache: HashMap<String, Option<Rc<RgbaImage>>> = HashMap::new();
     let mut budget = Budget { attempts: 0, total_bytes: 0, max_images, max_total_bytes, exhausted: false };
@@ -198,7 +193,6 @@ fn collect_bg_images_bounded(
     }
 
     out
-    }
 }
 
 #[cfg(test)]

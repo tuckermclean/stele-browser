@@ -529,11 +529,28 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
     match name {
         "color" => parse_color(tokens).map(|c| d.color = Some(c)).is_some(),
         "background-color" => parse_color(tokens).map(|c| d.background_color = Some(c)).is_some(),
-        // TODO(bg-image, red): background-image parsing not yet implemented.
-        "background-image" => false,
-        // Curated subset of the `background` shorthand: color only (brief
-        // §4's image scope is later). See `parse_background_color_component`.
-        "background" => parse_background_color_component(tokens).map(|c| d.background_color = Some(c)).is_some(),
+        // Packet bg-image: `background-image: url(...)` sets the raw URL;
+        // anything else (`none`, a garbage value, a malformed `url(...)`) is
+        // simply not applied — see `parse_url_function`'s doc comment.
+        "background-image" => match tokens.first() {
+            Some(Token::Function(name)) if name.eq_ignore_ascii_case("url") => {
+                parse_url_function(tokens, 0).map(|(url, _)| d.background_image = Some(url.into_boxed_str())).is_some()
+            }
+            _ => false,
+        },
+        // `background` shorthand: extracts BOTH the color (packet D36) AND
+        // the image (packet bg-image) components — `#fff url(x.png)
+        // no-repeat` sets both fields; `position`/`size`/`repeat` remain
+        // curated-out. Succeeds (and is NOT counted against
+        // `ignored_declarations`) if EITHER half parsed, matching real CSS's
+        // "the shorthand succeeds if any of its longhands got a value" spirit
+        // without this codebase's simplification of tracking per-longhand
+        // validity.
+        "background" => {
+            let color = parse_background_color_component(tokens).map(|c| d.background_color = Some(c)).is_some();
+            let image = parse_background_image_component(tokens).map(|u| d.background_image = Some(u.into_boxed_str())).is_some();
+            color || image
+        }
         "font-family" => classify_font_family(tokens).map(|f| d.font_family = Some(f)).is_some(),
         "font-size" => tokens.first().and_then(token_to_raw_length).map(|l| d.font_size = Some(l)).is_some(),
         "font-weight" => match tokens.first() {

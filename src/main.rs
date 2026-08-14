@@ -454,8 +454,7 @@ fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
     // pre-pass right above. `--no-bg-images` skips it entirely (an empty
     // map — `raster::paint` then paints every box's `background_color`
     // alone, exactly as if no box declared a `background-image` at all).
-    let _ = no_bg_images; // TODO(bg-image, red): not wired up yet.
-    let bg_images: HashMap<String, std::rc::Rc<stele::img::RgbaImage>> = HashMap::new();
+    let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
     raster::paint(&mut surface, &fragments, &bg_images);
@@ -545,8 +544,7 @@ fn render_fb_surface_opts(source: &str, width: u32, no_bg_images: bool) -> Resul
 
     // Packet bg-image: see `dump_png_opts`'s own doc comment for the exact
     // same rationale (this is `--render-fb`'s copy of that same pre-pass).
-    let _ = no_bg_images; // TODO(bg-image, red): not wired up yet.
-    let bg_images: HashMap<String, std::rc::Rc<stele::img::RgbaImage>> = HashMap::new();
+    let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
     raster::paint(&mut surface, &fragments, &bg_images);
