@@ -177,9 +177,20 @@ fn same_interactive(a: &Interactive, b: &Interactive) -> bool {
 /// would merge into a single Focusable spanning the gap between them. Rare
 /// in practice, not a correctness hazard (both still navigate to the same
 /// place), documented for the DECISIONS ledger rather than solved here.
-fn extract_focusables(_fragments: &[Fragment], _cols: usize) -> Vec<Focusable> {
-    // RED stub (TDD packet/shell-keyboard): filled in by the GREEN commit.
-    Vec::new()
+fn extract_focusables(fragments: &[Fragment], cols: usize) -> Vec<Focusable> {
+    let mut out: Vec<Focusable> = Vec::new();
+    for f in fragments {
+        let Some(interactive) = &f.interactive else { continue };
+        let rect = fragment_cell_rect(f, cols);
+        if let Some(last) = out.last_mut() {
+            if same_interactive(&last.interactive, interactive) {
+                last.rect_cells = union_rect(last.rect_cells, rect);
+                continue;
+            }
+        }
+        out.push(Focusable { rect_cells: rect, interactive: interactive.clone(), control_node: None });
+    }
+    out
 }
 
 // =========================================================================
@@ -418,9 +429,24 @@ impl KeyParser {
     /// consumes at least one byte per iteration on anything but
     /// `Empty`/`Incomplete` (which both `break`), so it can never spin
     /// forever on adversarial input.
-    pub fn feed(&mut self, _bytes: &[u8]) -> Vec<Key> {
-        // RED stub (TDD packet/shell-keyboard): filled in by the GREEN commit.
-        Vec::new()
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
+        self.buf.extend_from_slice(bytes);
+        let mut keys = Vec::new();
+        loop {
+            match try_parse_one(&self.buf) {
+                ParseOutcome::Empty | ParseOutcome::Incomplete => break,
+                ParseOutcome::Invalid(n) => {
+                    let n = n.min(self.buf.len());
+                    self.buf.drain(0..n);
+                }
+                ParseOutcome::Complete(key, n) => {
+                    keys.push(key);
+                    let n = n.min(self.buf.len());
+                    self.buf.drain(0..n);
+                }
+            }
+        }
+        keys
     }
 }
 
@@ -508,9 +534,22 @@ pub enum Command {
 /// any `Command` the thin I/O loop should carry out. Total over any
 /// `ViewState`/`Page` (including an empty page with zero focusables, or a
 /// `view.focus` index stale for `page` — defensive `.get()`, never a panic).
-pub fn apply_key(_key: Key, view: ViewState, _page: &Page) -> (ViewState, Command) {
-    // RED stub (TDD packet/shell-keyboard): filled in by the GREEN commit.
-    (view, Command::None)
+pub fn apply_key(key: Key, view: ViewState, page: &Page) -> (ViewState, Command) {
+    match key {
+        Key::Up => (scroll_by(view, page, -1), Command::None),
+        Key::Down => (scroll_by(view, page, 1), Command::None),
+        Key::PageUp => (scroll_by(view, page, -(view.rows as i64)), Command::None),
+        Key::PageDown => (scroll_by(view, page, view.rows as i64), Command::None),
+        Key::Tab => (move_focus(view, page, 1), Command::None),
+        Key::ShiftTab => (move_focus(view, page, -1), Command::None),
+        Key::Enter => (view, enter_command(view, page)),
+        Key::Backspace => (view, Command::Back),
+        Key::F5 => (view, Command::Reload),
+        Key::CtrlC => (view, Command::Quit),
+        Key::Char('q') => (view, Command::Quit),
+        Key::Char('r') => (view, Command::Reload),
+        Key::Char(_) | Key::Left | Key::Right => (view, Command::None),
+    }
 }
 
 fn scroll_by(view: ViewState, page: &Page, delta: i64) -> ViewState {
@@ -620,8 +659,12 @@ impl History {
     /// last element would violate the "never empty" invariant `current`
     /// relies on.
     pub fn back(&mut self) -> bool {
-        // RED stub (TDD packet/shell-keyboard): filled in by the GREEN commit.
-        false
+        if self.stack.len() > 1 {
+            self.stack.pop();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -643,9 +686,14 @@ const HIGHLIGHT_BG: Color = Color::rgb(255, 255, 0);
 /// escape it prepends itself; that's the one bit of genuinely
 /// terminal-specific glue left to `main.rs`). Deterministic: same
 /// `page`/`view` always produces the same string.
-pub fn render_frame(_page: &Page, _view: &ViewState) -> String {
-    // RED stub (TDD packet/shell-keyboard): filled in by the GREEN commit.
-    String::new()
+pub fn render_frame(page: &Page, view: &ViewState) -> String {
+    let mut window = page.grid.window(view.scroll_row, view.rows);
+    if let Some(idx) = view.focus {
+        if let Some(f) = page.focusables.get(idx) {
+            highlight(&mut window, f.rect_cells, view.scroll_row, view.rows);
+        }
+    }
+    format!("{}\n{}", window.to_ansi(), status_line(page, view.cols))
 }
 
 fn highlight(window: &mut TextGrid, rect: (usize, usize, usize, usize), scroll_row: usize, rows: usize) {
