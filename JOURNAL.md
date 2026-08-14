@@ -404,6 +404,34 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M5 · author CSS wired — pages get their own styles
+
+- **The CSS engine is now actually used.** Discovery: every `cascade()` call in
+  the render pipeline passed `&[]` for author sheets, and inline `style=` was
+  ignored — so P2's whole CSS cascade (selectors/specificity/origins) had been
+  built and unit-tested but NEVER fed a real page's styles. Every fixture had
+  rendered UA-only. This packet wires author CSS end to end.
+- `style::collect_author_sheets(dom)` (new `style::author`, explicit-stack
+  walk) extracts every `<style>` block's raw text → `parser::parse` → author
+  sheets in document order. `cascade`'s `visit` now folds each element's inline
+  `style="..."` (via `parser::parse_inline`) LAST, so inline is the
+  highest-precedence origin (beats author + UA per property), signature
+  unchanged (read off the `Element` in hand). Wired into all `--dump-text`/
+  `--dump-png`/`--render-fb`/frames cascade sites.
+- Golden `goldens/author-css.tty.txt` (PROPOSED → orchestrator-blessed): an
+  author rule `p.hidden{display:none}` hides one paragraph; a third paragraph
+  with the same class but `style="display:block"` stays visible — origin order
+  UA < author < inline made concrete. All existing goldens confirmed
+  byte-identical (no prior golden fixture used author CSS).
+- Orchestrator-reviewed directly (contained cascade change + new module):
+  correct fold, depth-safe extraction, frozen unchanged; 363 lib tests green
+  incl. pathological (5000-rule `<style>`, 3000-deep DOM, garbage inline) — no
+  panic. No deps, no unsafe. `<link rel=stylesheet>` external CSS deferred
+  (needs a fetch pre-pass like images). See D28.
+- **M5 underway.** NEXT: `flex-polite.html` pixel-green (flexbox already lays
+  out via taffy; now it can be styled + rendered + viewed), then `@media`
+  evaluation, `details`/`summary`, `noscript`, `--stats`.
+
 ## 2026-08-14 — M4 · fbdev backend — M4 COMPLETE
 
 - The real Linux framebuffer output path (`backend::fb`), safe + std-only —

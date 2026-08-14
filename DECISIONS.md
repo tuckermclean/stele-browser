@@ -3,6 +3,24 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M5 — Author CSS
+
+### D28 — author `<style>` + inline `style=` wired into the cascade
+The render pipeline had always called `cascade(dom, &[])` and ignored inline
+`style=`, so no page CSS applied. **Choices:** `<style>` blocks are collected
+(`style::collect_author_sheets`, a new module, explicit-stack DOM walk) into
+author `Stylesheet`s in document order and passed to the existing (frozen)
+`cascade` signature; inline `style="..."` is modeled as a `Declarations`
+overlay applied LAST in `visit` per element — the highest-precedence origin
+(inline beats any non-`!important` author/UA rule regardless of selector
+specificity), read straight off the `Element` so `cascade`'s signature stays
+frozen. Reuses the already-total P2 parser (`parse_inline` is a thin
+`parse_declaration_block` wrapper); malformed CSS is ignored (C2), never a
+panic. **`<link rel=stylesheet>` external CSS is deferred** — it needs a fetch
+pre-pass analogous to `images::collect_images`; noted for a follow-up.
+Revisit-trigger: a fixture needs external stylesheets, `!important`, or
+per-element ignored-declaration reporting (the `--stats` counter, M5).
+
 ## M4 — fbdev backend
 
 ### D27 — framebuffer via sysfs + file write (safe, std-only, no unsafe/deps)
