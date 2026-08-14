@@ -372,6 +372,38 @@ Append-only running log. Newest at the bottom.
   (cells top-align), author `<style>` sheets (not yet wired into cascade).
   See D21. **M3 tables DONE.** NEXT: frames, forms.
 
+## 2026-08-14 — M3 · forms (submit serializer + control rendering)
+
+- Two deliverables. (1) `form::serialize_submit(dom, form_id, base, activator)
+  -> fetch::Request` — HTML 4.01 §17.13.2 form submission as a PURE function:
+  successful-controls gating (named + enabled; checkbox/radio only if checked;
+  activating submit only), `application/x-www-form-urlencoded` with self-rolled
+  percent-encoding (space→`+`, unreserved kept, else `%XX` over UTF-8 bytes),
+  GET → replace the action's query, POST → urlencoded body + Content-Type. (2)
+  Form controls rendered as synthesized TEXT placeholders in `box_tree` (empty
+  `Box` fragments are invisible in tty, D17): `[Ada]`/`[______]` inputs,
+  `[x]`/`[ ]` checkbox, `(*)`/`( )` radio, `[ Send ]` buttons, `[ Green v]`
+  select — so `<form>` renders legibly. Real widgets are the fb backend (M4).
+- Loop: implementer (test-first, 2 red→green pairs + fixture/golden) →
+  reviewer (Spec ✅; **golden COUNTERSIGNED** control-by-control; **no-JS
+  covenant confirmed** — serializer is a pure fn, wired to no event path; no
+  reachable panic; **2 Important + minors**) → fix round 1 (`7eb622c`) →
+  scoped re-review (orchestrator: fixes correct, frozen empty-diff, golden
+  byte-identical).
+    - **Important (fixed):** `<select multiple>` dropped all but one selected
+      option (data loss) — now emits one pair per selected option.
+    - **Important (fixed):** `type=image` treated as plain submit — documented
+      as a v0 simplification (no click coordinates in a no-mouse/no-JS browser)
+      + test pinning it.
+    - **Minors (fixed):** depth-cap drift + duplication resolved by extracting
+      shared DOM-walk helpers into a crate-private `dom_util` (one `DEPTH_CAP`,
+      used by both `form` and `box_tree`); added GET-existing-query test.
+- Totality: `dom_util::DEPTH_CAP` bounds the control walk; all DOM access
+  OOB-guarded. Frozen surface untouched (new `form`/`dom_util` modules only);
+  no deps; no `unsafe`. v0 simplifications (D22): `type=file` → filename only
+  (no multipart), checkbox/radio absent value → `on`, placeholder glyph
+  conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
+
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a
