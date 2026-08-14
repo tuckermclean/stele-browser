@@ -1459,7 +1459,7 @@ mod tests {
     use crate::dom as dom_mod;
     use crate::fetch::Method;
     use crate::layout::box_tree::build_box_tree;
-    use crate::layout::{self, Size};
+    use crate::layout::{self, FragmentKind, Point, Rect, Size};
     use crate::style::cascade;
 
     /// The full real pipeline (parse -> cascade -> box-tree -> layout),
@@ -1520,6 +1520,56 @@ mod tests {
         assert_eq!(page.hit_test(c0, r0), Some(0));
         assert_eq!(page.hit_test(c1, r1), Some(1));
         assert_eq!(page.hit_test(70, 70), None);
+    }
+
+    /// Two hand-built `Fragment`s carrying the SAME `Interactive::Link`, on
+    /// two adjacent rows with DIFFERENT column ranges — exactly what
+    /// `layout::block::emit` produces for a link whose text wraps: one
+    /// `Fragment` per line, same `href`. Built directly (rather than through
+    /// the full HTML pipeline) so the two per-line cell rects are pinned to
+    /// known values instead of depending on the inline engine's own
+    /// line-breaking choices. Row 20 spans cols 5..40; row 21 spans cols
+    /// 0..15 — a bounding box (rows 20..21, cols 0..40) that covers plenty
+    /// of cells NEITHER line's text actually occupies (the bug this packet
+    /// fixes).
+    fn wrapped_link_fragments() -> Vec<Fragment> {
+        let href: Box<str> = "/wrap".into();
+        vec![
+            Fragment {
+                rect: Rect { origin: Point { x: 40.0, y: 320.0 }, size: Size { w: 280.0, h: 16.0 } },
+                kind: FragmentKind::Text { text: "a".repeat(35), baseline: 12.0, style: ComputedStyle::default() },
+                interactive: Some(Interactive::Link { href: href.clone() }),
+            },
+            Fragment {
+                rect: Rect { origin: Point { x: 0.0, y: 336.0 }, size: Size { w: 120.0, h: 16.0 } },
+                kind: FragmentKind::Text { text: "b".repeat(15), baseline: 12.0, style: ComputedStyle::default() },
+                interactive: Some(Interactive::Link { href }),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_wrapped_link_gets_one_cell_span_per_line_not_a_merged_full_width_box() {
+        let fragments = wrapped_link_fragments();
+        let focusables = extract_focusables(&fragments, 45);
+        assert_eq!(focusables.len(), 1, "both fragments share an href, so they merge into ONE focusable");
+        let f = &focusables[0];
+        // `rect_cells` stays the bounding-box union -- still fine for
+        // hit-testing / initial-focus ordering.
+        assert_eq!(f.rect_cells, (0, 20, 40, 2), "bounding box union of both lines");
+        // But `cell_spans` must carry the two ACTUAL per-line rects, not one
+        // merged rectangle -- this is what render_frame highlights.
+        assert_eq!(f.cell_spans, vec![(5, 20, 35, 1), (0, 21, 15, 1)]);
+    }
+
+    #[test]
+    fn a_single_line_link_has_exactly_one_cell_span_equal_to_its_rect() {
+        let html = r#"<a href="/x">link</a>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        assert_eq!(page.focusables.len(), 1);
+        let f = &page.focusables[0];
+        assert_eq!(f.cell_spans.len(), 1, "a single-line link has exactly one span");
+        assert_eq!(f.cell_spans[0], f.rect_cells, "its one span IS the (unchanged) rect");
     }
 
     // ------------------------------------------------------------- scroll
@@ -1841,6 +1891,58 @@ mod tests {
         let highlight_escape = format!("48;2;{};{};{}", HIGHLIGHT_BG.r, HIGHLIGHT_BG.g, HIGHLIGHT_BG.b);
         assert!(frame_focused.contains(&highlight_escape), "focused frame should carry the highlight bg escape: {frame_focused:?}");
         assert!(!frame_unfocused.contains(&highlight_escape), "unfocused frame should not");
+    }
+
+    #[test]
+    fn frame_render_highlights_only_a_wrapped_links_actual_cells_not_its_bounding_box() {
+        // Regression test for the "whole paragraph looks selected" bug: a
+        // link wrapped across two rows with different column ranges must
+        // highlight only the cells its text occupies on each row, not the
+        // rectangular bounding box union (which includes empty tail/head
+        // cells neither line's text touches).
+        let fragments = wrapped_link_fragments();
+        let cols = 45;
+        let grid = tty::render(&fragments, cols);
+        let focusables = extract_focusables(&fragments, cols);
+        assert_eq!(focusables.len(), 1);
+        let page = Page { url: Url::new("http://example.com/".to_string()), grid, focusables, dom: Dom::new() };
+        let view = ViewState { scroll_row: 0, focus: Some(0), cols, rows: 25, ..Default::default() };
+
+        // Exercise the actual code path (must not panic, must carry the
+        // highlight escape somewhere) -- same style as the existing
+        // `frame_render_highlights_the_focused_cells_differently_from_unfocused`.
+        let frame = render_frame(&page, &view);
+        let highlight_escape = format!("48;2;{};{};{}", HIGHLIGHT_BG.r, HIGHLIGHT_BG.g, HIGHLIGHT_BG.b);
+        assert!(frame.contains(&highlight_escape), "focused wrapped link should still carry the highlight bg escape: {frame:?}");
+
+        // Now check PER CELL: replicate render_frame's own highlighting step
+        // (the exact same private `highlight` fn, over `cell_spans`) onto a
+        // fresh window so each cell's resulting background can be inspected
+        // directly -- `to_ansi`'s run-length-encoded escapes don't expose
+        // that per-cell.
+        let mut window = page.grid.window(view.scroll_row, view.rows);
+        let f = &page.focusables[0];
+        for span in &f.cell_spans {
+            highlight(&mut window, *span, view.scroll_row, view.rows);
+        }
+
+        // Cells the link's text ACTUALLY occupies: highlighted.
+        for col in 5..40 {
+            assert_eq!(window.get(20, col).bg, HIGHLIGHT_BG, "row 20 col {col} is part of the link's first line, should be highlighted");
+        }
+        for col in 0..15 {
+            assert_eq!(window.get(21, col).bg, HIGHLIGHT_BG, "row 21 col {col} is part of the link's second line, should be highlighted");
+        }
+
+        // Cells inside the OLD bounding box (rows 20..21, cols 0..40) that
+        // the link's text does NOT occupy: must NOT be highlighted -- this
+        // is exactly the "whole paragraph selected" bug.
+        for col in 0..5 {
+            assert_ne!(window.get(20, col).bg, HIGHLIGHT_BG, "row 20 col {col} is in the bounding box but before the link's first line -- must not be highlighted");
+        }
+        for col in 15..40 {
+            assert_ne!(window.get(21, col).bg, HIGHLIGHT_BG, "row 21 col {col} is in the bounding box but after the link's second line -- must not be highlighted");
+        }
     }
 
     #[test]
