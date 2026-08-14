@@ -190,7 +190,7 @@ fn dump_text(source: &str, cols: usize) -> String {
 /// module ever needs to produce, and `raster::encode_png` itself keys off
 /// exactly this same "1x1 white" fallback for a zero-dimension surface).
 fn blank_png() -> Vec<u8> {
-    todo!("M4 Part 4: encode a blank 1x1 PNG")
+    raster::encode_png(&MemSurface::new(1, 1, Color::WHITE))
 }
 
 /// Drive the full headless pixel pipeline for `--dump-png`: fetch, parse,
@@ -203,8 +203,50 @@ fn blank_png() -> Vec<u8> {
 /// carve-out), and wiring the frames compositor to pixels is a follow-up,
 /// not this packet's job.
 fn dump_png(source: &str) -> Vec<u8> {
-    let _ = source;
-    todo!("M4 Part 4: drive the headless pixel pipeline")
+    let url = resolve_url(source);
+    let body = match fetch_body(&url) {
+        Ok(b) => b,
+        Err(_) => return blank_png(),
+    };
+    let html = String::from_utf8_lossy(&body);
+    let dom_tree = dom::parser::parse(&html);
+
+    if frames::find_frameset(&dom_tree).is_some() {
+        return blank_png();
+    }
+
+    let styles = cascade::cascade(&dom_tree, &[]);
+    let Some(root) = build_box_tree(&dom_tree, &styles) else {
+        return blank_png();
+    };
+
+    let width = DEFAULT_PNG_WIDTH;
+    let viewport = Size { w: width as f32, h: HEADLESS_VIEWPORT_HEIGHT };
+    let fragments = layout::layout(&root, viewport);
+
+    // Content-driven height: the tallest fragment bottom edge, mirroring
+    // `backend::tty::render`'s own `rows_needed` derivation (max over ALL
+    // fragments, not just Text, so a bare background Box taller than its
+    // text still sizes the canvas) — clamped finite/non-negative/bounded
+    // the same defensive way, since a fragment rect's `size.h`/`origin.y`
+    // are ultimately document/layout-controlled.
+    let mut content_bottom = 0.0f32;
+    for f in &fragments {
+        let y = f.rect.origin.y;
+        let h = f.rect.size.h;
+        if y.is_finite() && h.is_finite() {
+            content_bottom = content_bottom.max(y + h);
+        }
+    }
+    let height = if content_bottom.is_finite() && content_bottom > 0.0 {
+        (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT)
+    } else {
+        1
+    };
+
+    let mut surface = MemSurface::new(width, height, Color::WHITE);
+    raster::paint(&mut surface, &fragments);
+    raster::encode_png(&surface)
 }
 
 /// `--dump-png <src> <out.png>`'s CLI-facing wrapper: render `source` and
@@ -213,8 +255,8 @@ fn dump_png(source: &str) -> Vec<u8> {
 /// reported as a clean `Err` rather than a panic (e.g. an unwritable
 /// directory, a hostile/invalid `out_path`).
 fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
-    let _ = (source, out_path);
-    todo!("M4 Part 4: write the rendered PNG to disk")
+    let bytes = dump_png(source);
+    std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
 fn main() {
