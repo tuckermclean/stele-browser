@@ -456,6 +456,28 @@ else
     sed 's/^/    /' /tmp/stele_a3l.diff
   fi
 
+  # A3m -- the list-markers packet's own tty golden (M6):
+  # fixtures/lists.html, exercising `<ul>`/`<ol>`/`<li>` marker synthesis
+  # (bullet + decimal markers, per-list ordinal counting across a nested
+  # list, `list-style-type: none`, and `<ol start>`). Same blessing
+  # discipline as every other tty golden here.
+  GOLDEN_TTY_LISTS="goldens/lists.tty.txt"
+  FIXTURE_LISTS="fixtures/lists.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3m: host binary still not found at $HOST_BIN"
+  elif ! out_lists="$("$HOST_BIN" --headless --dump-text "$FIXTURE_LISTS" 2>/tmp/stele_a3m.err)"; then
+    bad "A3m: stele --headless --dump-text crashed on $FIXTURE_LISTS"
+    sed 's/^/    /' /tmp/stele_a3m.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_lists" > "$GOLDEN_TTY_LISTS"
+    pass "A3m: blessed lists tty golden -> $GOLDEN_TTY_LISTS (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_LISTS" <(printf '%s\n' "$out_lists") >/tmp/stele_a3m.diff 2>&1; then
+    pass "A3m: tty dump of $FIXTURE_LISTS matches golden"
+  else
+    bad "A3m: tty dump of $FIXTURE_LISTS differs from $GOLDEN_TTY_LISTS"
+    sed 's/^/    /' /tmp/stele_a3m.diff
+  fi
+
   # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline

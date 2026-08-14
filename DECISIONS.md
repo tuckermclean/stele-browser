@@ -3,6 +3,21 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M6 — List markers
+
+### D33 — list-item markers synthesized in box_tree (ASCII bullets)
+`<ul>/<ol>/<li>` had no markers. `box_tree` prepends a synthesized marker
+`Text` per `<li>` (the details/form-placeholder stand-in convention), keyed on
+the nearest `<ul>`/`<ol>` parent. **ASCII glyphs** (`* `/`o `/`# ` for
+disc/circle/square, `N. ` decimal, base-26 alpha) — not Unicode `•`, because
+the bitmap font is ASCII-only so a Unicode bullet would be a tofu box in the
+PNG; ASCII keeps both PNG and tty outputs legible and per-variant-distinct.
+`list-style-type: none` → no marker; `<ol start>` honored; nested lists count
+per-list (restart at 1); `display:none` `<li>` doesn't consume an ordinal.
+`lower/upper-roman` absent from the frozen `ListStyleType` enum (not deferred —
+not in the dialect). Revisit: Unicode bullet glyphs if the font ever gains
+non-ASCII coverage; roman numerals if the enum is amended.
+
 ## M6 — Hardening core
 
 ### D32 — kitchen-sink coverage, mutation fuzz, `<br>` via sentinel, A2 hard gate

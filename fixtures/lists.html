@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head><title>List Markers Fixture</title></head>
+<body>
+<h1>List Markers</h1>
+
+<p>A plain unordered list (default disc marker, rendered as an ASCII
+bullet):</p>
+<ul>
+<li>First bullet item</li>
+<li>Second bullet item</li>
+</ul>
+
+<p>A plain ordered list (default decimal marker):</p>
+<ol>
+<li>First ordinal item</li>
+<li>Second ordinal item</li>
+<li>Third ordinal item</li>
+</ol>
+
+<p>An ordered list nested inside the second item of another ordered list --
+the nested list's own ordinals restart at 1, independent of the outer
+list's count:</p>
+<ol>
+<li>Outer item one</li>
+<li>Outer item two
+<ol>
+<li>Nested item one</li>
+<li>Nested item two</li>
+</ol>
+</li>
+<li>Outer item three</li>
+</ol>
+
+<p>A list with <code>list-style-type: none</code> -- no marker at all:</p>
+<ul style="list-style-type: none;">
+<li>No marker on this item</li>
+<li>Nor this one</li>
+</ul>
+
+<p>An ordered list starting at 5 via the <code>start</code> attribute:</p>
+<ol start="5">
+<li>Fifth item</li>
+<li>Sixth item</li>
+</ol>
+
+<p>End of fixture.</p>
+</body>
+</html>
