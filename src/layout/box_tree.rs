@@ -243,9 +243,11 @@ fn is_form(el: &Element) -> bool {
 /// (this only walks an already-built, already-bounded tree), so this
 /// recursion can't itself blow the stack on any input `build_node` could
 /// have produced.
-fn tag_interactive(_node: &mut LayoutNode, _interactive: &Interactive) {
-    // RED (temporary, for the test-first evidence capture): not implemented
-    // yet -- see the GREEN commit that follows.
+fn tag_interactive(node: &mut LayoutNode, interactive: &Interactive) {
+    node.interactive = Some(interactive.clone());
+    for child in &mut node.children {
+        tag_interactive(child, interactive);
+    }
 }
 
 /// `<br>` (M6 hardening) — see the `is_br` call site in `build_node` for the
@@ -677,15 +679,23 @@ fn is_form_control(el: &Element) -> bool {
 /// case it ever becomes its own taffy node (e.g. a `display: flex` parent,
 /// which gives every child its own node instead of folding it), so its own
 /// `Box` fragment carries the marker as well either way.
-fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle, _form_action: Option<&str>) -> Option<LayoutNode> {
+fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle, form_action: Option<&str>) -> Option<LayoutNode> {
     let label = control_label(dom, el)?;
-    // RED (temporary, for the test-first evidence capture): not tagged with
-    // `Interactive::FormControl` yet -- see the GREEN commit that follows.
+    let interactive = Interactive::FormControl {
+        kind: control_kind(el).into_boxed_str(),
+        name: el.attrs.get("name").map(|s| s.to_string().into_boxed_str()),
+        form_action: form_action.map(|s| s.to_string().into_boxed_str()),
+    };
     Some(LayoutNode {
         content: BoxContent::Container,
-        children: vec![LayoutNode { style: style.clone(), content: BoxContent::Text(label), children: Vec::new(), interactive: None }],
+        children: vec![LayoutNode {
+            style: style.clone(),
+            content: BoxContent::Text(label),
+            children: Vec::new(),
+            interactive: Some(interactive.clone()),
+        }],
         style,
-        interactive: None,
+        interactive: Some(interactive),
     })
 }
 
