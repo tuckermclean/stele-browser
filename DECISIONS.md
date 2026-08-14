@@ -3,6 +3,32 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M4 — Floats + inline images
+
+### D26 — bespoke float layout + inline replaced atoms (closes D14)
+Taffy has no floats, so `img align=left`/`right` and inline `<img>` are
+hand-rolled in the inline engine (charter §158). Choices:
+- **`<img align>` → `float` presentational hint** in box_tree, applied only
+  when the cascaded `float` is still `None` (author CSS wins); `left`/`right`
+  only (`top/middle/bottom` are vertical-align, ignored).
+- **Inline replaced atom:** a non-floated `Replaced` occupies its intrinsic
+  size on the line and wraps like an unbreakable word (baseline convention:
+  ascent=height, descent=0). Closes D14's "grandchild `Replaced` dropped".
+- **Float model (scoped):** a floated `Replaced` is placed at the block's
+  left/right edge at the IFC top (y=0, NOT the true source line-y — a
+  documented simplification good for the `<p><img align=left>text…</p>` shape);
+  same-side floats stack, oversized floats clamp to full width; `layout_runs`
+  excludes `[float.y, float.y+h)` from overlapping lines (offset + shortened for
+  left, shortened for right) so text wraps, returning to full width below.
+  **Cross-block float continuation is deferred**, and `clear` is a no-op in
+  this scope (floats never escape their own IFC). Revisit at a later CSS pass
+  if a fixture needs multi-block floats / real `clear`.
+- **Totality:** the line-breaker is a single bounded `for` over finite clusters
+  (no `while`/retry → structurally no float-spin hang); `MAX_FLOATS=256`,
+  `MAX_DIM=1e6` clamp every dimension (width AND the atom paint height — the
+  latter added as defense-in-depth so nothing downstream inherits an unclamped
+  value even though frozen `blit` already clips).
+
 ## M4 — Images
 
 ### D25 — image pipeline: Replaced carries the decoded image; bounded fetch/decode
