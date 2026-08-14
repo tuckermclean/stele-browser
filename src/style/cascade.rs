@@ -81,6 +81,8 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                 }
                 Node::Element(el) => {
                     let info = ElementInfo::from_element(&el.name, &el.attrs);
+                    // RED (test-first): inline `style="..."` is not folded
+                    // in yet -- see the immediately-following GREEN commit.
                     let decls = fold_matching_declarations(ua, author, &ancestors, &info);
                     let style = resolve(&decls, parent.as_ref());
                     out[id] = style.clone();
@@ -492,6 +494,78 @@ mod tests {
         let sheet = parser::parse("p { font-size: 20px; line-height: 150%; }");
         let styles = cascade(&d, std::slice::from_ref(&sheet));
         assert_eq!(styles[find(&d, "p")].line_height, LineHeight::Px(30.0));
+    }
+
+    // ---- M5: inline `style="..."` — highest-precedence origin ----------
+
+    #[test]
+    fn inline_style_applies_with_no_author_sheet() {
+        let d = dom::parser::parse(r#"<p style="color: blue">x</p>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn inline_style_beats_author_sheet() {
+        let d = dom::parser::parse(r#"<p style="color: blue">x</p>"#);
+        let sheet = parser::parse("p { color: red; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn inline_style_beats_ua_author_and_everything_else_end_to_end() {
+        // `a` gets `color: blue` from the UA sheet itself; an author sheet
+        // overrides it to red; an inline style must win over BOTH and
+        // resolve to green — UA < author `<style>` < inline `style=`.
+        let d = dom::parser::parse(r#"<a href="x" style="color: green">link</a>"#);
+        let sheet = parser::parse("a { color: red; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "a")].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn malformed_inline_style_is_ignored_other_properties_still_apply_no_panic() {
+        // A trailing empty value (`color:`) is a bad declaration; the well-
+        // formed `font-size` declaration right after it must still apply,
+        // and the whole thing must not panic (parser::parse_declaration_block
+        // is already total; this just confirms cascade's inline wiring
+        // doesn't add a panic).
+        let d = dom::parser::parse(r#"<p style="color: ; font-size: 20px">x</p>"#);
+        let styles = cascade(&d, &[]);
+        let p = &styles[find(&d, "p")];
+        assert_eq!(p.font_size, 20.0);
+        assert_eq!(p.color, Color::BLACK); // untouched: falls back to CSS initial
+    }
+
+    #[test]
+    fn garbage_inline_style_does_not_panic() {
+        let d = dom::parser::parse(r#"<p style="!!!not css at all!!!">x</p>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles.len(), d.len());
+    }
+
+    #[test]
+    fn huge_pathological_inline_style_does_not_panic() {
+        // Thousands of bogus + a few valid declarations crammed into one
+        // `style=` attribute value; must still resolve the valid ones and
+        // never panic.
+        let mut style = String::new();
+        for i in 0..5000 {
+            style.push_str(&format!("bogus-{i}: nonsense;"));
+        }
+        style.push_str("color: green;");
+        let html = format!(r#"<p style="{style}">x</p>"#);
+        let d = dom::parser::parse(&html);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn no_style_attribute_is_a_total_no_op() {
+        let d = dom::parser::parse("<p>x</p>");
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "p")].color, Color::BLACK);
     }
 
     #[test]

@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head><title>Author CSS Fixture</title>
+<style>
+  p.hidden { display: none; }
+</style>
+</head>
+<body>
+<p>Visible: styled only by the UA sheet.</p>
+<p class="hidden">Hidden: an author &lt;style&gt; rule sets display:none on this paragraph.</p>
+<p class="hidden" style="display: block;">Visible again: this paragraph also matches the author rule above, but its inline style="display:block" outranks it, so it shows anyway (inline beats author).</p>
+</body>
+</html>
