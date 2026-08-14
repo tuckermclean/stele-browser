@@ -1463,4 +1463,129 @@ mod tests {
         let noscript_id = find(&d, "noscript").expect("noscript present");
         assert_eq!(styles[noscript_id].display, Display::Block);
     }
+
+    // ------------------------------------------------------------------
+    // List markers (M6): `<ul>/<ol>/<li>` render with no bullets/numbers at
+    // all today -- kitchen-sink coverage flagged this gap. Each `<li>`
+    // built as a direct child of a `<ul>`/`<ol>` gets a synthesized leading
+    // `Text` marker glued onto its children (same "synthesize a leaf
+    // carrying a stand-in" convention `build_details_node`'s disclosure
+    // marker and `build_form_control`'s placeholder labels already use),
+    // chosen from that `<li>`'s own (possibly author-overridden, inherited)
+    // `ComputedStyle::list_style_type` and an ordinal counted per-list, in
+    // document order, over `<li>` DIRECT children only. See
+    // `build_list_container_node`'s doc comment for the full convention.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ul_items_each_get_a_leading_bullet_marker() {
+        let d = dom::parser::parse("<ul><li>a</li><li>b</li></ul>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("* a"), "expected a bullet marker before item a, got: {text:?}");
+        assert!(text.contains("* b"), "expected a bullet marker before item b, got: {text:?}");
+    }
+
+    #[test]
+    fn ol_items_get_sequential_ordinal_markers() {
+        let d = dom::parser::parse("<ol><li>a</li><li>b</li><li>c</li></ol>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("1. a"), "got: {text:?}");
+        assert!(text.contains("2. b"), "got: {text:?}");
+        assert!(text.contains("3. c"), "got: {text:?}");
+    }
+
+    #[test]
+    fn list_style_type_none_suppresses_the_marker() {
+        let d = dom::parser::parse(r#"<ul style="list-style-type: none;"><li>a</li></ul>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert_eq!(text.trim(), "a", "list-style-type: none must suppress the marker entirely, got: {text:?}");
+    }
+
+    #[test]
+    fn nested_list_ordinals_restart_at_one_per_list() {
+        let d = dom::parser::parse(
+            "<ol><li>outer-1<ol><li>inner-1</li><li>inner-2</li></ol></li><li>outer-2</li></ol>",
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("1. outer-1"), "got: {text:?}");
+        assert!(text.contains("1. inner-1"), "nested list must restart its own ordinal at 1, got: {text:?}");
+        assert!(text.contains("2. inner-2"), "got: {text:?}");
+        assert!(text.contains("2. outer-2"), "outer list's own counter must not be perturbed by the nested list, got: {text:?}");
+    }
+
+    #[test]
+    fn li_with_no_list_parent_gets_no_marker_and_does_not_panic() {
+        let d = dom::parser::parse("<div><li>stray</li></div>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert_eq!(text.trim(), "stray", "an <li> outside any list must render with no synthesized marker");
+    }
+
+    #[test]
+    fn empty_list_does_not_panic() {
+        let d = dom::parser::parse("<ul></ul><ol></ol>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new());
+        assert!(root.is_some());
+    }
+
+    #[test]
+    fn huge_ordered_list_does_not_panic_and_numbers_the_last_item() {
+        let mut html = String::from("<ol>");
+        for i in 0..10_000 {
+            html.push_str(&format!("<li>item{i}</li>"));
+        }
+        html.push_str("</ol>");
+        let d = dom::parser::parse(&html);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new());
+        assert!(root.is_some());
+        let root = root.unwrap();
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("1. item0"), "got prefix: {:?}", &text[..text.len().min(40)]);
+        assert!(text.contains("10000. item9999"), "expected the last item's ordinal to reach 10000");
+    }
+
+    #[test]
+    fn deeply_nested_lists_do_not_abort() {
+        let depth = 3000;
+        let mut html = String::new();
+        for _ in 0..depth {
+            html.push_str("<ul><li>");
+        }
+        html.push_str("leaf");
+        for _ in 0..depth {
+            html.push_str("</li></ul>");
+        }
+        let d = dom::parser::parse(&html);
+        let styles = vec![ComputedStyle::default(); d.len()];
+        let root = build_box_tree(&d, &styles, &HashMap::new());
+        assert!(root.is_some());
+    }
+
+    #[test]
+    fn ordered_list_honors_the_start_attribute() {
+        let d = dom::parser::parse(r#"<ol start="5"><li>a</li><li>b</li></ol>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("5. a"), "got: {text:?}");
+        assert!(text.contains("6. b"), "got: {text:?}");
+    }
 }
