@@ -535,6 +535,22 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 d.display = Some(Display::Flex);
                 true
             }
+            Some("table") => {
+                d.display = Some(Display::Table);
+                true
+            }
+            Some("table-row") => {
+                d.display = Some(Display::TableRow);
+                true
+            }
+            Some("table-cell") => {
+                d.display = Some(Display::TableCell);
+                true
+            }
+            Some("table-row-group") => {
+                d.display = Some(Display::TableRowGroup);
+                true
+            }
             _ => false,
         },
         "width" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.width = Some(l)).is_some(),

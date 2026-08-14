@@ -381,6 +381,16 @@ fn map_display(d: Display) -> TDisplay {
         // documented M2 simplification; real anonymous inline-to-block
         // promotion is out of scope.
         Display::Inline => TDisplay::Block,
+        // TODO(table-layout packet): real table layout via solve_table.
+        // These four variants are the marker landed by the display-table
+        // freeze amendment; box-tree/taffy integration with
+        // `layout::table::solve_table` is deferred to the next packet. Until
+        // then, table boxes fall back to stacked block boxes — visually
+        // wrong for real tables, but total and green.
+        Display::Table => TDisplay::Block,
+        Display::TableRow => TDisplay::Block,
+        Display::TableCell => TDisplay::Block,
+        Display::TableRowGroup => TDisplay::Block,
     }
 }
 

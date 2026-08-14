@@ -34,6 +34,16 @@ pub enum Display {
     Inline,
     Block,
     Flex,
+    // CSS table display values (freeze amendment, packet P8 follow-up): the
+    // marker the layout engine keys off to run the bespoke table column
+    // solver (`layout::table::solve_table`). This packet only lands the
+    // marker + UA-sheet wiring; every consumer still falls back to
+    // block-equivalent behavior (see `layout::block::map_display`) until the
+    // real table-layout packet lands.
+    Table,
+    TableRow,
+    TableCell,
+    TableRowGroup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
