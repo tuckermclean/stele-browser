@@ -26,6 +26,14 @@
 //! overflows onto its own line, which keeps the engine total (no panics) on
 //! any input.
 //!
+//! Forced breaks (M6 hardening, HTML `<br>`): [`LINE_BREAK_SENTINEL`] is a
+//! reserved character `box_tree` emits as a `<br>` element's own `Text`
+//! content; [`tokenize`] recognizes it and emits a [`Token::Break`] instead
+//! of folding it into a word, and [`layout_runs`]'s main loop unconditionally
+//! ends the current line when it sees one — regardless of remaining width —
+//! then resumes laying out on a fresh line, exactly like a soft wrap except
+//! it happens even when the current line isn't full.
+//!
 //! An inline "word" may itself be glued together out of pieces from more
 //! than one source run when no whitespace separates them in the source
 //! (e.g. `<b>bold</b>text` — no space between the two). Such glued pieces
@@ -44,6 +52,23 @@ use crate::layout::{Point, Rect, Size};
 use crate::style::computed::{Float as CssFloat, LineHeight};
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
+
+/// M6 hardening: the sentinel [`BoxContent::Text`] payload
+/// `layout::box_tree` synthesizes for an HTML `<br>` element (a real forced
+/// line break, per the packet brief's kitchen-sink coverage list) — a
+/// Private Use Area codepoint, chosen because `dom::parser` never itself
+/// produces one (no named/numeric HTML entity decodes to it, and the parser
+/// otherwise passes source bytes through as literal UTF-8 text), so this
+/// module's tokenizer can reliably tell "this Text run IS a `<br>`" apart
+/// from ordinary character data without a new frozen `BoxContent`/
+/// `InlineContent` variant threading all the way from `box_tree` (which only
+/// ever sees the frozen `LayoutNode`/`BoxContent` shapes) through to here. A
+/// hostile/unusual document whose own text content happens to contain this
+/// literal codepoint would see it misrendered as a forced break instead of a
+/// literal (invisible, unmapped-glyph) character — a cosmetic edge case, not
+/// a totality/crash concern, and one the fuzz harness's own random-byte
+/// inputs exercise (see `tests/fuzz_totality.rs`) without ever panicking.
+pub(crate) const LINE_BREAK_SENTINEL: char = '\u{E000}';
 
 /// Bound on any single dimension (width or height) pulled from untrusted
 /// content (an `<img>`'s intrinsic size, itself sourced from HTML
@@ -194,24 +219,36 @@ struct Word {
     space_before: bool,
 }
 
-/// Split the flattened content of `runs` into whitespace-delimited `Word`s,
-/// collapsing any run of whitespace (even one spanning a run boundary) into
-/// a single break opportunity. A floated `Replaced` run (`style.float !=
-/// Float::None`) is transparent to this token stream — it contributes no
-/// `Word` and neither flushes nor sets `pending_space` — it is placed
-/// separately by [`place_floats`], not laid out as inline flow content; a
-/// non-floated `Replaced` run becomes its own atomic `Word` (flushing
-/// whatever text was pending first, exactly like hitting whitespace would).
-/// Total: handles empty runs, all-whitespace runs, and runs with no
-/// whitespace at all without panicking.
-fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
-    let mut words = Vec::new();
+/// One item in the flattened token stream: an ordinary word, or a forced
+/// break ([`LINE_BREAK_SENTINEL`]) carrying the source run index (so an
+/// isolated break with no text on its line still has a `ComputedStyle` to
+/// derive a sensible line-height/baseline from — see `layout_runs`'s
+/// `Cluster::Break` handling).
+enum Token {
+    Word(Word),
+    Break(usize),
+}
+
+/// Split the flattened content of `runs` into whitespace-delimited `Word`s
+/// (wrapped as [`Token::Word`]) plus [`Token::Break`]s wherever
+/// [`LINE_BREAK_SENTINEL`] appears in a text run, collapsing any run of
+/// ordinary whitespace (even one spanning a run boundary) into a single break
+/// opportunity. A floated `Replaced` run (`style.float != Float::None`) is
+/// transparent to this token stream — it contributes no token and neither
+/// flushes nor sets `pending_space` — it is placed separately by
+/// [`place_floats`], not laid out as inline flow content; a non-floated
+/// `Replaced` run becomes its own atomic `Word` (flushing whatever text was
+/// pending first, exactly like hitting whitespace would). Total: handles
+/// empty runs, all-whitespace runs, and runs with no whitespace at all
+/// without panicking.
+fn tokenize(runs: &[InlineRun]) -> Vec<Token> {
+    let mut tokens = Vec::new();
     let mut pending_space = false;
     let mut cur: Option<(usize, String)> = None;
 
-    let flush = |cur: &mut Option<(usize, String)>, pending_space: &mut bool, words: &mut Vec<Word>| {
+    let flush = |cur: &mut Option<(usize, String)>, pending_space: &mut bool, tokens: &mut Vec<Token>| {
         if let Some((run, text)) = cur.take() {
-            words.push(Word { run, text, space_before: *pending_space });
+            tokens.push(Token::Word(Word { run, text, space_before: *pending_space }));
             *pending_space = false;
         }
     };
@@ -220,14 +257,18 @@ fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
         match &r.content {
             InlineContent::Text(text) => {
                 for ch in text.chars() {
-                    if ch.is_whitespace() {
-                        flush(&mut cur, &mut pending_space, &mut words);
+                    if ch == LINE_BREAK_SENTINEL {
+                        flush(&mut cur, &mut pending_space, &mut tokens);
+                        tokens.push(Token::Break(i));
+                        pending_space = false;
+                    } else if ch.is_whitespace() {
+                        flush(&mut cur, &mut pending_space, &mut tokens);
                         pending_space = true;
                     } else {
                         match &mut cur {
                             Some((run, t)) if *run == i => t.push(ch),
                             _ => {
-                                flush(&mut cur, &mut pending_space, &mut words);
+                                flush(&mut cur, &mut pending_space, &mut tokens);
                                 cur = Some((i, ch.to_string()));
                             }
                         }
@@ -236,8 +277,8 @@ fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
             }
             InlineContent::Replaced { .. } => {
                 if r.style.float == CssFloat::None {
-                    flush(&mut cur, &mut pending_space, &mut words);
-                    words.push(Word { run: i, text: String::new(), space_before: pending_space });
+                    flush(&mut cur, &mut pending_space, &mut tokens);
+                    tokens.push(Token::Word(Word { run: i, text: String::new(), space_before: pending_space }));
                     pending_space = false;
                 }
                 // A floated atom is invisible to the token stream: neither
@@ -245,29 +286,35 @@ fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
             }
         }
     }
-    flush(&mut cur, &mut pending_space, &mut words);
-    words
+    flush(&mut cur, &mut pending_space, &mut tokens);
+    tokens
 }
 
-/// A maximal group of `Word`s with no whitespace between them: the
-/// line-breaking atom (never split across lines). `space_before` says
-/// whether a collapsed whitespace opportunity precedes this cluster.
-struct Cluster {
-    space_before: bool,
-    words: Vec<Word>,
+/// A maximal group of `Word`s with no whitespace between them (the
+/// line-breaking atom, never split across lines and never glued across a
+/// [`Cluster::Break`]), or a forced break itself. `space_before` says whether
+/// a collapsed whitespace opportunity precedes a `Words` cluster.
+enum Cluster {
+    Words { space_before: bool, words: Vec<Word> },
+    Break { run: usize },
 }
 
-fn cluster(words: Vec<Word>) -> Vec<Cluster> {
+fn cluster(tokens: Vec<Token>) -> Vec<Cluster> {
     let mut clusters: Vec<Cluster> = Vec::new();
-    for w in words {
-        if !w.space_before {
-            if let Some(last) = clusters.last_mut() {
-                last.words.push(w);
-                continue;
+    for t in tokens {
+        match t {
+            Token::Break(run) => clusters.push(Cluster::Break { run }),
+            Token::Word(w) => {
+                if !w.space_before {
+                    if let Some(Cluster::Words { words, .. }) = clusters.last_mut() {
+                        words.push(w);
+                        continue;
+                    }
+                }
+                let space_before = w.space_before;
+                clusters.push(Cluster::Words { space_before, words: vec![w] });
             }
         }
-        let space_before = w.space_before;
-        clusters.push(Cluster { space_before, words: vec![w] });
     }
     clusters
 }
@@ -509,10 +556,56 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
     }
 
     for c in &clusters {
-        let cluster_width: f32 = c.words.iter().map(|w| word_metrics(runs, w, metrics).0).sum();
+        let (space_before, words) = match c {
+            Cluster::Break { run } => {
+                // Forced break (`<br>`): end the current line unconditionally
+                // — regardless of remaining width — then resume on a fresh
+                // one. Mirrors the ordinary wrap logic just below (same
+                // line-push/reset/re-exclude shape), except it always fires,
+                // even when `cur_positioned` is still empty (a bare `<br>`,
+                // or two in a row) — in that case there's no accumulated
+                // ascent/descent/line-height to derive a sensible line box
+                // from, so fall back to the break's own run style via
+                // `resolved_line_height`/`metrics.ascent`, matching how a
+                // real UA still reserves a blank line's worth of height for
+                // an empty line broken by `<br>`.
+                close_run(&mut open, &mut cur_positioned);
+                max_width = max_width.max(line_offset_x + cur_x);
+                let had_content = max_line_height > 0.0 || max_ascent > 0.0 || max_descent > 0.0;
+                let (line_height, baseline) = if had_content {
+                    let line_height = max_line_height.max(max_ascent + max_descent);
+                    let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
+                    (line_height, baseline)
+                } else {
+                    let style = &runs[*run].style;
+                    let line_height = clamp_dim(resolved_line_height(style, metrics));
+                    let ascent = clamp_dim(metrics.ascent(style.font_size));
+                    let descent = clamp_dim(metrics.descent(style.font_size));
+                    let baseline = ascent + (line_height - (ascent + descent)) / 2.0;
+                    (line_height, baseline)
+                };
+                lines.push(LineBox {
+                    rect: Rect { origin: Point { x: line_offset_x, y }, size: Size { w: cur_x, h: line_height } },
+                    baseline,
+                    runs: std::mem::take(&mut cur_positioned),
+                });
+                y += line_height;
+                cur_x = 0.0;
+                max_ascent = 0.0;
+                max_descent = 0.0;
+                max_line_height = 0.0;
+                let (offset, avail) = line_exclusion(y, &placed_floats, available_width);
+                line_offset_x = offset;
+                line_avail_width = avail;
+                continue;
+            }
+            Cluster::Words { space_before, words } => (*space_before, words),
+        };
+
+        let cluster_width: f32 = words.iter().map(|w| word_metrics(runs, w, metrics).0).sum();
         let cluster_width = clamp_dim(cluster_width);
-        let space_style = &runs[c.words[0].run].style;
-        let space_w = if c.space_before { clamp_dim(metrics.advance(' ', space_style.font_size)) } else { 0.0 };
+        let space_style = &runs[words[0].run].style;
+        let space_w = if space_before { clamp_dim(metrics.advance(' ', space_style.font_size)) } else { 0.0 };
 
         let would_add = if cur_x > 0.0 { space_w } else { 0.0 } + cluster_width;
         if cur_x > 0.0 && cur_x + would_add > line_avail_width {
@@ -536,8 +629,8 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
             line_avail_width = avail;
         }
 
-        let use_space = cur_x > 0.0 && c.space_before;
-        for (wi, w) in c.words.iter().enumerate() {
+        let use_space = cur_x > 0.0 && space_before;
+        for (wi, w) in words.iter().enumerate() {
             let (word_w, ascent, descent, line_h) = word_metrics(runs, w, metrics);
             // A leading space only ever precedes the cluster's first word —
             // subsequent words within a glued cluster never get one (there
