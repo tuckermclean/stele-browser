@@ -19,6 +19,29 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — tty readability (contrast)
+
+### D40 — tty defers to the terminal theme by default and guarantees legibility
+The tty backend no longer dumps raw CSS colors onto the terminal. `to_ansi`
+routes each cell through `resolve_cell_colors(fg, bg)`:
+- **No author background** (`bg.a==0`): emit terminal-default bg (49); emit
+  terminal-default fg (39) for unset OR near-black/near-white foregrounds
+  (they'd vanish on a same-theme terminal); pass through chromatic mid-tones.
+- **Author background** (`bg.a!=0`): emit it, and force the foreground legible —
+  keep the author fg only at WCAG contrast ≥ 4.5:1, else black/white by bg
+  luminance.
+**Why:** the web assumes a white canvas we don't have; honoring author text
+colors verbatim produced black-on-black on dark terminals (unstyled pages,
+errors, httpforever). This makes the browser default to the user's own terminal
+theme (always readable) while defending against pages that specify illegible
+color pairs — same "protect the user from unfriendly pages" stance as
+`--no-bg-images` (D39). **Tradeoff:** luminance is non-gamma (as specified); it
+over-forces contrast (safe — only costs author-gray fidelity, e.g. `#333` on
+`#eee` snaps to black). Follow-up: gamma-corrected luminance with retuned
+near-black/near-white thresholds so author grays pass through. Pixel/fb
+backends are unaffected (they paint a real canvas). Regression guard: golden
+`tty-color.ansi` asserts the emitted SGR, not just characters.
+
 ## UI — Background-image
 
 ### D39 — background-image tiled in pixel backends; one frozen field + side-map
