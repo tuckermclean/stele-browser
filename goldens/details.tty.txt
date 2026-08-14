@@ -1,0 +1,16 @@
+
+
+ Disclosure Widgets
+
+
+
+ Below: one collapsed <details> (no open attribute) and one expanded <details
+ open>, each with a <summary> label and body content.
+
+ > Collapsed section (click to expand)
+ v Expanded section (already open)
+
+ You SHOULD see this expanded body text in the render.
+
+
+ End of fixture.

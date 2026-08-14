@@ -1,0 +1,37 @@
+
+
+ HTML Entity Decoding Coverage
+
+
+
+ Amp: a & b
+
+
+ Lt: a < b
+
+
+ Gt: a > b
+
+
+ Quot: "quoted text"
+
+
+ Copy: © 2026
+
+
+ Reg: Stele®
+
+
+ Nbsp: a b
+
+
+ Mdash: a — b
+
+
+ NumCopy: © 2026
+
+
+ HexDash: a — b
+
+
+ Bogus: &notanentity; stays literal
