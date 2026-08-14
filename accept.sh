@@ -136,7 +136,11 @@ fi
 # host-native (no qemu — --dump-text has no 486-specific instructions; A4
 # already exhaustively probes that) run of `stele --headless --dump-text`
 # over fixtures/basic.html must match the checked-in golden exactly. The
-# mem-Surface PNG half stays PENDING until P9's fb backend lands (M4).
+# mem-Surface PNG half is now LIVE too, as of the M4 pixel-foundation
+# packet (A3e, below): `stele --headless --dump-png` over fixtures/basic.html
+# must match goldens/basic.png byte-for-byte (the PNG encoder is
+# deterministic — see backend::raster's own doc comments). That PNG golden
+# is PROPOSED (brief §10 blessing discipline), same as the tty goldens.
 #
 # Host binary: built via a plain `cargo build --release` (the default host
 # target, NOT the i486 cross target `$BIN` used by A1/A4) since this check
@@ -243,8 +247,35 @@ else
     bad "A3d: tty dump of $FIXTURE_FRAMES differs from $GOLDEN_TTY_FRAMES"
     sed 's/^/    /' /tmp/stele_a3d.diff
   fi
+
+  # A3e — the pixel-foundation packet's own PNG golden (M4): same host
+  # binary, same blessing discipline. Compared by raw byte equality rather
+  # than re-decoding here (bash has no PNG decoder handy) — this is
+  # equivalent to a pixel-array comparison for this specific golden because
+  # `backend::raster::encode_png` is proven deterministic (no timestamp/text
+  # chunks; see its own `encode_png_is_deterministic` unit test) AND
+  # `tests/png_golden.rs`'s own Rust test already does the real
+  # decode-and-compare-pixels check the brief asks for — this shell check is
+  # an independent end-to-end confirmation (real `file://` fetch through the
+  # compiled binary, not `include_str!`), not the only line of defense.
+  GOLDEN_PNG="goldens/basic.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3e: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_BASIC" /tmp/stele_a3e.png 2>/tmp/stele_a3e.err; then
+    bad "A3e: stele --headless --dump-png crashed on $FIXTURE_BASIC"
+    sed 's/^/    /' /tmp/stele_a3e.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3e.png "$GOLDEN_PNG"
+    pass "A3e: blessed PNG golden -> $GOLDEN_PNG (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG" ]; then
+    bad "A3e: no golden at $GOLDEN_PNG to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG" /tmp/stele_a3e.png; then
+    pass "A3e: PNG dump of $FIXTURE_BASIC matches golden"
+  else
+    bad "A3e: PNG dump of $FIXTURE_BASIC differs from $GOLDEN_PNG"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG") actual=$(wc -c < /tmp/stele_a3e.png)"
+  fi
 fi
-pend "A3: mem-Surface PNG goldens — P9/M4"
 
 if [ "$TTY_ONLY" = 1 ]; then
   echo "===================================="
