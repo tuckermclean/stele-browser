@@ -404,6 +404,37 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M4 · fbdev backend — M4 COMPLETE
+
+- The real Linux framebuffer output path (`backend::fb`), safe + std-only —
+  NO `rustix`/ioctl/mmap (those need `unsafe`), NO new deps, NO `unsafe`.
+  Geometry from **sysfs** (`/sys/class/graphics/fb0/{virtual_size,bits_per_pixel,
+  stride}`, plain text reads); a pure, unit-tested **pixel converter**
+  (mem-Surface RGBA8 → 32bpp BGRX8888 / 16bpp RGB565, other bpp → error); and a
+  total device-write path (open `/dev/fb0`, write `height*stride` bytes, clip a
+  larger surface, `u64` overflow guard on the geometry). `--render-fb <src>`
+  CLI mode renders a page straight to the console framebuffer.
+- CI can't test the device (no `/dev/fb0` on the runner) — by design the
+  device path is TOTAL (absent/garbage device/sysfs → clean `Err`, never a
+  panic), and that error path genuinely runs green in CI (the device really is
+  absent). The pixel converter + geometry parsing (the testable core) have full
+  hand-computed RED→GREEN tests; the *render* itself is already validated by the
+  mem-Surface PNG goldens — this packet only reformats those bytes for hardware.
+- Orchestrator-reviewed directly (contained, no deps/unsafe/frozen change):
+  converter correctness (BGRX byte order, RGB565 packing) + provable in-bounds
+  writes (columns clipped by `stride/bpp`) + overflow guard verified by reading.
+  346 lib tests green. See D27.
+- Human test path (for REPORT.md): on a Linux VT with an active fbcon, or under
+  `qemu-system` with `-vga std`, `stele --headless --render-fb fixtures/basic.html`
+  paints the page to the screen.
+- **M4 COMPLETE** (pixel foundation · images/THE SCREENSHOT · floats+inline ·
+  fbdev). Milestones M0–M4 done. NEXT: **M5 — dialect completeness** (the CSS
+  slice): `flex-polite.html` pixel-green (flexbox already lays out via taffy;
+  now verify it to pixels), `@media` evaluation (needs a viewport freeze
+  amendment threading the viewport into cascade), `details`/`summary`,
+  `noscript`, full entity coverage, cookie jar surfaced, and the `--stats`
+  ignored-declaration counter (C2 "count what we refuse", made visible).
+
 ## 2026-08-14 — M4 · floats + inline images — closes D14
 
 - The two image-flow features deferred from M2 (D14), bespoke in the inline

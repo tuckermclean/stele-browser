@@ -3,6 +3,28 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M4 — fbdev backend
+
+### D27 — framebuffer via sysfs + file write (safe, std-only, no unsafe/deps)
+The real hardware output path deliberately avoids `rustix`/ioctl/mmap (which
+require `unsafe`). **Choice:** read fb geometry from **sysfs** text files
+(`/sys/class/graphics/fb0/{virtual_size,bits_per_pixel,stride}`) and write
+pixels to `/dev/fb0` via a plain `std::fs::File` — no `unsafe`, no new deps,
+one syscall-per-file instead of an ioctl (irrelevant for a one-shot renderer).
+A pure `convert_to_fb_bytes` (mem-Surface RGBA8 → fb layout) is the testable
+core: **32bpp = BGRX8888** little-endian (`[B,G,R,X]`, X=0, no device alpha),
+**16bpp = RGB565** little-endian, other bpp → `Err`. Totality: `height*stride`
+computed in `u64` and range-checked into `usize` (`GeometryTooLarge` guards the
+32-bit i486 target); columns clipped by `stride/bpp` so writes can't overflow a
+row; a surface larger than the fb clips, smaller leaves the rest black
+(one-shot, no prior frame); absent/garbage `/dev/fb0`/sysfs → clean `Err`, never
+a panic (this error path is what CI actually exercises, since no framebuffer
+exists on the runner). Default width fallback `1024` when sysfs is unreadable.
+Revisit: exact RGB bitfield offsets would need `FBIOGET_VSCREENINFO` (ioctl) —
+if a device with a non-standard channel layout ever matters, add it then
+(would introduce localized `unsafe`); the standard 16/32bpp assumption covers
+vesafb/simplefb/efifb, i.e. essentially all real fbcon setups.
+
 ## M4 — Floats + inline images
 
 ### D26 — bespoke float layout + inline replaced atoms (closes D14)
