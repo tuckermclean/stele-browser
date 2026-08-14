@@ -45,7 +45,7 @@ use taffy::prelude::{
     TaffyTree,
 };
 
-use crate::layout::inline::{self, InlineRun};
+use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, LayoutNode, Point, Rect, Size};
@@ -301,7 +301,7 @@ fn translate_any<'a>(
 ) -> Built<'a> {
     match &node.content {
         BoxContent::Text(text) => {
-            let runs = vec![InlineRun { text: text.clone(), style: node.style.clone() }];
+            let runs = vec![InlineRun { content: InlineContent::Text(text.clone()), style: node.style.clone() }];
             let style = base_style(&node.style);
             let id = taffy
                 .new_leaf_with_context(style, NodeCtx::Inline(runs.clone()))
@@ -386,16 +386,17 @@ fn translate_any<'a>(
 }
 
 /// True for the children a container folds into one inline formatting
-/// context leaf: bare text, or a nested `display: inline` container.
-///
-/// M4 deferral (not built now, flagged per code review): `Replaced` is
-/// always `false` here, so a non-floated inline replaced element (e.g.
-/// `<p>Hello <img> World</p>` with no `align`) breaks out of its line and
-/// stacks as its own block box instead of sitting inline between the
-/// surrounding text. Real inline-replaced flow arrives with M4's image +
-/// float work, when `Replaced` also carries real pixel data — no M2 fixture
-/// (`basic.html`) has an inline image, so nothing is silently dropped yet,
-/// but this is a known flow gap, not an oversight.
+/// context leaf: bare text, a nested `display: inline` container, or a
+/// `Replaced` element (M4: closes the D14 gap). `Replaced` is inline-ish
+/// REGARDLESS of `float` — a non-floated one becomes an inline atom sitting
+/// on the line (`inline::InlineContent::Replaced` with `style.float ==
+/// Float::None`, see `inline::tokenize`), a floated one (`align=left`/
+/// `float: left|right`) is pulled out of line flow by `inline::layout_runs`
+/// itself and placed at the containing block's edge — either way it belongs
+/// in the SAME inline formatting context as any surrounding text (the
+/// `<p><img align=left>text...</p>` shape needs the float and the wrapping
+/// text folded into one taffy leaf so `inline::layout_runs` sees both
+/// together), not broken out into its own stacked block box.
 fn is_inline_ish(n: &LayoutNode) -> bool {
     match &n.content {
         BoxContent::Text(_) => true,
@@ -406,27 +407,27 @@ fn is_inline_ish(n: &LayoutNode) -> bool {
         // exactly like a plain Container, matching pre-table-layout-packet
         // behavior.
         BoxContent::Container | BoxContent::TableCell { .. } => n.style.display == Display::Inline,
-        BoxContent::Replaced { .. } => false,
+        BoxContent::Replaced { .. } => true,
     }
 }
 
-/// Flatten a node's inline-level content (itself, if it's `Text`; its
-/// children recursively, if it's an inline `Container`) into `InlineRun`s in
-/// document order. A `Replaced` child mixed into inline content is skipped
-/// here — not built now (M4 scope: inline non-floated replaced content and
-/// floats arrive together, when `Replaced` also gets real pixel data). A
-/// *direct* `Replaced` child of the block container still gets its own box
-/// via the grouping loop in `translate_container_children`; only a
-/// `Replaced` *grandchild* nested inside an inline `Container` (e.g.
-/// `<em><img></em>`) is silently dropped here — flagged, not fixed, since
-/// no M2 fixture has inline images (that's `images.html`, M4).
+/// Flatten a node's inline-level content (itself, if it's `Text` or
+/// `Replaced`; its children recursively, if it's an inline `Container`) into
+/// `InlineRun`s in document order — `inline::layout_runs` sorts out text vs.
+/// non-floated atom vs. floated-out-of-flow purely from each run's
+/// `content`/`style.float`, so this walk just needs to carry every leaf
+/// through untouched (M4: closes the D14 "grandchild dropped" gap — a
+/// `Replaced` nested inside an inline `Container`, e.g. `<em><img></em>`,
+/// now gets a run here instead of being silently skipped).
 ///
 /// `depth` mirrors `translate_any`'s cap (see [`DEPTH_CAP`]): this walk is
 /// independent recursion (it never goes through `translate_any`), so it
 /// needs its own bound against the same pathological-nesting case.
 fn flatten_inline(node: &LayoutNode, out: &mut Vec<InlineRun>, depth: usize) {
     match &node.content {
-        BoxContent::Text(text) => out.push(InlineRun { text: text.clone(), style: node.style.clone() }),
+        BoxContent::Text(text) => {
+            out.push(InlineRun { content: InlineContent::Text(text.clone()), style: node.style.clone() })
+        }
         // An orphan `TableCell` reaching this path (see `is_inline_ish`) is
         // routed exactly like Container.
         BoxContent::Container | BoxContent::TableCell { .. } => {
@@ -437,7 +438,10 @@ fn flatten_inline(node: &LayoutNode, out: &mut Vec<InlineRun>, depth: usize) {
                 flatten_inline(child, out, depth + 1);
             }
         }
-        BoxContent::Replaced { .. } => {}
+        BoxContent::Replaced { intrinsic, image } => out.push(InlineRun {
+            content: InlineContent::Replaced { intrinsic: *intrinsic, image: image.clone() },
+            style: node.style.clone(),
+        }),
     }
 }
 
@@ -894,6 +898,29 @@ fn map_lpa(v: LengthPercentageAuto) -> TLengthPercentageAuto {
 /// table — is bounded by [`TABLE_DEPTH_CAP`] the same way it is during
 /// measure (`translate_any` simply stops treating a table as a table once
 /// the budget carried in `Built::Table`/`NodeCtx::Table` hits zero).
+/// Push either a real `FragmentKind::Image` (when `image` is `Some`) or an
+/// M2-era placeholder `FragmentKind::Box` (when `None` — not fetched, fetch/
+/// decode failed, or the tty-only pipeline that never populates the images
+/// map) at `rect`, for any replaced element: a block-level `Replaced`
+/// (`Built::Replaced`), a non-floated inline atom, or a floated atom (M4
+/// parts 2/3) all funnel through here so the fallback rule stays in exactly
+/// one place. The image itself may be a different pixel size than `rect`
+/// (the `width`/`height` attributes that set `intrinsic` aren't required to
+/// match the real decoded dimensions) — that mismatch is exactly what
+/// `MemSurface::blit`'s nearest-neighbor scaling exists to absorb at paint
+/// time; this just reports the box's own rect.
+fn push_replaced_fragment(
+    out: &mut Vec<Fragment>,
+    rect: Rect,
+    image: Option<std::rc::Rc<crate::img::RgbaImage>>,
+    style: &ComputedStyle,
+) {
+    match image {
+        Some(img) => out.push(Fragment { rect, kind: FragmentKind::Image { image: (*img).clone() } }),
+        None => out.push(Fragment { rect, kind: FragmentKind::Box { style: style.clone() } }),
+    }
+}
+
 fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Point, metrics: &M, out: &mut Vec<Fragment>) {
     let Ok(layout) = taffy.layout(built.taffy_id()) else { return };
     let origin = Point { x: parent_origin.x + layout.location.x, y: parent_origin.y + layout.location.y };
@@ -906,47 +933,56 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 emit(child, taffy, origin, metrics, out);
             }
         }
-        Built::Replaced { style, image, .. } => match image {
-            // A decoded image: paint it, not a placeholder box. The image
-            // itself may be a different pixel size than this box's laid-out
-            // `size` (the `width`/`height` attributes that set `intrinsic`
-            // aren't required to match the real decoded dimensions) — that
-            // mismatch is exactly what `MemSurface::blit`'s nearest-neighbor
-            // scaling exists to absorb at paint time; `emit` just reports
-            // the box's own rect here.
-            Some(img) => {
-                out.push(Fragment {
-                    rect: Rect { origin, size },
-                    kind: FragmentKind::Image { image: (**img).clone() },
-                });
-            }
-            // No decoded image (not fetched, fetch/decode failed, or this
-            // is the tty-only pipeline which never populates the images
-            // map) — fall back to the M2-era placeholder box.
-            None => {
-                out.push(Fragment { rect: Rect { origin, size }, kind: FragmentKind::Box { style: (*style).clone() } });
-            }
-        },
+        Built::Replaced { style, image, .. } => {
+            push_replaced_fragment(out, Rect { origin, size }, image.clone(), style);
+        }
         Built::Inline { runs, .. } => {
             let available_w = size.w;
             let laid_out = inline::layout_runs(runs, available_w, metrics);
             for line in &laid_out.lines {
                 for run in &line.runs {
-                    let text_origin = Point {
-                        x: origin.x + line.rect.origin.x + run.x,
-                        y: origin.y + line.rect.origin.y,
-                    };
-                    out.push(Fragment {
-                        rect: Rect {
-                            origin: text_origin,
-                            size: Size { w: run.width, h: line.rect.size.h },
-                        },
-                        kind: FragmentKind::Text {
-                            text: run.text.clone(),
-                            baseline: line.baseline,
-                            style: runs[run.run_index].style.clone(),
-                        },
-                    });
+                    let run_origin =
+                        Point { x: origin.x + line.rect.origin.x + run.x, y: origin.y + line.rect.origin.y };
+                    match &runs[run.run_index].content {
+                        InlineContent::Text(_) => {
+                            out.push(Fragment {
+                                rect: Rect { origin: run_origin, size: Size { w: run.width, h: line.rect.size.h } },
+                                kind: FragmentKind::Text {
+                                    text: run.text.clone(),
+                                    baseline: line.baseline,
+                                    style: runs[run.run_index].style.clone(),
+                                },
+                            });
+                        }
+                        // A non-floated replaced atom (M4 part 2, the D14
+                        // gap): bottom-aligned on the line's baseline (see
+                        // `inline::word_metrics`'s "ascent := height,
+                        // descent := 0" convention), painted as a real
+                        // image when decoded or a placeholder `Box`
+                        // otherwise — same fallback rule `Built::Replaced`
+                        // already uses below.
+                        InlineContent::Replaced { intrinsic, image } => {
+                            let h = finite_nonneg(intrinsic.h);
+                            let atom_origin =
+                                Point { x: run_origin.x, y: origin.y + line.rect.origin.y + (line.baseline - h) };
+                            let rect = Rect { origin: atom_origin, size: Size { w: run.width, h } };
+                            push_replaced_fragment(out, rect, image.clone(), &runs[run.run_index].style);
+                        }
+                    }
+                }
+            }
+            // Floated atoms (M4 part 3): pulled out of line flow by
+            // `inline::layout_runs`, positioned relative to this leaf's own
+            // origin exactly like a `LineBox` is.
+            for f in &laid_out.floats {
+                let float_origin =
+                    Point { x: origin.x + f.rect.origin.x, y: origin.y + f.rect.origin.y };
+                let rect = Rect { origin: float_origin, size: f.rect.size };
+                match &runs[f.run_index].content {
+                    InlineContent::Replaced { image, .. } => {
+                        push_replaced_fragment(out, rect, image.clone(), &runs[f.run_index].style)
+                    }
+                    InlineContent::Text(_) => {} // not reachable: only `Replaced` runs are ever floated.
                 }
             }
         }

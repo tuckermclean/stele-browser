@@ -1,45 +1,128 @@
-//! The bespoke inline engine (P6, M2 scope): break inline-level content
-//! (text runs, each carrying its own [`ComputedStyle`]) into line boxes at a
-//! given available width, using [`Metrics`] for glyph advances.
+//! The bespoke inline engine (P6 M2 + M4 floats/inline-images): break
+//! inline-level content — text runs and non-floated replaced atoms (`<img>`
+//! with no `float`), each carrying its own [`ComputedStyle`] — into line
+//! boxes at a given available width, using [`Metrics`] for glyph advances,
+//! and place floated replaced content (`float: left|right`, the 1996 `img
+//! align=left` shape) at the containing block's edge with an exclusion that
+//! shortens overlapping line boxes so text wraps around it.
 //!
-//! Out of scope for M2 (see packet brief): floats / `img align=left` text
-//! wrapping (later milestone), text-align other than the default left flow
+//! Out of scope even after M4: text-align other than the default left flow
 //! (justify/center/right are a paint-time nicety, not attempted here),
-//! bidi/complex shaping (the `Metrics` seam is shaping-free by design).
+//! bidi/complex shaping (the `Metrics` seam is shaping-free by design),
+//! cross-block float continuation (a float that outlives its own containing
+//! block's inline formatting context — M4 scope is "the float and the
+//! wrapping text share one IFC", the classic `<p><img align=left>text...
+//! </p>` shape; see `place_floats`'s doc comment) and full `clear`
+//! interaction (see the same doc comment for why that's a no-op here without
+//! silently dropping anything real).
 //!
 //! Whitespace handling: consecutive whitespace collapses to a single space
 //! (CSS `white-space: normal`), matching the curated `WhiteSpace` property's
 //! only two states (`Normal`/`Pre`) — `Pre` is not yet honored (documented
 //! scope call: v1 always collapses; a `Pre` fast-path is a follow-up). Line
 //! breaking only happens at those collapsed-space opportunities: a single
-//! "word" (including one that is itself wider than the available width)
-//! never splits — it just overflows onto its own line, which keeps the
-//! engine total (no panics) on any input.
+//! "word" (including one that is itself wider than the available width, or a
+//! replaced atom wider than the available width) never splits — it just
+//! overflows onto its own line, which keeps the engine total (no panics) on
+//! any input.
 //!
 //! An inline "word" may itself be glued together out of pieces from more
 //! than one source run when no whitespace separates them in the source
 //! (e.g. `<b>bold</b>text` — no space between the two). Such glued pieces
 //! are tracked as one atomic unit for the fits-on-this-line decision (so the
 //! visual word is never split across lines) while still being emitted as
-//! separate [`PositionedRun`]s so each retains its own style.
+//! separate [`PositionedRun`]s so each retains its own style. A replaced
+//! atom is never glued to neighboring text this way (each occupies its own
+//! source run with a unique index — see [`InlineContent::Replaced`]), but it
+//! still participates in the same "never split a cluster across lines" rule
+//! via [`cluster`].
 
+use std::rc::Rc;
+
+use crate::img::RgbaImage;
 use crate::layout::{Point, Rect, Size};
-use crate::style::computed::LineHeight;
+use crate::style::computed::{Float as CssFloat, LineHeight};
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
 
-/// One inline-level content run: a span of text sharing one style. Built by
-/// flattening a `LayoutNode`'s inline-level content (text, and any nested
-/// `display: inline` containers) in document order.
+/// Bound on any single dimension (width or height) pulled from untrusted
+/// content (an `<img>`'s intrinsic size, itself sourced from HTML
+/// `width`/`height` attributes with no upper bound of their own — see
+/// `layout::box_tree::img_intrinsic`). Applied via [`clamp_dim`] everywhere
+/// an intrinsic size or a derived measurement enters this module's
+/// arithmetic, so a hostile `width="999999999999"` (or a decoder-declared
+/// dimension had one leaked through) can't march any accumulator toward
+/// `f32::INFINITY`/`NaN` (`inf - inf` is `NaN`, and `NaN` comparisons are
+/// false, which can defeat totality invariants that assume `>`/`<` are total
+/// orders over the values in play). 1,000,000px is far beyond any real
+/// document's content while leaving enormous headroom over anything a real
+/// fixture needs.
+const MAX_DIM: f32 = 1_000_000.0;
+
+/// The maximum number of floated replaced atoms one [`layout_runs`] call
+/// will place. Distinct from any depth/count cap upstream (`box_tree`'s
+/// `DEPTH_CAP`, `block`'s `DEPTH_CAP`): those bound *tree* shape, but a
+/// single flat paragraph with thousands of `<img align=left>` siblings (all
+/// at depth 1) would sail past them and still hand [`place_floats`] an
+/// unbounded slice — each placement is O(1) but [`line_exclusion`] is
+/// O(floats) *per line*, so an unbounded float count makes the whole
+/// [`layout_runs`] call O(lines * floats), which a large document could
+/// otherwise blow past any reasonable time budget for. 256 is far beyond any
+/// real 1996-era hand-authored page (a handful of `align=left` images per
+/// paragraph is already unusual) while keeping the worst case a small, fast,
+/// fixed constant. Floats past the cap are silently not placed (excluded
+/// from the returned [`InlineLayout::floats`], so `block.rs` never emits a
+/// fragment for them) — a documented, bounded degrade, not a panic.
+const MAX_FLOATS: usize = 256;
+
+/// Clamp `v` into `[0, MAX_DIM]`, flooring any non-finite (`NaN`/`±inf`) or
+/// negative value to `0.0`. The one totality seam every intrinsic size,
+/// glyph measurement, and derived accumulator in this module passes through
+/// before it can influence line-breaking or float placement.
+fn clamp_dim(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, MAX_DIM)
+    } else {
+        0.0
+    }
+}
+
+/// One inline-level content run's payload: either character data for the
+/// line-breaker to split into words, or a replaced element (`<img>`) sized
+/// at its `intrinsic` px size, optionally carrying decoded pixel data for
+/// `block::emit` to paint (`None` falls back to a placeholder box, exactly
+/// as `BoxContent::Replaced` does upstream).
+///
+/// A `Replaced` run's `style.float` (carried on the owning [`InlineRun`],
+/// not here) decides its fate: `Float::None` makes it an inline-level ATOM
+/// that sits on the line like an unbreakable word (M4 D14 gap, part 2);
+/// `Float::Left`/`Float::Right` pulls it out of line flow entirely and
+/// routes it through [`place_floats`] instead (M4 part 3) — see
+/// [`tokenize`]'s dispatch on this same flag.
+#[derive(Debug, Clone)]
+pub enum InlineContent {
+    Text(String),
+    Replaced {
+        intrinsic: Size,
+        image: Option<Rc<RgbaImage>>,
+    },
+}
+
+/// One inline-level content run: a span of text (or one replaced atom)
+/// sharing one style. Built by flattening a `LayoutNode`'s inline-level
+/// content (text, non-floated replaced elements, and any nested `display:
+/// inline` containers) in document order.
 #[derive(Debug, Clone)]
 pub struct InlineRun {
-    pub text: String,
+    pub content: InlineContent,
     pub style: ComputedStyle,
 }
 
 /// A slice of one source [`InlineRun`] that landed on one line, positioned
 /// relative to the line box's left edge (`x`), with a `width` for hit-testing
-/// / painting convenience.
+/// / painting convenience. For a replaced atom (`runs[run_index].content` is
+/// `Replaced`), `text` is always empty — the caller (`block::emit`) paints
+/// the atom's image/placeholder at `(x, width)` instead of drawing glyphs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PositionedRun {
     /// Index into the `runs` slice passed to [`layout_runs`].
@@ -51,7 +134,10 @@ pub struct PositionedRun {
 
 /// One wrapped line: its box relative to the inline container's content-box
 /// origin, the runs positioned within it (left to right, in source order),
-/// and the baseline offset down from `rect.origin.y`.
+/// and the baseline offset down from `rect.origin.y`. `rect.origin.x` is
+/// normally `0.0`, but is offset rightward by a left float's width whenever
+/// this line's vertical span overlaps one (see [`line_exclusion`]) — the
+/// float-wrap mechanism.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineBox {
     pub rect: Rect,
@@ -59,30 +145,65 @@ pub struct LineBox {
     pub runs: Vec<PositionedRun>,
 }
 
-/// The result of breaking `runs` into lines at some available width: the
-/// overall bounding size (width = widest line, height = sum of line heights)
-/// plus the lines themselves for fragment emission.
+/// Which edge of the containing block a floated replaced atom is pinned to
+/// (the CSS `float` property's two non-`none` values, carried per-atom here
+/// rather than re-reading `ComputedStyle.float` at emit time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatSide {
+    Left,
+    Right,
+}
+
+/// A floated replaced atom's final placement (see [`place_floats`]),
+/// relative to the same origin as [`LineBox::rect`] (the inline container's
+/// content-box origin) — `block::emit` adds this to the leaf's own painted
+/// origin exactly like it does for `LineBox`/`PositionedRun`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionedFloat {
+    /// Index into the `runs` slice passed to [`layout_runs`] — look up
+    /// `runs[run_index].content`'s `image`/`intrinsic` to paint it.
+    pub run_index: usize,
+    pub side: FloatSide,
+    pub rect: Rect,
+}
+
+/// The result of breaking `runs` into lines (and placing any floats) at some
+/// available width: the overall bounding size (width = widest line or
+/// float's right edge, whichever is greater; height = line stack height or
+/// the deepest float's bottom edge, whichever is greater) plus the lines and
+/// placed floats themselves for fragment emission.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InlineLayout {
     pub size: Size,
     pub lines: Vec<LineBox>,
+    pub floats: Vec<PositionedFloat>,
 }
 
-/// One maximal run of non-whitespace characters from a single source run,
+/// One maximal run of non-whitespace content from a single source run,
 /// tagged with whether whitespace preceded it in the (flattened) token
 /// stream. Glued cross-run words (no whitespace at the run boundary) are
 /// separate `Word`s with `space_before = false`, so they cluster together
-/// below.
+/// below. A replaced atom is always its own `Word` (`text` empty — its width
+/// comes from `runs[run].content`'s `intrinsic`, not glyph measurement; see
+/// [`word_metrics`]) since it always occupies a whole source run by
+/// construction (`flatten_inline` never merges a `Replaced` into a `Text`
+/// run's string).
 struct Word {
     run: usize,
     text: String,
     space_before: bool,
 }
 
-/// Split the flattened text of `runs` into whitespace-delimited `Word`s,
+/// Split the flattened content of `runs` into whitespace-delimited `Word`s,
 /// collapsing any run of whitespace (even one spanning a run boundary) into
-/// a single break opportunity. Total: handles empty runs, all-whitespace
-/// runs, and runs with no whitespace at all without panicking.
+/// a single break opportunity. A floated `Replaced` run (`style.float !=
+/// Float::None`) is transparent to this token stream — it contributes no
+/// `Word` and neither flushes nor sets `pending_space` — it is placed
+/// separately by [`place_floats`], not laid out as inline flow content; a
+/// non-floated `Replaced` run becomes its own atomic `Word` (flushing
+/// whatever text was pending first, exactly like hitting whitespace would).
+/// Total: handles empty runs, all-whitespace runs, and runs with no
+/// whitespace at all without panicking.
 fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
     let mut words = Vec::new();
     let mut pending_space = false;
@@ -96,18 +217,31 @@ fn tokenize(runs: &[InlineRun]) -> Vec<Word> {
     };
 
     for (i, r) in runs.iter().enumerate() {
-        for ch in r.text.chars() {
-            if ch.is_whitespace() {
-                flush(&mut cur, &mut pending_space, &mut words);
-                pending_space = true;
-            } else {
-                match &mut cur {
-                    Some((run, text)) if *run == i => text.push(ch),
-                    _ => {
+        match &r.content {
+            InlineContent::Text(text) => {
+                for ch in text.chars() {
+                    if ch.is_whitespace() {
                         flush(&mut cur, &mut pending_space, &mut words);
-                        cur = Some((i, ch.to_string()));
+                        pending_space = true;
+                    } else {
+                        match &mut cur {
+                            Some((run, t)) if *run == i => t.push(ch),
+                            _ => {
+                                flush(&mut cur, &mut pending_space, &mut words);
+                                cur = Some((i, ch.to_string()));
+                            }
+                        }
                     }
                 }
+            }
+            InlineContent::Replaced { .. } => {
+                if r.style.float == CssFloat::None {
+                    flush(&mut cur, &mut pending_space, &mut words);
+                    words.push(Word { run: i, text: String::new(), space_before: pending_space });
+                    pending_space = false;
+                }
+                // A floated atom is invisible to the token stream: neither
+                // flushed nor recorded — `place_floats` handles it instead.
             }
         }
     }
@@ -146,26 +280,218 @@ fn resolved_line_height<M: Metrics>(style: &ComputedStyle, metrics: &M) -> f32 {
     }
 }
 
-/// Break `runs` into lines that fit within `available_width`, using `metrics`
-/// for advances. Total over any input: empty `runs`, empty/whitespace-only
-/// text, non-finite/negative `available_width`, and single words wider than
-/// the available width (they overflow their line rather than panicking or
-/// splitting) are all handled.
+/// One word's contribution to line layout: `(width, ascent, descent,
+/// line_height)`, dispatching on whether `runs[w.run]` is text (glyph
+/// metrics, as before M4) or a replaced atom (its clamped `intrinsic` size
+/// stands in for all four — an image's "ascent" is its full height, "descent"
+/// zero, so the image's bottom edge sits on the line's baseline, matching
+/// the common UA default of `vertical-align: baseline` for replaced content;
+/// its own "line height" is just its height, since `resolved_line_height`'s
+/// font-driven notion doesn't apply to a non-text atom).
+fn word_metrics<M: Metrics>(runs: &[InlineRun], w: &Word, metrics: &M) -> (f32, f32, f32, f32) {
+    let style = &runs[w.run].style;
+    match &runs[w.run].content {
+        InlineContent::Text(_) => {
+            let width = clamp_dim(metrics.measure(&w.text, style.font_size));
+            let ascent = clamp_dim(metrics.ascent(style.font_size));
+            let descent = clamp_dim(metrics.descent(style.font_size));
+            let line_height = clamp_dim(resolved_line_height(style, metrics));
+            (width, ascent, descent, line_height)
+        }
+        InlineContent::Replaced { intrinsic, .. } => {
+            let w_ = clamp_dim(intrinsic.w);
+            let h_ = clamp_dim(intrinsic.h);
+            (w_, h_, 0.0, h_)
+        }
+    }
+}
+
+/// Collect every FLOATED replaced run (`style.float != Float::None`) out of
+/// `runs`, in document order, each tagged with its side and clamped
+/// intrinsic size — the input [`place_floats`] positions. Capped at
+/// [`MAX_FLOATS`] (see its own doc comment); later floats in document order
+/// past the cap are simply not collected (and so never placed/emitted).
+fn collect_float_specs(runs: &[InlineRun]) -> Vec<(usize, FloatSide, Size)> {
+    let mut out = Vec::new();
+    for (i, r) in runs.iter().enumerate() {
+        if out.len() >= MAX_FLOATS {
+            break;
+        }
+        if let InlineContent::Replaced { intrinsic, .. } = &r.content {
+            let side = match r.style.float {
+                CssFloat::Left => Some(FloatSide::Left),
+                CssFloat::Right => Some(FloatSide::Right),
+                CssFloat::None => None,
+            };
+            if let Some(side) = side {
+                out.push((i, side, Size { w: clamp_dim(intrinsic.w), h: clamp_dim(intrinsic.h) }));
+            }
+        }
+    }
+    out
+}
+
+/// Place every collected float at its containing block's left/right edge,
+/// stacking same-side floats horizontally until they no longer fit the
+/// available width, then dropping to a new "row" below the tallest float
+/// placed so far on that side — independently for the left and right sides
+/// (a documented M4 simplification: a left float and a right float placed at
+/// the same row are not checked against each other for overlap; real CSS's
+/// float-avoidance is considerably more involved, and no M4 fixture needs
+/// left+right floats colliding in one paragraph).
 ///
-/// An empty (or all-whitespace) `runs` slice produces zero lines and a zero
-/// [`Size`] — a documented scope call (brief allows either "one empty line
-/// or zero lines"; zero keeps empty text nodes from consuming vertical
-/// space, matching most engines' handling of whitespace-only text nodes).
+/// M4 scope: every float here is placed starting at `y = 0` (the top of its
+/// own inline formatting context / containing block), NOT at the vertical
+/// position its `<img>` tag happens to appear at in the source. This is the
+/// documented simplification for "the float and the wrapping text share one
+/// IFC" (module docs): the overwhelmingly common 1996 shape is `<p><img
+/// align=left>text...</p>` — the float as the very first thing in the
+/// paragraph — so `y = 0` already matches real UA behavior for that shape.
+/// A float placed mid-paragraph (`text <img align=left> more text`) would,
+/// in a real UA, start no higher than its point in the flow; here it starts
+/// at the IFC's top instead, floating "above" text that precedes it in
+/// source order. Flagged, not silently dropped: no M4 fixture exercises a
+/// mid-paragraph float, and the exclusion mechanism ([`line_exclusion`])
+/// still correctly wraps every line under it regardless of where its box
+/// starts. Revisit-trigger: a fixture needs a float's true source position.
+///
+/// `clear` is likewise not honored here: since floats never escape their own
+/// IFC in this scope (no cross-block continuation — see the module docs),
+/// there is no OTHER block/line in scope that could ever need to clear past
+/// one; a `clear` on some run within this same paragraph would be
+/// nonsensical (nothing after it in the same IFC could be "below" a float
+/// that already spans the IFC from y=0). Deferred, not implemented — flagged
+/// per the packet brief's explicit allowance to simplify/defer full `clear`
+/// interaction.
+///
+/// Total: `specs` is already capped at [`MAX_FLOATS`]; a float wider than
+/// `available_width` is clamped to exactly `available_width` (occupies the
+/// whole row by itself — "text goes below" per the packet's totality
+/// requirement); every dimension is pre-clamped finite/non-negative by
+/// [`collect_float_specs`]. A plain `for` loop over an already-bounded slice
+/// — no while-loop retry, so no infinite-loop surface at all.
+fn place_floats(specs: &[(usize, FloatSide, Size)], available_width: f32) -> Vec<PositionedFloat> {
+    let available_width = clamp_dim(available_width);
+    let mut left_x = 0.0f32;
+    let mut left_row_top = 0.0f32;
+    let mut left_row_bottom = 0.0f32;
+    let mut right_used = 0.0f32;
+    let mut right_row_top = 0.0f32;
+    let mut right_row_bottom = 0.0f32;
+
+    let mut out = Vec::with_capacity(specs.len());
+    for &(run_index, side, size) in specs {
+        let w = clamp_dim(size.w).min(available_width);
+        let h = clamp_dim(size.h);
+        match side {
+            FloatSide::Left => {
+                if left_x > 0.0 && left_x + w > available_width {
+                    left_row_top = left_row_bottom;
+                    left_x = 0.0;
+                }
+                out.push(PositionedFloat {
+                    run_index,
+                    side,
+                    rect: Rect { origin: Point { x: left_x, y: left_row_top }, size: Size { w, h } },
+                });
+                left_x += w;
+                left_row_bottom = left_row_bottom.max(left_row_top + h);
+            }
+            FloatSide::Right => {
+                if right_used > 0.0 && right_used + w > available_width {
+                    right_row_top = right_row_bottom;
+                    right_used = 0.0;
+                }
+                let x = (available_width - right_used - w).max(0.0);
+                out.push(PositionedFloat {
+                    run_index,
+                    side,
+                    rect: Rect { origin: Point { x, y: right_row_top }, size: Size { w, h } },
+                });
+                right_used += w;
+                right_row_bottom = right_row_bottom.max(right_row_top + h);
+            }
+        }
+    }
+    out
+}
+
+/// The horizontal exclusion a line starting at vertical position `y` must
+/// honor: `(offset_x, avail_width)` — `offset_x` is how far right the
+/// line's own box must start (the widest LEFT float whose `[y0, y0+h)` span
+/// contains `y`), and `avail_width` is `available_width` minus BOTH that
+/// left exclusion and the narrowest gap left by any overlapping RIGHT float.
+/// Uses a point-in-range test at the line's own starting `y` (not a
+/// [y, y+line_height) range test) — a documented approximation: this
+/// function is always called before a line's own height is known (the
+/// height depends on what content ends up on it, and the exclusion decides
+/// what CAN fit — a real interleaved solve isn't attempted here), so the
+/// alternative would require re-solving once height is known. Since floats
+/// are typically much taller than one text line, testing at the line's
+/// start `y` alone tracks a real UA's "wrap around it" behavior closely
+/// enough for the M4 fixtures. A zero-height float (`h == 0.0`) never
+/// matches any `y` (empty half-open range) — correctly excluded from every
+/// line, since it has no vertical extent to wrap around.
+///
+/// Total, bounded work: a plain loop over `floats`, itself capped at
+/// [`MAX_FLOATS`] — called once per line, so the whole [`layout_runs`] call
+/// costs at most `O(lines * MAX_FLOATS)`, both bounded.
+fn line_exclusion(y: f32, floats: &[PositionedFloat], available_width: f32) -> (f32, f32) {
+    let mut left = 0.0f32;
+    let mut right = 0.0f32;
+    for f in floats {
+        if y >= f.rect.origin.y && y < f.rect.origin.y + f.rect.size.h {
+            match f.side {
+                FloatSide::Left => left = left.max(f.rect.origin.x + f.rect.size.w),
+                FloatSide::Right => right = right.max(available_width - f.rect.origin.x),
+            }
+        }
+    }
+    let avail = (available_width - left - right).max(0.0);
+    (left, avail)
+}
+
+/// Break `runs` into lines that fit within `available_width` — placing any
+/// floated replaced atoms first (see [`place_floats`]) and shortening every
+/// line whose vertical span overlaps one (see [`line_exclusion`]) so text
+/// wraps around it — using `metrics` for text advances. Total over any
+/// input: empty `runs`, empty/whitespace-only text, non-finite/negative
+/// `available_width`, single words (or replaced atoms) wider than the
+/// available width (they overflow their line rather than panicking or
+/// splitting), floats with no following text, many floats, a float wider
+/// than the container, and a float with zero/huge/NaN intrinsic size are all
+/// handled — see this module's doc comment and [`place_floats`]/
+/// [`line_exclusion`]'s own totality notes.
+///
+/// An empty (or all-whitespace, all-floated-with-nothing-else) `runs` slice
+/// with no floats produces zero lines and a zero [`Size`] — a documented
+/// scope call (brief allows either "one empty line or zero lines"; zero
+/// keeps empty text nodes from consuming vertical space, matching most
+/// engines' handling of whitespace-only text nodes). If floats ARE present
+/// even with no other content, they are still placed and returned (the
+/// "floats with no following text" totality case) — the returned `size`
+/// reflects their footprint so the containing block still reserves room for
+/// them.
 pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics: &M) -> InlineLayout {
     let available_width = if available_width.is_finite() && available_width > 0.0 { available_width } else { 0.0 };
 
+    let float_specs = collect_float_specs(runs);
+    let placed_floats = place_floats(&float_specs, available_width);
+
     let clusters = cluster(tokenize(runs));
     if clusters.is_empty() {
-        return InlineLayout::default();
+        let floats_bottom = placed_floats.iter().map(|f| f.rect.origin.y + f.rect.size.h).fold(0.0f32, f32::max);
+        let floats_right = placed_floats.iter().map(|f| f.rect.origin.x + f.rect.size.w).fold(0.0f32, f32::max);
+        return InlineLayout {
+            size: Size { w: floats_right, h: floats_bottom },
+            lines: Vec::new(),
+            floats: placed_floats,
+        };
     }
 
     let mut lines: Vec<LineBox> = Vec::new();
     let mut y = 0.0f32;
+    let (mut line_offset_x, mut line_avail_width) = line_exclusion(y, &placed_floats, available_width);
 
     // Current line accumulator state.
     let mut cur_x = 0.0f32;
@@ -183,22 +509,20 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
     }
 
     for c in &clusters {
-        let cluster_width: f32 =
-            c.words.iter().map(|w| metrics.measure(&w.text, runs[w.run].style.font_size)).sum();
+        let cluster_width: f32 = c.words.iter().map(|w| word_metrics(runs, w, metrics).0).sum();
+        let cluster_width = clamp_dim(cluster_width);
         let space_style = &runs[c.words[0].run].style;
-        let space_w = if c.space_before { metrics.advance(' ', space_style.font_size) } else { 0.0 };
-        let space_w = if space_w.is_finite() { space_w.max(0.0) } else { 0.0 };
-        let cluster_width = if cluster_width.is_finite() { cluster_width.max(0.0) } else { 0.0 };
+        let space_w = if c.space_before { clamp_dim(metrics.advance(' ', space_style.font_size)) } else { 0.0 };
 
         let would_add = if cur_x > 0.0 { space_w } else { 0.0 } + cluster_width;
-        if cur_x > 0.0 && cur_x + would_add > available_width {
+        if cur_x > 0.0 && cur_x + would_add > line_avail_width {
             // Wrap: flush the current line, start a fresh one.
             close_run(&mut open, &mut cur_positioned);
-            max_width = max_width.max(cur_x);
+            max_width = max_width.max(line_offset_x + cur_x);
             let line_height = max_line_height.max(max_ascent + max_descent);
             let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
             lines.push(LineBox {
-                rect: Rect { origin: Point { x: 0.0, y }, size: Size { w: cur_x, h: line_height } },
+                rect: Rect { origin: Point { x: line_offset_x, y }, size: Size { w: cur_x, h: line_height } },
                 baseline,
                 runs: std::mem::take(&mut cur_positioned),
             });
@@ -207,13 +531,14 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
             max_ascent = 0.0;
             max_descent = 0.0;
             max_line_height = 0.0;
+            let (offset, avail) = line_exclusion(y, &placed_floats, available_width);
+            line_offset_x = offset;
+            line_avail_width = avail;
         }
 
         let use_space = cur_x > 0.0 && c.space_before;
         for (wi, w) in c.words.iter().enumerate() {
-            let style = &runs[w.run].style;
-            let word_w = metrics.measure(&w.text, style.font_size);
-            let word_w = if word_w.is_finite() { word_w.max(0.0) } else { 0.0 };
+            let (word_w, ascent, descent, line_h) = word_metrics(runs, w, metrics);
             // A leading space only ever precedes the cluster's first word —
             // subsequent words within a glued cluster never get one (there
             // was none in the source, that's why they're glued).
@@ -223,22 +548,40 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
             let start_x = cur_x;
             cur_x += leading_w + word_w;
 
-            max_ascent = max_ascent.max(metrics.ascent(style.font_size).max(0.0));
-            max_descent = max_descent.max(metrics.descent(style.font_size).max(0.0));
-            max_line_height = max_line_height.max(resolved_line_height(style, metrics).max(0.0));
+            max_ascent = max_ascent.max(ascent);
+            max_descent = max_descent.max(descent);
+            max_line_height = max_line_height.max(line_h);
 
-            match &mut open {
-                Some(o) if o.run_index == w.run => {
-                    o.text.push_str(leading);
-                    o.text.push_str(&w.text);
-                    o.width = cur_x - o.x;
-                }
-                _ => {
+            match &runs[w.run].content {
+                InlineContent::Text(_) => match &mut open {
+                    Some(o) if o.run_index == w.run => {
+                        o.text.push_str(leading);
+                        o.text.push_str(&w.text);
+                        o.width = cur_x - o.x;
+                    }
+                    _ => {
+                        close_run(&mut open, &mut cur_positioned);
+                        let mut text = String::new();
+                        text.push_str(leading);
+                        text.push_str(&w.text);
+                        open = Some(PositionedRun { run_index: w.run, text, x: start_x, width: cur_x - start_x });
+                    }
+                },
+                // An atom never merges with a neighbor (its run index is
+                // unique to it — see `Word`'s doc comment) and never carries
+                // the leading space in its own box (that space has no pixel
+                // footprint to paint for an image): the atom's `x` starts
+                // AFTER the leading space, and its `width` is exactly its
+                // own clamped intrinsic width, not `cur_x - start_x`.
+                InlineContent::Replaced { .. } => {
                     close_run(&mut open, &mut cur_positioned);
-                    let mut text = String::new();
-                    text.push_str(leading);
-                    text.push_str(&w.text);
-                    open = Some(PositionedRun { run_index: w.run, text, x: start_x, width: cur_x - start_x });
+                    open = Some(PositionedRun {
+                        run_index: w.run,
+                        text: String::new(),
+                        x: start_x + leading_w,
+                        width: word_w,
+                    });
+                    close_run(&mut open, &mut cur_positioned);
                 }
             }
         }
@@ -247,18 +590,23 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
     // Flush the final line.
     close_run(&mut open, &mut cur_positioned);
     if !cur_positioned.is_empty() {
-        max_width = max_width.max(cur_x);
+        max_width = max_width.max(line_offset_x + cur_x);
         let line_height = max_line_height.max(max_ascent + max_descent);
         let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
         lines.push(LineBox {
-            rect: Rect { origin: Point { x: 0.0, y }, size: Size { w: cur_x, h: line_height } },
+            rect: Rect { origin: Point { x: line_offset_x, y }, size: Size { w: cur_x, h: line_height } },
             baseline,
             runs: cur_positioned,
         });
         y += line_height;
     }
 
-    InlineLayout { size: Size { w: max_width, h: y }, lines }
+    let floats_bottom = placed_floats.iter().map(|f| f.rect.origin.y + f.rect.size.h).fold(0.0f32, f32::max);
+    let floats_right = placed_floats.iter().map(|f| f.rect.origin.x + f.rect.size.w).fold(0.0f32, f32::max);
+    max_width = max_width.max(floats_right);
+    let total_h = y.max(floats_bottom);
+
+    InlineLayout { size: Size { w: max_width, h: total_h }, lines, floats: placed_floats }
 }
 
 #[cfg(test)]
@@ -286,13 +634,25 @@ mod tests {
     }
 
     fn run(text: &str) -> InlineRun {
-        InlineRun { text: text.to_string(), style: ComputedStyle::default() }
+        InlineRun { content: InlineContent::Text(text.to_string()), style: ComputedStyle::default() }
     }
 
     fn run_with(text: &str, mut f: impl FnMut(&mut ComputedStyle)) -> InlineRun {
         let mut style = ComputedStyle::default();
         f(&mut style);
-        InlineRun { text: text.to_string(), style }
+        InlineRun { content: InlineContent::Text(text.to_string()), style }
+    }
+
+    /// A non-floated replaced atom (M4 part 2): sits inline like a word.
+    fn atom(w: f32, h: f32) -> InlineRun {
+        InlineRun { content: InlineContent::Replaced { intrinsic: Size { w, h }, image: None }, style: ComputedStyle::default() }
+    }
+
+    /// A floated replaced atom (M4 part 3): pulled out of line flow.
+    fn float_atom(w: f32, h: f32, side: CssFloat) -> InlineRun {
+        let mut style = ComputedStyle::default();
+        style.float = side;
+        InlineRun { content: InlineContent::Replaced { intrinsic: Size { w, h }, image: None }, style }
     }
 
     #[test]
@@ -452,5 +812,210 @@ mod tests {
         let out = layout_runs(&runs, 200.0, &FixedMetrics);
         assert!(!out.lines.is_empty());
         assert!(out.size.h > 0.0);
+    }
+
+    // -----------------------------------------------------------------
+    // M4 part 2: non-floated inline replaced atoms.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn non_floated_replaced_atom_sits_inline_between_words() {
+        // "hi <atom 15x8> bye" all on one line: "hi"(20) + space(10) +
+        // atom(15) + space(10) + "bye"(30) = 85, well within 1000px.
+        let runs = [run("hi "), atom(15.0, 8.0), run(" bye")];
+        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        let positioned = &out.lines[0].runs;
+        assert_eq!(positioned.len(), 3, "text, atom, text — three positioned runs on one line");
+        assert_eq!(positioned[0].run_index, 0);
+        assert_eq!(positioned[0].text, "hi");
+        assert_eq!(positioned[1].run_index, 1);
+        assert_eq!(positioned[1].text, "", "an atom carries no glyph text");
+        assert_eq!(positioned[1].width, 15.0, "atom width is its own intrinsic width, not glyph-measured");
+        // "hi" ends at x=20; a space (10px) precedes the atom -> atom.x = 30.
+        assert_eq!(positioned[1].x, 30.0);
+        assert_eq!(positioned[2].run_index, 2);
+        assert_eq!(positioned[2].text, " bye");
+    }
+
+    #[test]
+    fn tall_inline_atom_grows_the_line_box() {
+        // The atom (h=50) is far taller than the text's own ascent+descent
+        // (8+2=10) or the fixed 10px line-height, so its ascent (=50) alone
+        // sets the line's baseline (matching the atom's own bottom edge),
+        // and the line's total height is that baseline PLUS the tallest
+        // descent of anything else sharing the line ("hi"'s descent, 2px) —
+        // real inline layout: an image doesn't shrink a shorter neighbor's
+        // descent away, it just becomes the line's dominant ascent.
+        let runs = [run("hi "), atom(15.0, 50.0)];
+        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].baseline, 50.0, "baseline sits at the atom's bottom edge");
+        assert_eq!(out.lines[0].rect.size.h, 52.0, "line height = atom ascent(50) + text descent(2)");
+    }
+
+    #[test]
+    fn atom_wider_than_available_width_overflows_its_own_line_not_split() {
+        let runs = [atom(500.0, 20.0)];
+        let out = layout_runs(&runs, 30.0, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].runs[0].width, 500.0);
+    }
+
+    #[test]
+    fn atom_wraps_to_its_own_line_when_it_does_not_fit_after_text() {
+        // "aa"(20px) then an atom(15px): together 20+10(space)+15=45 > 40.
+        let runs = [run("aa "), atom(15.0, 8.0)];
+        let out = layout_runs(&runs, 40.0, &FixedMetrics);
+        assert_eq!(out.lines.len(), 2);
+        assert_eq!(out.lines[0].runs[0].text, "aa");
+        assert_eq!(out.lines[1].runs[0].run_index, 1);
+        assert_eq!(out.lines[1].runs[0].x, 0.0, "wrapped atom starts a fresh line at x=0");
+    }
+
+    #[test]
+    fn atom_with_nonfinite_or_negative_intrinsic_does_not_panic() {
+        for (w, h) in [(f32::NAN, f32::INFINITY), (-5.0, -5.0), (f32::NEG_INFINITY, f32::NAN)] {
+            let runs = [atom(w, h)];
+            let out = layout_runs(&runs, 100.0, &FixedMetrics);
+            assert_eq!(out.lines.len(), 1);
+            assert!(out.lines[0].runs[0].width.is_finite());
+            assert!(out.size.w.is_finite() && out.size.h.is_finite());
+        }
+    }
+
+    #[test]
+    fn glued_word_next_to_atom_with_no_whitespace_stays_together() {
+        // No whitespace between "x" and the atom -> unbreakable cluster.
+        let runs = [run("x"), atom(60.0, 8.0)];
+        let out = layout_runs(&runs, 50.0, &FixedMetrics); // "x"(10) + atom(60) = 70 > 50
+        assert_eq!(out.lines.len(), 1, "glued atom+text must not split even though it overflows");
+        assert_eq!(out.lines[0].runs.len(), 2);
+        assert_eq!(out.lines[0].runs[0].x, 0.0);
+        assert_eq!(out.lines[0].runs[1].x, 10.0, "atom starts right after the glued text, no space inserted");
+    }
+
+    // -----------------------------------------------------------------
+    // M4 part 3: floats + exclusion.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn left_float_offsets_and_shortens_overlapping_lines() {
+        // A 40x30 left float, then enough text to span past its bottom.
+        // Available width 100: overlapping lines get 60px (100-40), fitting
+        // two 20px words + one 10px space (50px) each; three lines of that
+        // (30px of height) exactly reach the float's y=30 bottom, so the
+        // fourth line starts right at y=30 and must return to full width.
+        let runs = [float_atom(40.0, 30.0, CssFloat::Left), run("aa bb cc dd ee ff gg hh")];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.floats.len(), 1);
+        assert_eq!(out.floats[0].side, FloatSide::Left);
+        assert_eq!(out.floats[0].rect, Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 40.0, h: 30.0 } });
+
+        // First line (y=0, inside the float's [0,30) span): offset 40,
+        // avail 60 -> "aa bb"(20+10+20=50) fits, "cc" doesn't (50+10+20=80>60).
+        assert_eq!(out.lines[0].rect.origin.x, 40.0);
+        assert_eq!(out.lines[0].runs[0].text, "aa bb");
+        assert_eq!(out.lines[1].rect.origin.x, 40.0);
+        assert_eq!(out.lines[1].runs[0].text, "cc dd");
+        assert_eq!(out.lines[2].rect.origin.x, 40.0);
+        assert_eq!(out.lines[2].runs[0].text, "ee ff");
+
+        // A line starting past y=30 (the float's bottom) returns to the
+        // full 100px width and x=0.
+        let below = out.lines.iter().find(|l| l.rect.origin.y >= 30.0).expect("a line below the float");
+        assert_eq!(below.rect.origin.x, 0.0);
+        assert_eq!(below.runs[0].text, "gg hh");
+    }
+
+    #[test]
+    fn right_float_only_shortens_available_width_not_the_start_x() {
+        let runs = [float_atom(40.0, 30.0, CssFloat::Right), run("aa bb cc dd")];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.floats[0].side, FloatSide::Right);
+        assert_eq!(out.floats[0].rect.origin.x, 60.0); // 100 - 40
+        assert_eq!(out.lines[0].rect.origin.x, 0.0, "a right float never offsets the line's start x");
+        assert_eq!(out.lines[0].runs[0].text, "aa bb"); // same 60px effective width as the left-float case
+    }
+
+    #[test]
+    fn floats_with_no_following_text_are_still_placed_and_sized() {
+        let runs = [float_atom(40.0, 30.0, CssFloat::Left)];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.lines.len(), 0, "no text/atoms -> zero lines, per the empty-runs scope call");
+        assert_eq!(out.floats.len(), 1, "the float itself must still be placed and returned");
+        assert_eq!(out.size, Size { w: 40.0, h: 30.0 }, "size reflects the float's own footprint");
+    }
+
+    #[test]
+    fn multiple_same_side_floats_stack_then_wrap_to_a_new_row() {
+        // Three 40px-wide left floats in a 100px container: first two fit
+        // side by side (40+40=80<=100), the third doesn't (80+40=120>100)
+        // and drops to a new row below the tallest of the first two.
+        let runs = [
+            float_atom(40.0, 20.0, CssFloat::Left),
+            float_atom(40.0, 50.0, CssFloat::Left),
+            float_atom(40.0, 10.0, CssFloat::Left),
+        ];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.floats.len(), 3);
+        assert_eq!(out.floats[0].rect.origin, Point { x: 0.0, y: 0.0 });
+        assert_eq!(out.floats[1].rect.origin, Point { x: 40.0, y: 0.0 });
+        assert_eq!(out.floats[2].rect.origin, Point { x: 0.0, y: 50.0 }, "wraps below the taller of the first row");
+    }
+
+    #[test]
+    fn alternating_left_and_right_floats_do_not_panic() {
+        let runs = [
+            float_atom(20.0, 10.0, CssFloat::Left),
+            float_atom(20.0, 10.0, CssFloat::Right),
+            float_atom(20.0, 10.0, CssFloat::Left),
+            float_atom(20.0, 10.0, CssFloat::Right),
+        ];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.floats.len(), 4);
+        for f in &out.floats {
+            assert!(f.rect.origin.x.is_finite() && f.rect.origin.y.is_finite());
+        }
+    }
+
+    #[test]
+    fn float_wider_than_container_clamps_to_full_width() {
+        let runs = [float_atom(500.0, 20.0, CssFloat::Left), run("hi")];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.floats[0].rect.size.w, 100.0, "clamped to the full container width");
+        // Text has zero effective width on the overlapping line -> it still
+        // gets placed (first-item-on-line overflow rule), not lost.
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].runs[0].text, "hi");
+    }
+
+    #[test]
+    fn float_with_nonfinite_or_zero_intrinsic_does_not_panic_or_hang() {
+        for (w, h) in [(f32::NAN, f32::INFINITY), (0.0, 0.0), (-1.0, -1.0), (f32::NEG_INFINITY, f32::NAN)] {
+            let runs = [float_atom(w, h, CssFloat::Left), run("hi there")];
+            let out = layout_runs(&runs, 100.0, &FixedMetrics);
+            assert!(out.size.w.is_finite() && out.size.h.is_finite());
+            for f in &out.floats {
+                assert!(f.rect.size.w.is_finite() && f.rect.size.h.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn many_floats_are_bounded_and_do_not_hang() {
+        let mut runs: Vec<InlineRun> = (0..2000).map(|_| float_atom(5.0, 5.0, CssFloat::Left)).collect();
+        runs.push(run("done"));
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert!(out.floats.len() <= MAX_FLOATS, "float placement must be bounded, not O(input)");
+        assert!(out.size.w.is_finite() && out.size.h.is_finite());
+    }
+
+    #[test]
+    fn clear_with_no_float_does_not_panic() {
+        let runs = [run_with("hi", |s| s.clear = crate::style::computed::Clear::Left)];
+        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].runs[0].text, "hi");
     }
 }

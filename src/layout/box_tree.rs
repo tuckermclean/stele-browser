@@ -30,7 +30,7 @@ use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::{BoxContent, LayoutNode, Size};
-use crate::style::computed::Display;
+use crate::style::computed::{Display, Float};
 use crate::style::ComputedStyle;
 
 /// Mirrors `layout::block::DEPTH_CAP` (private to that module). This walk is
@@ -88,6 +88,8 @@ fn build_node(
         }),
         Node::Element(el) => {
             if is_replaced(el) {
+                let mut style = style;
+                apply_align_float_hint(el, &mut style);
                 return Some(LayoutNode {
                     style,
                     content: BoxContent::Replaced { intrinsic: img_intrinsic(el), image: images.get(&id).cloned() },
@@ -131,6 +133,30 @@ fn img_intrinsic(el: &Element) -> Size {
     let w = parse_nonneg(el.attrs.get("width")).unwrap_or(DEFAULT_IMG_INTRINSIC.w);
     let h = parse_nonneg(el.attrs.get("height")).unwrap_or(DEFAULT_IMG_INTRINSIC.h);
     Size { w, h }
+}
+
+/// Map the real 1996 `<img align=left|right>` presentational HTML attribute
+/// onto the CSS `float` this box's `ComputedStyle` already carries (M4 part
+/// 1, closing DECISIONS D14's floats deferral) — `align="left"` ->
+/// `Float::Left`, `align="right"` -> `Float::Right`, case-insensitively
+/// (`ALIGN="LEFT"` was as common as lowercase in real 1996 markup). Only
+/// applied when the cascaded `style.float` is still `Float::None`: author
+/// CSS `float` (from a `<style>`/author sheet, already resolved by cascade
+/// before this function runs) always wins over the presentational hint,
+/// matching the general HTML4 rule that CSS overrides presentational
+/// attributes. `align="top"/"middle"/"bottom"` (vertical-align, not float)
+/// and any other/missing value are left alone — out of scope per the packet
+/// brief, and NOT a fallback to any float side.
+fn apply_align_float_hint(el: &Element, style: &mut ComputedStyle) {
+    if style.float != Float::None {
+        return; // author CSS float wins over the attribute hint.
+    }
+    let Some(align) = el.attrs.get("align") else { return };
+    match align.to_ascii_lowercase().as_str() {
+        "left" => style.float = Float::Left,
+        "right" => style.float = Float::Right,
+        _ => {} // top/middle/bottom/unknown: vertical-align territory, ignored here.
+    }
 }
 
 fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
@@ -599,6 +625,104 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn img_align_left_maps_to_float_left_presentational_hint() {
+        let d = dom::parser::parse(r#"<img src="x.png" align="left" width="10" height="10">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        assert_eq!(img.style.float, crate::style::computed::Float::Left);
+    }
+
+    #[test]
+    fn img_align_right_maps_to_float_right_presentational_hint() {
+        let d = dom::parser::parse(r#"<img src="x.png" align="right" width="10" height="10">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        assert_eq!(img.style.float, crate::style::computed::Float::Right);
+    }
+
+    #[test]
+    fn img_align_is_case_insensitive() {
+        let d = dom::parser::parse(r#"<img src="x.png" align="LEFT" width="10" height="10">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        assert_eq!(img.style.float, crate::style::computed::Float::Left);
+    }
+
+    #[test]
+    fn img_align_top_middle_bottom_are_ignored_not_mapped_to_float() {
+        // Out of scope (vertical-align, not float) per the packet brief.
+        for v in ["top", "middle", "bottom", "nonsense"] {
+            let html = format!(r#"<img src="x.png" align="{v}" width="10" height="10">"#);
+            let d = dom::parser::parse(&html);
+            let styles = cascade::cascade(&d, &[]);
+            let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+            fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+                if matches!(node.content, BoxContent::Replaced { .. }) {
+                    return Some(node);
+                }
+                node.children.iter().find_map(find_img)
+            }
+            let img = find_img(&root).expect("img box present");
+            assert_eq!(img.style.float, crate::style::computed::Float::None, "align={v} must not set float");
+        }
+    }
+
+    #[test]
+    fn author_css_float_wins_over_align_attribute_hint() {
+        // Author CSS `float: right` must win over the `align="left"`
+        // presentational hint (the hint only applies when the cascaded
+        // `style.float` is still `Float::None`).
+        let d = dom::parser::parse(r#"<img src="x.png" align="left" width="10" height="10">"#);
+        let sheet = crate::style::parser::parse("img { float: right; }");
+        let styles = cascade::cascade(&d, &[sheet]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        assert_eq!(img.style.float, crate::style::computed::Float::Right, "author CSS float must win over align hint");
+    }
+
+    #[test]
+    fn img_with_no_align_attribute_keeps_float_none() {
+        let d = dom::parser::parse(r#"<img src="x.png" width="10" height="10">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        assert_eq!(img.style.float, crate::style::computed::Float::None);
     }
 
     #[test]
