@@ -340,6 +340,38 @@ Append-only running log. Newest at the bottom.
   the engine that grids the cells (via the spans), measures min/max content,
   runs `solve_table`, and paints the solved rects; + `tables.html` + golden.
 
+## 2026-08-14 — M3 · table layout — 1996 tables render
+
+- `layout::table_layout` + `layout::block` wiring: a `Display::Table` container
+  becomes a bespoke measure-leaf (exactly parallel to the inline engine). Grid
+  auto-placement (advance past prior colspans, reserve rowspan slots) →
+  per-cell min/max-content + height measurement via taffy intrinsic sizing →
+  `solve_table` (P8) → cells painted at solved rects, cell content laid out
+  within each cell's box so columns align. `<table>` now renders as a real
+  grid in the tty dump — rowspan/colspan and column alignment all correct.
+- Loop: implementer (test-first `c7ca987` red → `c910476` green) → reviewer
+  (Spec ✅; **golden COUNTERSIGNED** — every column re-derived char-for-char;
+  **regression audit of block.rs +475/−60 came back clean** — no non-table
+  path changed; **1 Critical**) → fix round 1 (`af95a6b`) → scoped re-review
+  (orchestrator: cap + cache correct, golden byte-identical, frozen clean).
+    - **Critical (caught before main):** per-cell measurement was unbounded —
+      ~7 taffy sub-layouts per cell (measure re-run in emit), capped only by
+      the 262K *placement* budget, so a wide hostile `<table>` (tens of
+      thousands of `<td>`s, <1MB HTML) hung for minutes — the same DoS class
+      P8 fixed for placement, resurfacing on the expensive taffy axis. Fix:
+      `MAX_TABLE_MEASURED_CELLS=2_000` (over-cap tables degrade to block, cheap
+      + total) + a `RefCell` cache keyed on `avail_w` so emit reuses the solve
+      (~7×→~3×) + wide-table stress tests. See D21.
+    - Two real bugs fixed during green: tables need taffy `item_is_table` to
+      shrink-wrap (else they stretch full width); the table's measured size
+      must include border-spacing gaps.
+- Two-pass phasing: measure widths → solve columns → lay out each cell at its
+  solved width → solve again for row heights + rects. Border-spacing hardcoded
+  (8px h / 0px v — no `ComputedStyle` field). M3 simplifications (deferred):
+  `table-layout:fixed`, `<caption>/<colgroup>/<col>`, `vertical-align`
+  (cells top-align), author `<style>` sheets (not yet wired into cascade).
+  See D21. **M3 tables DONE.** NEXT: frames, forms.
+
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a

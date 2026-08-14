@@ -3,6 +3,38 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M3 — Table layout
+
+### D21 — tables as a bespoke measure-leaf; bounded + cached per-cell measurement
+`Display::Table` subtrees are laid out by `layout::table_layout` + a new
+`layout::block` measure-leaf (parallel to the inline engine): grid
+auto-placement → taffy intrinsic-size measurement of each cell's
+min/max-content + height → `solve_table` → cells painted at solved rects.
+Forks taken:
+- **Cost is bounded on hostile input.** Each cell costs several taffy
+  sub-layouts (min-content + max-content + height, re-derived in `emit`), which
+  the 262K *placement* cap (D18/`solve_table`) never accounted for — a wide
+  table (tens of thousands of `<td>`s) would hang for minutes. **Choice:** a
+  dedicated `MAX_TABLE_MEASURED_CELLS = 2_000` checked cheaply (via
+  `place_grid`'s cell count) BEFORE any measurement; over-cap tables degrade
+  to plain block layout (cells as stacked blocks — total, cheap), same as an
+  over-`TABLE_DEPTH_CAP` table. Plus a `RefCell` cache (keyed on
+  `available_width`, since column resolution depends on it) so `emit` reuses
+  measure's solved layout instead of recomputing (~7×→~3× per cell). Real 1996
+  tables (hundreds of cells) are never affected. Revisit: raise the cap or add
+  a `table-layout: fixed` fast path if a real fixture needs a bigger table.
+- **Nested-table depth cap `TABLE_DEPTH_CAP = 2`** (empirically: cost
+  multiplies per nesting level — a budget of 8 caused a 15-min runaway). One
+  table nested in a cell renders; deeper degrades to block. Revisit: never for
+  the document web.
+- **Border-spacing is a fixed constant** (8px h / 0px v), not CSS-driven —
+  `ComputedStyle` has no `border-spacing` field (frozen). Revisit: a fixture
+  needs `border-spacing`/`cellspacing` → freeze-amend a field.
+- **M3 simplifications (deferred):** `table-layout: fixed`, `<caption>`/
+  `<colgroup>`/`<col>`, `vertical-align` (cells top-align, not middle), and
+  author `<style>` stylesheets (not yet collected into the cascade anywhere in
+  the codebase — a separate gap, pre-existing). Revisit each at its milestone.
+
 ## M3 — Freeze amendment: table cell spans
 
 ### D20 — `BoxContent::TableCell` carries colspan/rowspan into LayoutNode
