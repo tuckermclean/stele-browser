@@ -404,6 +404,28 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — UI-1 · interactive-provenance freeze amendment
+
+- The hook the interactive shell needs: `layout::Interactive { Link { href } |
+  FormControl { kind, name, form_action } }`, and an `interactive:
+  Option<Interactive>` field on the frozen `Fragment` AND `LayoutNode`.
+  `box_tree` tags an `<a href>`'s whole built subtree with `Link` (so wrapped
+  link text all points at one href) and a synthesized form control with
+  `FormControl`; `block::emit` copies it onto EVERY fragment (each wrapped
+  line, replaced atoms, floats, boxes). Raw `href` (unresolved) — the shell
+  resolves at follow time.
+- ZERO behavior change: painters ignore the field, so every tty + png golden
+  is BYTE-IDENTICAL (verified). Only `layout::mod` frozen types changed; no
+  other frozen type; no deps; no unsafe. 421 lib tests green.
+- Process note: this ran concurrently with the `<link>` CSS packet in the
+  SHARED working tree — a race (the other packet saw this one's uncommitted
+  layout WIP and had to isolate into a worktree). Both recovered cleanly, but
+  the lesson stands: **parallel packets must use worktree isolation.** See D34.
+- NEXT (UI): (b) colored tty render (fg/bg cells + ANSI + `background`
+  shorthand) → (c) the interactive shell (rustix raw mode, arrow-scroll,
+  Tab-focus, follow-links via this `href`, Backspace-back, F5/r-refresh, +
+  gpm/xterm MOUSE as first-class).
+
 ## 2026-08-14 — M6 · list-item markers
 
 - Closes the one real dialect gap the kitchen-sink exposed: `<ul>/<ol>/<li>`

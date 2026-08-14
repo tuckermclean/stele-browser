@@ -3,6 +3,27 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## UI — Interactive provenance
+
+### D34 — Fragment/LayoutNode carry interactive provenance (link href, controls)
+The interactive shell must know, per rendered region, if it's a link (and its
+`href`) or a form control — without re-deriving from the DOM at paint time.
+**Choice:** a freeze amendment adding `Interactive { Link{href} |
+FormControl{kind,name,form_action} }` + an `interactive: Option<Interactive>`
+field on both `Fragment` and `LayoutNode` (and, as a non-frozen carrier,
+`inline::InlineRun`, since wrapped link text folds into one taffy leaf). Raw
+unresolved `href` (resolution is the shell's job). Zero behavior change —
+painters ignore it, all goldens byte-identical. Revisit: the shell reads
+`Fragment.interactive` for hit-testing/highlight/follow/submit.
+
+### D34b — parallel packets MUST use worktree isolation
+Two subagents were dispatched into the SHARED working tree concurrently (this
+amendment + `<link>` CSS); they raced on `src/layout/*` and `frames.rs`. Both
+recovered (the second self-isolated into a git worktree), but the rule is now
+explicit: **any parallel packet work uses `isolation: worktree`** so subagents
+never share an editable tree. (They also both touched `frames.rs`, forcing a
+serial merge + rebase.)
+
 ## M6 — List markers
 
 ### D33 — list-item markers synthesized in box_tree (ASCII bullets)

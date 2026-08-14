@@ -290,6 +290,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Text { text: text.to_string(), baseline: h * 0.75, style: ComputedStyle::default() },
+            interactive: None,
         }
     }
 
@@ -297,6 +298,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Box { style: ComputedStyle::default() },
+            interactive: None,
         }
     }
 
@@ -304,6 +306,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w: 32.0, h: 32.0 } },
             kind: FragmentKind::Image { image: RgbaImage::new(1, 1) },
+            interactive: None,
         }
     }
 

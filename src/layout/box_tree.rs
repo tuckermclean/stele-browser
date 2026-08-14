@@ -30,7 +30,7 @@ use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
-use crate::layout::{BoxContent, LayoutNode, Size};
+use crate::layout::{BoxContent, Interactive, LayoutNode, Size};
 use crate::style::computed::{Display, Float, ListStyleType};
 use crate::style::ComputedStyle;
 
@@ -67,15 +67,22 @@ pub fn build_box_tree(
     if dom.is_empty() {
         return None;
     }
-    build_node(dom, styles, images, dom.root(), 0)
+    build_node(dom, styles, images, dom.root(), 0, None)
 }
 
-fn build_node(
-    dom: &Dom,
+/// `form_action` is the nearest enclosing `<form>`'s raw `action` attribute
+/// (see [`Interactive::FormControl`]), threaded down the walk from wherever
+/// a `<form>` element was last seen (`is_form`'s branch below) — `None`
+/// outside any form. Borrowed straight out of the `Dom` (`el.attrs.get`
+/// already has the right lifetime, tied to `dom`, not to any one stack
+/// frame), so passing it through many recursive calls costs nothing extra.
+fn build_node<'a>(
+    dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
     id: NodeId,
     depth: usize,
+    form_action: Option<&'a str>,
 ) -> Option<LayoutNode> {
     let style = styles.get(id)?.clone();
     if style.display == Display::None {
@@ -86,6 +93,7 @@ fn build_node(
             style,
             content: BoxContent::Text(text.clone()),
             children: Vec::new(),
+            interactive: None,
         }),
         Node::Element(el) => {
             if is_replaced(el) {
@@ -95,10 +103,49 @@ fn build_node(
                     style,
                     content: BoxContent::Replaced { intrinsic: img_intrinsic(el), image: images.get(&id).cloned() },
                     children: Vec::new(),
+                    interactive: None,
                 });
             }
             if is_form_control(el) {
-                return build_form_control(dom, el, style);
+                return build_form_control(dom, el, style, form_action);
+            }
+            if is_form(el) {
+                // Not itself interactive (only its controls are — see
+                // `Interactive::FormControl`) — just updates the
+                // `form_action` context for everything built underneath it.
+                // A nested `<form>` (invalid HTML, but this dialect stays
+                // total) simply overrides the context again for its own
+                // subtree, closest-enclosing-form-wins.
+                let action = el.attrs.get("action");
+                let children = if depth >= DEPTH_CAP {
+                    Vec::new()
+                } else {
+                    el.children
+                        .iter()
+                        .filter_map(|&child| build_node(dom, styles, images, child, depth + 1, action))
+                        .collect()
+                };
+                return Some(LayoutNode { style, content: BoxContent::Container, children, interactive: None });
+            }
+            if is_link(el) {
+                // `<a href>`: propagate `Interactive::Link` onto this box AND
+                // every descendant box built underneath it (see
+                // `tag_interactive`) — so wrapped link text that later splits
+                // into several `Fragment`s (one per line) still carries the
+                // SAME href on each one, and a link wrapping other content
+                // (e.g. `<a href><img></a>`) tags that content too.
+                let href = el.attrs.get("href").unwrap_or("").to_string();
+                let children = if depth >= DEPTH_CAP {
+                    Vec::new()
+                } else {
+                    el.children
+                        .iter()
+                        .filter_map(|&child| build_node(dom, styles, images, child, depth + 1, form_action))
+                        .collect()
+                };
+                let mut node = LayoutNode { style, content: BoxContent::Container, children, interactive: None };
+                tag_interactive(&mut node, &Interactive::Link { href: href.into_boxed_str() });
+                return Some(node);
             }
             if is_br(el) {
                 // M6 hardening (kitchen-sink coverage found `<br>` was a
@@ -119,6 +166,7 @@ fn build_node(
                     style,
                     content: BoxContent::Text(LINE_BREAK_SENTINEL.to_string()),
                     children: Vec::new(),
+                    interactive: None,
                 });
             }
             if is_details(el) {
@@ -126,9 +174,9 @@ fn build_node(
                     // Same defensive fallback as the generic branch below:
                     // past the cap, degrade to an empty leaf rather than
                     // recursing into the disclosure logic at all.
-                    LayoutNode { style, content: BoxContent::Container, children: Vec::new() }
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None }
                 } else {
-                    build_details_node(dom, styles, images, el, style, depth)
+                    build_details_node(dom, styles, images, el, style, depth, form_action)
                 };
                 return Some(node);
             }
@@ -137,9 +185,9 @@ fn build_node(
                     // Same defensive fallback as `is_details` above: past the
                     // cap, degrade to an empty leaf rather than recursing
                     // into the marker-synthesis logic at all.
-                    LayoutNode { style, content: BoxContent::Container, children: Vec::new() }
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None }
                 } else {
-                    build_list_container_node(dom, styles, images, el, style, depth)
+                    build_list_container_node(dom, styles, images, el, style, depth, form_action)
                 };
                 return Some(node);
             }
@@ -148,7 +196,7 @@ fn build_node(
             } else {
                 el.children
                     .iter()
-                    .filter_map(|&child| build_node(dom, styles, images, child, depth + 1))
+                    .filter_map(|&child| build_node(dom, styles, images, child, depth + 1, form_action))
                     .collect()
             };
             let content = if style.display == Display::TableCell {
@@ -157,7 +205,7 @@ fn build_node(
             } else {
                 BoxContent::Container
             };
-            Some(LayoutNode { style, content, children })
+            Some(LayoutNode { style, content, children, interactive: None })
         }
     }
 }
@@ -166,6 +214,40 @@ fn build_node(
 /// now").
 fn is_replaced(el: &Element) -> bool {
     el.name.as_str() == "img"
+}
+
+/// `<a href="...">` — an anchor with NO `href` attribute at all is not a
+/// link in this dialect (matches real browsers: an href-less `<a>` is not
+/// focusable/followable), so it takes the ordinary generic-element path
+/// with no `Interactive` tagging. An href-less-but-PRESENT attribute (`<a
+/// href="">` or `<a href>`) still counts — HTML only requires the attribute
+/// be present, not non-empty (mirrors the "malformed/empty href: no panic"
+/// totality requirement — an empty `href` is a valid, if unusual, link).
+fn is_link(el: &Element) -> bool {
+    el.name.as_str() == "a" && el.attrs.get("href").is_some()
+}
+
+/// `<form>` — not itself interactive (see `build_node`'s `is_form` branch);
+/// exists only to update the `form_action` context threaded down to any
+/// form control built underneath it.
+fn is_form(el: &Element) -> bool {
+    el.name.as_str() == "form"
+}
+
+/// Tag `node` AND every descendant in its subtree with `interactive` —
+/// used by `<a href>` to mark the whole link's content (its own box plus
+/// every recursively-built child box, so wrapped text split across several
+/// `Fragment`s downstream all carries the same `Interactive::Link`, and any
+/// non-text content nested under the link — e.g. `<a href><img></a>` — is
+/// tagged too). Total: `node`'s subtree is already bounded by `DEPTH_CAP`
+/// (this only walks an already-built, already-bounded tree), so this
+/// recursion can't itself blow the stack on any input `build_node` could
+/// have produced.
+fn tag_interactive(node: &mut LayoutNode, interactive: &Interactive) {
+    node.interactive = Some(interactive.clone());
+    for child in &mut node.children {
+        tag_interactive(child, interactive);
+    }
 }
 
 /// `<br>` (M6 hardening) — see the `is_br` call site in `build_node` for the
@@ -281,20 +363,21 @@ fn find_first_summary(dom: &Dom, el: &Element) -> Option<NodeId> {
 /// handles the past-cap fallback itself, exactly like the generic element
 /// branch does), so every recursive `build_node` call here is safe without
 /// its own extra depth check.
-fn build_details_node(
-    dom: &Dom,
+fn build_details_node<'a>(
+    dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
-    el: &Element,
+    el: &'a Element,
     style: ComputedStyle,
     depth: usize,
+    form_action: Option<&'a str>,
 ) -> LayoutNode {
     let is_open = el.attrs.get("open").is_some();
     let marker = if is_open { SUMMARY_OPEN_MARKER } else { SUMMARY_CLOSED_MARKER };
     let summary_id = find_first_summary(dom, el);
 
     let summary_box = summary_id
-        .and_then(|sid| build_node(dom, styles, images, sid, depth + 1))
+        .and_then(|sid| build_node(dom, styles, images, sid, depth + 1, form_action))
         .map(|mut node| {
             node.children.insert(0, marker_node(marker, &node.style));
             node
@@ -307,19 +390,19 @@ fn build_details_node(
             if Some(child) == summary_id {
                 continue; // already placed above, markered.
             }
-            if let Some(node) = build_node(dom, styles, images, child, depth + 1) {
+            if let Some(node) = build_node(dom, styles, images, child, depth + 1, form_action) {
                 children.push(node);
             }
         }
     }
 
-    LayoutNode { style, content: BoxContent::Container, children }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
 }
 
 /// The synthesized marker box glued in front of a real `<summary>`'s own
 /// (recursively built) children -- see the module doc section above.
 fn marker_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
-    LayoutNode { style: style.clone(), content: BoxContent::Text(marker.to_string()), children: Vec::new() }
+    LayoutNode { style: style.clone(), content: BoxContent::Text(marker.to_string()), children: Vec::new(), interactive: None }
 }
 
 /// The synthesized `"> Details"`/`"v Details"` label shown in place of a
@@ -332,7 +415,9 @@ fn default_summary_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
             style: style.clone(),
             content: BoxContent::Text(format!("{marker}{DEFAULT_SUMMARY_LABEL}")),
             children: Vec::new(),
+            interactive: None,
         }],
+        interactive: None,
     }
 }
 
@@ -432,19 +517,20 @@ fn list_start(el: &Element) -> i64 {
 /// caller (`build_node` handles the past-cap fallback itself, exactly like
 /// `build_details_node`'s caller does), so every recursive `build_node` call
 /// here is safe without its own extra depth check.
-fn build_list_container_node(
-    dom: &Dom,
+fn build_list_container_node<'a>(
+    dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
-    el: &Element,
+    el: &'a Element,
     style: ComputedStyle,
     depth: usize,
+    form_action: Option<&'a str>,
 ) -> LayoutNode {
     let mut ordinal = list_start(el);
     let mut children = Vec::with_capacity(el.children.len());
     for &child in &el.children {
         let is_item = matches!(dom.node(child), Node::Element(e) if is_li(e));
-        let Some(mut node) = build_node(dom, styles, images, child, depth + 1) else {
+        let Some(mut node) = build_node(dom, styles, images, child, depth + 1, form_action) else {
             continue; // display:none (or any other total-absence case): no box, no number consumed.
         };
         if is_item {
@@ -455,7 +541,7 @@ fn build_list_container_node(
         }
         children.push(node);
     }
-    LayoutNode { style, content: BoxContent::Container, children }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
 }
 
 /// The marker text for one list item, or `None` when `list_style_type` is
@@ -582,13 +668,54 @@ fn is_form_control(el: &Element) -> bool {
 /// kind added to [`is_form_control`] without a matching arm below) -- no
 /// box at all, matching `display: none`'s own "absent entirely" contract
 /// so a hidden field can never leak its value into the tty dump.
-fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle) -> Option<LayoutNode> {
+///
+/// Both the outer wrapper AND the inner label `Text` child are tagged with
+/// the same `Interactive::FormControl` (P7 interactive-provenance freeze
+/// amendment): the wrapper is `display: inline` (UA sheet, see the module
+/// doc section above), so a parent walking its children almost always
+/// folds it straight into an inline-formatting-context leaf via
+/// `layout::block::flatten_inline` -- which reads the label child's own
+/// `interactive`, never the wrapper's -- but the wrapper is tagged too in
+/// case it ever becomes its own taffy node (e.g. a `display: flex` parent,
+/// which gives every child its own node instead of folding it), so its own
+/// `Box` fragment carries the marker as well either way.
+fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle, form_action: Option<&str>) -> Option<LayoutNode> {
     let label = control_label(dom, el)?;
+    let interactive = Interactive::FormControl {
+        kind: control_kind(el).into_boxed_str(),
+        name: el.attrs.get("name").map(|s| s.to_string().into_boxed_str()),
+        form_action: form_action.map(|s| s.to_string().into_boxed_str()),
+    };
     Some(LayoutNode {
         content: BoxContent::Container,
-        children: vec![LayoutNode { style: style.clone(), content: BoxContent::Text(label), children: Vec::new() }],
+        children: vec![LayoutNode {
+            style: style.clone(),
+            content: BoxContent::Text(label),
+            children: Vec::new(),
+            interactive: Some(interactive.clone()),
+        }],
         style,
+        interactive: Some(interactive),
     })
+}
+
+/// The control's effective type -- what a later submit/focus shell needs to
+/// tell a text field from a checkbox from a submit button, per
+/// [`Interactive::FormControl::kind`]'s own doc comment. `<input>`'s
+/// default (no `type` attribute) is `"text"`, matching HTML's own default;
+/// `<button>`'s default is `"submit"`, likewise matching HTML's own default
+/// for a `<button>` with no `type` attribute (the same default
+/// `button_label`'s sibling logic doesn't need to re-derive, since the
+/// TYPE and the LABEL are independent facts about a `<button>`).
+fn control_kind(el: &Element) -> String {
+    match el.name.as_str() {
+        "input" => el.attrs.get("type").map(|s| s.to_ascii_lowercase()).unwrap_or_else(|| "text".to_string()),
+        "button" => el.attrs.get("type").map(|s| s.to_ascii_lowercase()).unwrap_or_else(|| "submit".to_string()),
+        // "textarea"/"select", and defensively any future control kind
+        // added to `is_form_control` without a matching arm here -- the
+        // element's own tag name is already a perfectly good `kind`.
+        other => other.to_string(),
+    }
 }
 
 fn control_label(dom: &Dom, el: &Element) -> Option<String> {
@@ -1743,5 +1870,201 @@ mod tests {
         collect_all_text(&root, &mut text);
         assert!(text.contains("5. a"), "got: {text:?}");
         assert!(text.contains("6. b"), "got: {text:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Interactive provenance (P7 freeze amendment): `<a href>` links and
+    // form controls carry `Interactive` provenance from the DOM into the
+    // rendered `Fragment` stream. This packet only lands the carrier +
+    // populates it -- no click/focus/submit behavior yet -- so these tests
+    // check the `LayoutNode`/`Fragment` data, not any interaction.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn link_text_fragments_carry_the_interactive_link_marker() {
+        let d = dom::parser::parse(r#"<a href="/x">link text</a>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let fragments = crate::layout::layout(&root, Size { w: 640.0, h: 480.0 });
+        let text_fragments: Vec<_> =
+            fragments.iter().filter(|f| matches!(f.kind, crate::layout::FragmentKind::Text { .. })).collect();
+        assert!(!text_fragments.is_empty(), "expected at least one text fragment");
+        for f in &text_fragments {
+            match &f.interactive {
+                Some(Interactive::Link { href }) => assert_eq!(&**href, "/x"),
+                other => panic!("expected every link-text fragment to carry Interactive::Link, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_link_text_spanning_multiple_lines_carries_the_same_href_on_every_line() {
+        // Narrow viewport forces this link's text onto more than one line --
+        // every resulting line fragment must carry the SAME href, not just
+        // the first.
+        let d = dom::parser::parse(r#"<a href="/wrap">aaaaaaaaaa bbbbbbbbbb cccccccccc</a>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let fragments = crate::layout::layout(&root, Size { w: 90.0, h: 480.0 });
+        let text_fragments: Vec<_> =
+            fragments.iter().filter(|f| matches!(f.kind, crate::layout::FragmentKind::Text { .. })).collect();
+        assert!(
+            text_fragments.len() >= 2,
+            "expected the link's text to wrap across multiple line fragments, got {}",
+            text_fragments.len()
+        );
+        for f in &text_fragments {
+            match &f.interactive {
+                Some(Interactive::Link { href }) => assert_eq!(&**href, "/wrap"),
+                other => panic!("expected every wrapped line to carry the same Interactive::Link, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn form_controls_carry_the_interactive_form_control_marker_with_kind_name_and_action() {
+        let d = dom::parser::parse(
+            r#"<form action="/s"><input name="q" type="text" value="hi"><input type="submit"></form>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let text_input = find_text(&root, "[hi]").expect("text input placeholder present");
+        match &text_input.interactive {
+            Some(Interactive::FormControl { kind, name, form_action }) => {
+                assert_eq!(&**kind, "text");
+                assert_eq!(name.as_deref(), Some("q"));
+                assert_eq!(form_action.as_deref(), Some("/s"));
+            }
+            other => panic!("expected Interactive::FormControl on the text input, got {other:?}"),
+        }
+
+        let submit = find_text(&root, "[ Submit ]").expect("submit button placeholder present");
+        match &submit.interactive {
+            Some(Interactive::FormControl { kind, name, form_action }) => {
+                assert_eq!(&**kind, "submit");
+                assert_eq!(*name, None, "an unnamed submit control has no `name`");
+                assert_eq!(form_action.as_deref(), Some("/s"));
+            }
+            other => panic!("expected Interactive::FormControl on the submit button, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_control_outside_any_form_has_no_form_action() {
+        let d = dom::parser::parse(r#"<input name="q" type="text" value="hi">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let text_input = find_text(&root, "[hi]").expect("text input placeholder present");
+        match &text_input.interactive {
+            Some(Interactive::FormControl { form_action, .. }) => {
+                assert_eq!(*form_action, None, "a control outside any <form> has no enclosing action");
+            }
+            other => panic!("expected Interactive::FormControl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_text_and_box_have_no_interactive_marker() {
+        let d = dom::parser::parse("<p>hello</p>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let text_node = find_text(&root, "hello").expect("text present");
+        assert!(text_node.interactive.is_none());
+        assert!(root.interactive.is_none(), "the plain root container is not interactive either");
+    }
+
+    #[test]
+    fn link_nested_in_paragraph_in_list_item_is_tagged_sibling_text_is_not() {
+        let d = dom::parser::parse(r#"<ul><li><p>before <a href="/deep">link</a> after</p></li></ul>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let link_text = find_text(&root, "link").expect("link text present");
+        match &link_text.interactive {
+            Some(Interactive::Link { href }) => assert_eq!(&**href, "/deep"),
+            other => panic!("expected the nested link's text to carry Interactive::Link, got {other:?}"),
+        }
+
+        let before_text = find_text(&root, "before").expect("sibling text present");
+        assert!(before_text.interactive.is_none(), "non-link sibling text must not be tagged");
+        let after_text = find_text(&root, "after").expect("sibling text present");
+        assert!(after_text.interactive.is_none(), "non-link sibling text must not be tagged");
+    }
+
+    #[test]
+    fn empty_href_is_still_a_link_and_does_not_panic() {
+        let d = dom::parser::parse(r#"<a href="">empty</a>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let link_text = find_text(&root, "empty").expect("text present");
+        match &link_text.interactive {
+            Some(Interactive::Link { href }) => assert_eq!(&**href, ""),
+            other => panic!("expected Interactive::Link with an empty (but present) href, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anchor_without_href_attribute_is_not_tagged_as_a_link() {
+        // Only a PRESENT `href` (even empty) makes an `<a>` a link -- see
+        // `is_link`'s doc comment.
+        let d = dom::parser::parse("<a>not a link</a>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let text_node = find_text(&root, "not a link").expect("text present");
+        assert!(text_node.interactive.is_none(), "an <a> with no href attribute at all must not be tagged as a link");
+    }
+
+    #[test]
+    fn link_wrapping_an_image_tags_the_image_too() {
+        let d = dom::parser::parse(r#"<a href="/img"><img src="x.png" width="4" height="4"></a>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::Link { href }) => assert_eq!(&**href, "/img"),
+            other => panic!("expected the image nested under the link to carry Interactive::Link too, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deeply_nested_link_does_not_panic() {
+        let depth = 3000;
+        let mut html = String::new();
+        for _ in 0..depth {
+            html.push_str("<div>");
+        }
+        html.push_str(r#"<a href="/deep">leaf</a>"#);
+        for _ in 0..depth {
+            html.push_str("</div>");
+        }
+        let d = dom::parser::parse(&html);
+        let styles = vec![ComputedStyle::default(); d.len()];
+        let root = build_box_tree(&d, &styles, &HashMap::new());
+        assert!(root.is_some(), "must not panic/abort on a pathologically deep link ancestor chain");
+    }
+
+    #[test]
+    fn deeply_nested_form_does_not_panic() {
+        let depth = 3000;
+        let mut html = String::new();
+        for _ in 0..depth {
+            html.push_str("<div>");
+        }
+        html.push_str(r#"<form action="/s"><input name="q" type="text"></form>"#);
+        for _ in 0..depth {
+            html.push_str("</div>");
+        }
+        let d = dom::parser::parse(&html);
+        let styles = vec![ComputedStyle::default(); d.len()];
+        let root = build_box_tree(&d, &styles, &HashMap::new());
+        assert!(root.is_some(), "must not panic/abort on a pathologically deep form ancestor chain");
     }
 }

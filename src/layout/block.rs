@@ -48,7 +48,7 @@ use taffy::prelude::{
 use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
-use crate::layout::{BoxContent, Fragment, FragmentKind, LayoutNode, Point, Rect, Size};
+use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
     AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto,
     Dimension as CssDimension,
@@ -216,9 +216,15 @@ enum NodeCtx<'a> {
 /// (by style reference) to emit the right fragment at the right rect once
 /// taffy has computed final layout.
 enum Built<'a> {
-    Container { style: &'a ComputedStyle, taffy_id: TNodeId, children: Vec<Built<'a>> },
+    Container { style: &'a ComputedStyle, taffy_id: TNodeId, children: Vec<Built<'a>>, interactive: Option<Interactive> },
     Inline { taffy_id: TNodeId, runs: Vec<InlineRun> },
-    Replaced { style: &'a ComputedStyle, taffy_id: TNodeId, intrinsic: Size, image: Option<std::rc::Rc<crate::img::RgbaImage>> },
+    Replaced {
+        style: &'a ComputedStyle,
+        taffy_id: TNodeId,
+        intrinsic: Size,
+        image: Option<std::rc::Rc<crate::img::RgbaImage>>,
+        interactive: Option<Interactive>,
+    },
     /// A `display: table` box, translated as a single bespoke leaf (module
     /// docs). `emit` fetches the table's `LayoutNode`, nested-table budget,
     /// and cached solve back out of the taffy tree's own node context for
@@ -301,7 +307,11 @@ fn translate_any<'a>(
 ) -> Built<'a> {
     match &node.content {
         BoxContent::Text(text) => {
-            let runs = vec![InlineRun { content: InlineContent::Text(text.clone()), style: node.style.clone() }];
+            let runs = vec![InlineRun {
+                content: InlineContent::Text(text.clone()),
+                style: node.style.clone(),
+                interactive: node.interactive.clone(),
+            }];
             let style = base_style(&node.style);
             let id = taffy
                 .new_leaf_with_context(style, NodeCtx::Inline(runs.clone()))
@@ -319,6 +329,7 @@ fn translate_any<'a>(
                 taffy_id: id,
                 intrinsic: Size { w: iw, h: ih },
                 image: image.clone(),
+                interactive: node.interactive.clone(),
             }
         }
         // A `display: table` box (real HTML `<table>`, or any element styled
@@ -380,7 +391,7 @@ fn translate_any<'a>(
             let id = taffy
                 .new_with_children(style, &child_ids)
                 .expect("taffy container alloc is infallible for a fresh tree");
-            Built::Container { style: &node.style, taffy_id: id, children }
+            Built::Container { style: &node.style, taffy_id: id, children, interactive: node.interactive.clone() }
         }
     }
 }
@@ -434,9 +445,11 @@ fn is_inline_ish(n: &LayoutNode) -> bool {
 /// needs its own bound against the same pathological-nesting case.
 fn flatten_inline(node: &LayoutNode, out: &mut Vec<InlineRun>, depth: usize) {
     match &node.content {
-        BoxContent::Text(text) => {
-            out.push(InlineRun { content: InlineContent::Text(text.clone()), style: node.style.clone() })
-        }
+        BoxContent::Text(text) => out.push(InlineRun {
+            content: InlineContent::Text(text.clone()),
+            style: node.style.clone(),
+            interactive: node.interactive.clone(),
+        }),
         // An orphan `TableCell` reaching this path (see `is_inline_ish`) is
         // routed exactly like Container.
         BoxContent::Container | BoxContent::TableCell { .. } => {
@@ -450,6 +463,7 @@ fn flatten_inline(node: &LayoutNode, out: &mut Vec<InlineRun>, depth: usize) {
         BoxContent::Replaced { intrinsic, image } => out.push(InlineRun {
             content: InlineContent::Replaced { intrinsic: *intrinsic, image: image.clone() },
             style: node.style.clone(),
+            interactive: node.interactive.clone(),
         }),
     }
 }
@@ -942,10 +956,11 @@ fn push_replaced_fragment(
     rect: Rect,
     image: Option<std::rc::Rc<crate::img::RgbaImage>>,
     style: &ComputedStyle,
+    interactive: Option<Interactive>,
 ) {
     match image {
-        Some(img) => out.push(Fragment { rect, kind: FragmentKind::Image { image: (*img).clone() } }),
-        None => out.push(Fragment { rect, kind: FragmentKind::Box { style: style.clone() } }),
+        Some(img) => out.push(Fragment { rect, kind: FragmentKind::Image { image: (*img).clone() }, interactive }),
+        None => out.push(Fragment { rect, kind: FragmentKind::Box { style: style.clone() }, interactive }),
     }
 }
 
@@ -955,14 +970,18 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
     let size = Size { w: layout.size.width.max(0.0), h: layout.size.height.max(0.0) };
 
     match built {
-        Built::Container { style, children, .. } => {
-            out.push(Fragment { rect: Rect { origin, size }, kind: FragmentKind::Box { style: (*style).clone() } });
+        Built::Container { style, children, interactive, .. } => {
+            out.push(Fragment {
+                rect: Rect { origin, size },
+                kind: FragmentKind::Box { style: (*style).clone() },
+                interactive: interactive.clone(),
+            });
             for child in children {
                 emit(child, taffy, origin, metrics, out);
             }
         }
-        Built::Replaced { style, image, .. } => {
-            push_replaced_fragment(out, Rect { origin, size }, image.clone(), style);
+        Built::Replaced { style, image, interactive, .. } => {
+            push_replaced_fragment(out, Rect { origin, size }, image.clone(), style, interactive.clone());
         }
         Built::Inline { runs, .. } => {
             let available_w = size.w;
@@ -980,6 +999,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                                     baseline: line.baseline,
                                     style: runs[run.run_index].style.clone(),
                                 },
+                                interactive: runs[run.run_index].interactive.clone(),
                             });
                         }
                         // A non-floated replaced atom (M4 part 2, the D14
@@ -1005,7 +1025,13 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                             let atom_origin =
                                 Point { x: run_origin.x, y: origin.y + line.rect.origin.y + (line.baseline - h) };
                             let rect = Rect { origin: atom_origin, size: Size { w: run.width, h } };
-                            push_replaced_fragment(out, rect, image.clone(), &runs[run.run_index].style);
+                            push_replaced_fragment(
+                                out,
+                                rect,
+                                image.clone(),
+                                &runs[run.run_index].style,
+                                runs[run.run_index].interactive.clone(),
+                            );
                         }
                     }
                 }
@@ -1018,16 +1044,30 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                     Point { x: origin.x + f.rect.origin.x, y: origin.y + f.rect.origin.y };
                 let rect = Rect { origin: float_origin, size: f.rect.size };
                 match &runs[f.run_index].content {
-                    InlineContent::Replaced { image, .. } => {
-                        push_replaced_fragment(out, rect, image.clone(), &runs[f.run_index].style)
-                    }
+                    InlineContent::Replaced { image, .. } => push_replaced_fragment(
+                        out,
+                        rect,
+                        image.clone(),
+                        &runs[f.run_index].style,
+                        runs[f.run_index].interactive.clone(),
+                    ),
                     InlineContent::Text(_) => {} // not reachable: only `Replaced` runs are ever floated.
                 }
             }
         }
         Built::Table { style, .. } => {
             // The table's own box first (paint order: table, then cells).
-            out.push(Fragment { rect: Rect { origin, size }, kind: FragmentKind::Box { style: (*style).clone() } });
+            // Tables aren't themselves interactive in this design (only a
+            // link/form-control INSIDE a cell is — see that cell's own
+            // fragments below, which carry whatever `interactive` their own
+            // source `LayoutNode`s were tagged with via `emit`'s recursive
+            // `cell_content_layout` call), so the table's own box fragment
+            // carries `None`.
+            out.push(Fragment {
+                rect: Rect { origin, size },
+                kind: FragmentKind::Box { style: (*style).clone() },
+                interactive: None,
+            });
 
             // Fetch this leaf's `node`/`table_budget`/cache straight out of
             // the taffy tree's own node-context storage (see `Built::Table`'s
@@ -1076,6 +1116,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                             size: Size { w: f.rect.size.w, h },
                         },
                         kind: f.kind,
+                        interactive: f.interactive,
                     });
                 }
             }
