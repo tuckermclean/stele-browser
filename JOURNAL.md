@@ -426,6 +426,26 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-2 · colored tty render (fg/bg + ANSI)
+
+- The terminal gets COLOR. `TextGrid`'s cell is now `Cell { ch, fg, bg }` (was
+  bare `char`); `Box` fragments finally PAINT their `background_color` into the
+  cells they cover (D17's "nothing in tty" retired for backgrounds), text takes
+  its `fg` from `style.color` and keeps the box's `bg`. New `to_ansi()` emits
+  24-bit SGR (`\e[38;2;r;g;b;48;2;r;g;bm`), run-length-optimized (one escape
+  per color change), reset per line — the render the interactive shell draws.
+- `to_text()` UNCHANGED (reads only `Cell.ch`) → every existing tty golden
+  byte-identical (guard test `to_text_is_blind_to_cell_color`); frames still
+  composite (`blit` copies colored cells, `to_text` strips). Verified real
+  flex-polite → `to_ansi`: navy `#24344d` header with white text, cream `main`,
+  pale-blue `aside` — the PNG's colors, now in the terminal.
+- Also parsed the **`background` shorthand** (`background: navy`, `background:
+  red url(x) no-repeat` → color; url()-contents skipped so an image filename
+  can't be misread as a color; `none`/no-color → unapplied + counted, C2).
+- Frozen types untouched (`Fragment`/`ComputedStyle`/`surface::Color`); no
+  deps; no unsafe. 467 lib + goldens green. See D36. NEXT: (c) the interactive
+  shell draws this via `to_ansi`.
+
 ## 2026-08-14 — UI-1 · interactive-provenance freeze amendment
 
 - The hook the interactive shell needs: `layout::Interactive { Link { href } |

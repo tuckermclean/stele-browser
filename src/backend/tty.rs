@@ -40,11 +40,12 @@
 //!   backend wiring. `Image` handling here is still real and exercised by
 //!   this module's own synthetic-fragment tests, ready for whenever a
 //!   pipeline actually emits one.)
-//! - `Box` fragments (a block box's background/border) render **nothing** in
-//!   text mode — v0 scope call, documented for the DECISIONS ledger: a text
-//!   grid has no color/background concept, and even simple ASCII-art borders
-//!   would need their own cell-accurate box-drawing pass distinct from the
-//!   text-placement rule above; deferred rather than half-done.
+//! - `Box` fragments (a block box's background/border) render their
+//!   `background_color` as cell `bg` (see "Color" below) but still render
+//!   **no border** in text mode — v0 scope call, documented for the
+//!   DECISIONS ledger: even simple ASCII-art borders would need their own
+//!   cell-accurate box-drawing pass distinct from the text-placement rule
+//!   above; deferred rather than half-done.
 //! - **Paint order wins ties**: fragments are drawn in slice order (already
 //!   paint order per `layout::layout`'s contract), each write overwriting
 //!   whatever a prior fragment left in the same cell.
@@ -52,6 +53,36 @@
 //!   size.h`) across ALL fragments (not just `Text`), so the full document
 //!   dumps rather than clipping to one screen — `render`'s `cols` only
 //!   bounds width; height is always content-driven.
+//!
+//! ## Color (packet/tty-color)
+//!
+//! Each cell now carries a foreground and background [`Color`] (reused from
+//! `surface`, not a new type) alongside its `char`:
+//!
+//! - `Box { style }` fills the cells its rect covers with
+//!   `style.background_color` as the cell `bg` — but only when that color
+//!   isn't fully transparent (`a == 0`); a transparent box leaves whatever
+//!   `bg` was already there untouched, same as painting nothing. Borders
+//!   still render **nothing** in text mode (unchanged v0 scope call — ASCII-
+//!   art box-drawing is a distinct, still-deferred pass).
+//! - `Text { text, style, .. }` sets each written cell's `ch` *and* `fg`
+//!   (from `style.color`) but never touches `bg`. Because paint order already
+//!   draws `Box` fragments before the `Text` fragments they contain (brief's
+//!   paint-order contract), a text cell's `bg` is simply whatever the
+//!   enclosing box already painted (or the grid's default transparent, if no
+//!   box covered that cell) — text never needs to know or re-derive its own
+//!   background.
+//! - `Image` placeholders (`[img]`) set `ch` only, `fg` stays the grid
+//!   default (see below) — `FragmentKind::Image` carries no `ComputedStyle`
+//!   to color it with.
+//! - The grid's default cell is `ch: ' '`, `fg: Color::BLACK` (the UA's own
+//!   initial `color`), `bg: Color::TRANSPARENT` (the UA's own initial
+//!   `background-color`) — matching `ComputedStyle::default()` exactly, so
+//!   an uncolored document renders identically to the pre-color grid.
+//! - [`TextGrid::to_text`] is UNCHANGED: it reads only `ch` per cell, so
+//!   color is invisible to it and every existing golden stays byte-identical.
+//! - [`TextGrid::to_ansi`] is new: a 24-bit-color ANSI rendering of the same
+//!   grid, for the interactive shell packet to draw with. See its own doc.
 //!
 //! ## Totality
 //!
@@ -67,6 +98,7 @@
 //! to spare for an attacker- or user-inflated grid.
 
 use crate::layout::{Fragment, FragmentKind};
+use crate::surface::Color;
 
 /// `pub(crate)`, not just private: the frames packet (`crate::frames`)
 /// composites multiple independently-rendered `TextGrid`s into one viewport
@@ -96,10 +128,32 @@ pub(crate) const MAX_GRID_ROWS: usize = 10_000;
 /// allocation.
 pub(crate) const MAX_GRID_COLS: usize = 2_000;
 
+/// One grid cell: a `char` plus the foreground/background it paints with.
+/// `pub(crate)`, not part of `TextGrid`'s public surface — callers reach
+/// color only through [`TextGrid::to_ansi`]; `Cell` itself is an internal
+/// storage detail, same posture as [`CELL_W`]/[`CELL_H`].
+///
+/// Default matches `ComputedStyle::default()` (`color: Color::BLACK`,
+/// `background_color: Color::TRANSPARENT`) exactly, so a grid nobody paints
+/// color into renders identically (via `to_ansi`) to plain black-on-default
+/// text — color is strictly additive over the pre-color grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cell {
+    pub ch: char,
+    pub fg: Color,
+    pub bg: Color,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell { ch: ' ', fg: Color::BLACK, bg: Color::TRANSPARENT }
+    }
+}
+
 /// A rendered character grid: rows of columns, ready to print.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextGrid {
-    rows: Vec<Vec<char>>,
+    rows: Vec<Vec<Cell>>,
 }
 
 impl TextGrid {
@@ -117,7 +171,7 @@ impl TextGrid {
         }
         let cols = cols.min(MAX_GRID_COLS);
         let rows = rows.min(MAX_GRID_ROWS);
-        TextGrid { rows: vec![vec![' '; cols]; rows] }
+        TextGrid { rows: vec![vec![Cell::default(); cols]; rows] }
     }
 
     /// This grid's row count (its rendered/content-driven height in cells).
@@ -132,15 +186,17 @@ impl TextGrid {
     /// space, are both ordinary inputs from the frames packet's grid math,
     /// not something exceptional). Later writes at the same cell (e.g. two
     /// overlapping `blit` calls) win over earlier ones, mirroring `render`'s
-    /// own "paint order wins ties" rule.
+    /// own "paint order wins ties" rule. Copies whole cells — `char` plus
+    /// `fg`/`bg` travel together, so a composited frameset keeps each
+    /// child frame's own colors.
     pub fn blit(&mut self, other: &TextGrid, col_off: usize, row_off: usize) {
         for (r, src_row) in other.rows.iter().enumerate() {
             let dst_r = row_off + r;
             let Some(dst_row) = self.rows.get_mut(dst_r) else { break };
-            for (c, &ch) in src_row.iter().enumerate() {
+            for (c, &src_cell) in src_row.iter().enumerate() {
                 let dst_c = col_off + c;
                 let Some(cell) = dst_row.get_mut(dst_c) else { break };
-                *cell = ch;
+                *cell = src_cell;
             }
         }
     }
@@ -149,12 +205,16 @@ impl TextGrid {
     /// dropping any trailing (bottom) blank rows — deterministic output with
     /// no dangling whitespace, suitable for an exact-match golden. Interior
     /// blank rows (part of the document's vertical rhythm) are preserved.
+    ///
+    /// Reads `ch` only — color is invisible here by construction, so this
+    /// is byte-identical to the pre-color implementation for any grid,
+    /// colored or not (see `to_text_is_blind_to_cell_color` below).
     pub fn to_text(&self) -> String {
         let mut lines: Vec<String> = self
             .rows
             .iter()
             .map(|row| {
-                let s: String = row.iter().collect();
+                let s: String = row.iter().map(|cell| cell.ch).collect();
                 s.trim_end_matches(' ').to_string()
             })
             .collect();
@@ -164,9 +224,50 @@ impl TextGrid {
         lines.join("\n")
     }
 
+    /// Render the grid as 24-bit-color ANSI: `\x1b[38;2;R;G;Bm` for
+    /// foreground, `\x1b[48;2;R;G;Bm` for background (or `49` — "default
+    /// background" — when a cell's `bg` is fully transparent), both packed
+    /// into ONE SGR escape per color change, `\x1b[0m` reset at the end of
+    /// each line, rows joined with `\n`. Run-length optimized: the escape is
+    /// only re-emitted when `(fg, bg)` differs from the previous cell, so a
+    /// uniformly-colored line emits exactly one escape (at its first cell),
+    /// not one per cell. Total: bounded by the grid's own already-capped
+    /// size (`MAX_GRID_COLS` × `MAX_GRID_ROWS`); every color component is a
+    /// `u8`, so there's no non-finite/out-of-range value to guard against.
+    pub fn to_ansi(&self) -> String {
+        let mut out = String::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let mut last: Option<(Color, Color)> = None;
+            for cell in row {
+                if last != Some((cell.fg, cell.bg)) {
+                    if cell.bg.a == 0 {
+                        out.push_str(&format!("\x1b[38;2;{};{};{};49m", cell.fg.r, cell.fg.g, cell.fg.b));
+                    } else {
+                        out.push_str(&format!(
+                            "\x1b[38;2;{};{};{};48;2;{};{};{}m",
+                            cell.fg.r, cell.fg.g, cell.fg.b, cell.bg.r, cell.bg.g, cell.bg.b
+                        ));
+                    }
+                    last = Some((cell.fg, cell.bg));
+                }
+                out.push(cell.ch);
+            }
+            out.push_str("\x1b[0m");
+        }
+        out
+    }
+
     #[cfg(test)]
     fn row_text(&self, row: usize) -> String {
-        self.rows.get(row).map(|r| r.iter().collect()).unwrap_or_default()
+        self.rows.get(row).map(|r| r.iter().map(|cell| cell.ch).collect()).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn cell_at(&self, row: usize, col: usize) -> Cell {
+        self.rows[row][col]
     }
 }
 
@@ -199,20 +300,42 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
         return TextGrid { rows: Vec::new() };
     }
 
-    let mut rows: Vec<Vec<char>> = vec![vec![' '; cols]; rows_needed];
+    let mut rows: Vec<Vec<Cell>> = vec![vec![Cell::default(); cols]; rows_needed];
 
     for f in fragments {
         match &f.kind {
-            FragmentKind::Text { text, .. } => write_marker(&mut rows, f, text, cols),
-            FragmentKind::Image { .. } => write_marker(&mut rows, f, "[img]", cols),
-            FragmentKind::Box { .. } => {
-                // v0 scope call: no background/border rendering in text
-                // mode. See module docs.
-            }
+            FragmentKind::Text { text, style, .. } => write_marker(&mut rows, f, text, Some(style.color), cols),
+            FragmentKind::Image { .. } => write_marker(&mut rows, f, "[img]", None, cols),
+            FragmentKind::Box { style } => fill_box(&mut rows, f, style.background_color, cols),
         }
     }
 
     TextGrid { rows }
+}
+
+/// Fill the cells `fragment.rect` covers with `bg`, clipped to the grid's
+/// bounds in both axes. A fully transparent `bg` (`a == 0` — the UA default,
+/// and any author `background-color` that resolves to `transparent`) is a
+/// no-op: it leaves whatever a prior fragment already painted in those
+/// cells, same as "paints nothing". No border is drawn — see module docs.
+///
+/// Row/col spans use the same `cell_index` rounding `write_marker` and
+/// `render`'s own row-count math use, widened to at least one cell so a
+/// fragment with a real (non-zero, finite) size always covers something
+/// even if its rounded span would otherwise collapse to empty.
+fn fill_box(rows: &mut [Vec<Cell>], fragment: &Fragment, bg: Color, cols: usize) {
+    if bg.a == 0 {
+        return;
+    }
+    let row_start = cell_index(fragment.rect.origin.y, CELL_H);
+    let row_end = cell_index(fragment.rect.origin.y + nonneg(fragment.rect.size.h), CELL_H).max(row_start + 1);
+    let col_start = cell_index(fragment.rect.origin.x, CELL_W).min(cols);
+    let col_end = cell_index(fragment.rect.origin.x + nonneg(fragment.rect.size.w), CELL_W).min(cols).max(col_start);
+    for row in rows.iter_mut().skip(row_start).take(row_end - row_start) {
+        for cell in row.iter_mut().skip(col_start).take(col_end - col_start) {
+            cell.bg = bg;
+        }
+    }
 }
 
 /// Write `text`'s characters left-to-right into `rows`, starting at the cell
@@ -235,7 +358,12 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
 /// undisturbed: correct tty handling of mixed inline font sizes on one line
 /// is a real design question (partial cells? proportional skipping? render
 /// only the dominant run's size?) for a later packet, not a quick fix here.
-fn write_marker(rows: &mut [Vec<char>], fragment: &Fragment, text: &str, cols: usize) {
+/// `fg`, when `Some`, is written onto every cell placed (`Text`'s own
+/// `style.color`); `None` (the `Image` placeholder — no `ComputedStyle` to
+/// draw from) leaves each cell's `fg` at whatever it already was (the grid
+/// default unless something upstream already colored it). Either way `bg`
+/// is left untouched — see module docs' "text keeps the box's bg" rule.
+fn write_marker(rows: &mut [Vec<Cell>], fragment: &Fragment, text: &str, fg: Option<Color>, cols: usize) {
     let row = cell_index(fragment.rect.origin.y, CELL_H);
     if row >= rows.len() {
         return;
@@ -245,7 +373,10 @@ fn write_marker(rows: &mut [Vec<char>], fragment: &Fragment, text: &str, cols: u
         if col >= cols {
             break;
         }
-        rows[row][col] = ch;
+        rows[row][col].ch = ch;
+        if let Some(c) = fg {
+            rows[row][col].fg = c;
+        }
         col += 1;
     }
 }
@@ -298,6 +429,26 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Box { style: ComputedStyle::default() },
+            interactive: None,
+        }
+    }
+
+    fn box_fragment_bg(x: f32, y: f32, w: f32, h: f32, bg: Color) -> Fragment {
+        Fragment {
+            rect: Rect { origin: Point { x, y }, size: Size { w, h } },
+            kind: FragmentKind::Box { style: ComputedStyle { background_color: bg, ..ComputedStyle::default() } },
+            interactive: None,
+        }
+    }
+
+    fn text_fragment_fg(x: f32, y: f32, w: f32, h: f32, text: &str, fg: Color) -> Fragment {
+        Fragment {
+            rect: Rect { origin: Point { x, y }, size: Size { w, h } },
+            kind: FragmentKind::Text {
+                text: text.to_string(),
+                baseline: h * 0.75,
+                style: ComputedStyle { color: fg, ..ComputedStyle::default() },
+            },
             interactive: None,
         }
     }
@@ -379,10 +530,135 @@ mod tests {
     }
 
     #[test]
-    fn box_fragments_paint_nothing_in_text_mode() {
+    fn box_fragments_with_default_transparent_bg_paint_no_visible_text() {
+        // `to_text` is blind to color by construction, so this stays true
+        // whether or not `Box` paints a `bg` — a default (transparent)
+        // `background_color` paints nothing either way (see
+        // `box_fragment_bg_fills_the_covered_cells` for the colored case).
         let fragments = vec![box_fragment(0.0, 0.0, 80.0, 16.0), text_fragment(0.0, 0.0, 16.0, 16.0, "x")];
         let grid = render(&fragments, 10);
         assert_eq!(grid.row_text(0).trim_end(), "x");
+    }
+
+    // ------------------------------------------------------- color (P7 tty-color)
+
+    #[test]
+    fn box_fragment_bg_fills_the_covered_cells() {
+        let navy = Color::rgb(0, 0, 128);
+        let fragments = vec![box_fragment_bg(0.0, 0.0, 24.0, 16.0, navy)];
+        let grid = render(&fragments, 10);
+        // 24px wide / 8px cell = 3 cells covered, one row.
+        for col in 0..3 {
+            assert_eq!(grid.cell_at(0, col).bg, navy, "col {col}");
+        }
+        assert_eq!(grid.cell_at(0, 3).bg, Color::TRANSPARENT, "col 3 is outside the box");
+    }
+
+    #[test]
+    fn box_fragment_with_transparent_bg_leaves_cells_untouched() {
+        let fragments = vec![box_fragment(0.0, 0.0, 24.0, 16.0)]; // default style: TRANSPARENT
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.cell_at(0, 0).bg, Color::TRANSPARENT);
+    }
+
+    #[test]
+    fn text_fragment_sets_fg_from_its_own_style_color() {
+        let red = Color::rgb(255, 0, 0);
+        let fragments = vec![text_fragment_fg(0.0, 0.0, 16.0, 16.0, "hi", red)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.cell_at(0, 0).fg, red);
+        assert_eq!(grid.cell_at(0, 1).fg, red);
+    }
+
+    #[test]
+    fn text_over_a_colored_box_keeps_the_boxs_bg() {
+        // Paint order (Box before Text, per fragment order) means the text's
+        // own write must NOT clobber the bg the enclosing box already left.
+        let navy = Color::rgb(0, 0, 128);
+        let white = Color::rgb(255, 255, 255);
+        let fragments = vec![box_fragment_bg(0.0, 0.0, 16.0, 16.0, navy), text_fragment_fg(0.0, 0.0, 16.0, 16.0, "hi", white)];
+        let grid = render(&fragments, 10);
+        let cell = grid.cell_at(0, 0);
+        assert_eq!(cell.ch, 'h');
+        assert_eq!(cell.fg, white);
+        assert_eq!(cell.bg, navy, "text write must not clobber the box's bg");
+    }
+
+    #[test]
+    fn image_placeholder_leaves_fg_at_the_grid_default() {
+        // `FragmentKind::Image` carries no `ComputedStyle` to color from.
+        let fragments = vec![image_fragment(0.0, 0.0)];
+        let grid = render(&fragments, 20);
+        assert_eq!(grid.cell_at(0, 0).fg, Color::BLACK);
+    }
+
+    #[test]
+    fn to_text_is_blind_to_cell_color() {
+        // A colored grid and its monochrome twin must print identical text —
+        // this is the guard that every existing tty golden relies on.
+        let navy = Color::rgb(0, 0, 128);
+        let white = Color::rgb(255, 255, 255);
+        let colored = vec![box_fragment_bg(0.0, 0.0, 40.0, 16.0, navy), text_fragment_fg(0.0, 0.0, 16.0, 16.0, "hi", white)];
+        let mono = vec![box_fragment(0.0, 0.0, 40.0, 16.0), text_fragment(0.0, 0.0, 16.0, 16.0, "hi")];
+        assert_eq!(render(&colored, 10).to_text(), render(&mono, 10).to_text());
+    }
+
+    #[test]
+    fn to_ansi_emits_run_length_optimized_escapes_with_reset_at_line_end() {
+        let red = Color::rgb(255, 0, 0);
+        let navy = Color::rgb(0, 0, 128);
+        let fragments = vec![box_fragment_bg(0.0, 0.0, 24.0, 16.0, navy), text_fragment_fg(0.0, 0.0, 16.0, 16.0, "hi", red)];
+        let grid = render(&fragments, 3);
+        // Row is 3 cells: "h" (red/navy), "i" (red/navy), " " (default fg/navy).
+        // fg changes at cell 2 (BLACK default instead of red); bg stays navy
+        // throughout, so only ONE escape should fire per fg change.
+        let expected = "\x1b[38;2;255;0;0;48;2;0;0;128mhi\x1b[38;2;0;0;0;48;2;0;0;128m \x1b[0m";
+        assert_eq!(grid.to_ansi(), expected);
+    }
+
+    #[test]
+    fn to_ansi_uniformly_colored_line_emits_exactly_one_escape() {
+        let white = Color::rgb(255, 255, 255);
+        let fragments = vec![text_fragment_fg(0.0, 0.0, 32.0, 16.0, "abcd", white)];
+        let grid = render(&fragments, 4);
+        let ansi = grid.to_ansi();
+        assert_eq!(ansi.matches('\x1b').count(), 2, "one color escape + one reset, got: {ansi:?}");
+        assert_eq!(ansi, "\x1b[38;2;255;255;255;49mabcd\x1b[0m");
+    }
+
+    #[test]
+    fn to_ansi_joins_rows_with_newline_and_resets_each_line() {
+        let fragments = vec![text_fragment(0.0, 0.0, 8.0, 16.0, "a"), text_fragment(0.0, 16.0, 8.0, 16.0, "b")];
+        let grid = render(&fragments, 1);
+        let ansi = grid.to_ansi();
+        let lines: Vec<&str> = ansi.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert!(line.ends_with("\x1b[0m"), "line must reset at the end: {line:?}");
+        }
+    }
+
+    #[test]
+    fn to_ansi_on_an_empty_grid_is_an_empty_string() {
+        let grid = render(&[], 10);
+        assert_eq!(grid.to_ansi(), "");
+    }
+
+    #[test]
+    fn box_fill_with_degenerate_rect_never_panics() {
+        let navy = Color::rgb(0, 0, 128);
+        let degenerate = [
+            (f32::NAN, f32::NAN),
+            (f32::INFINITY, f32::INFINITY),
+            (f32::NEG_INFINITY, f32::NEG_INFINITY),
+            (-1.0, -1.0),
+            (f32::MAX, f32::MAX),
+        ];
+        for (x, y) in degenerate {
+            let fragments = vec![box_fragment_bg(x, y, f32::NAN, f32::INFINITY, navy)];
+            let grid = render(&fragments, 40);
+            let _ = grid.to_ansi(); // must not panic
+        }
     }
 
     #[test]
