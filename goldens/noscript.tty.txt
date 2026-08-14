@@ -1,0 +1,11 @@
+
+
+ No-JavaScript Fallback Content
+
+
+
+ This paragraph lives inside a noscript element. Stele never runs script by
+ construction, so this content is exactly what should render -- always.
+
+
+ An ordinary paragraph, for contrast.

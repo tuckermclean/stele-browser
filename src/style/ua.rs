@@ -6,13 +6,19 @@
 //! keeps this list honest against the curated property set.
 
 pub(crate) const UA_CSS: &str = r#"
+/* `noscript` (M5 dialect-completeness): Stele has no JavaScript by
+   construction (charter C3), so a <noscript>'s content is exactly "what to
+   render when scripting is unavailable" -- always, here. It needs its own
+   `display: block` (the CSS initial value is `inline`, and no other rule
+   below already covers it) so it reads as an ordinary block container,
+   never like `<script>`/`<style>`/`<head>` (display: none, below). */
 html, body, div, p,
 h1, h2, h3, h4, h5, h6,
 ul, ol, li, dl, dt, dd,
 blockquote, pre, table, caption,
 form, fieldset, hr,
 article, section, nav, header, footer, main, aside,
-figure, figcaption, details, summary, address, center {
+figure, figcaption, details, summary, address, center, noscript {
   display: block;
 }
 

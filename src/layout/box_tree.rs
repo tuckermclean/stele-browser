@@ -99,6 +99,17 @@ fn build_node(
             if is_form_control(el) {
                 return build_form_control(dom, el, style);
             }
+            if is_details(el) {
+                let node = if depth >= DEPTH_CAP {
+                    // Same defensive fallback as the generic branch below:
+                    // past the cap, degrade to an empty leaf rather than
+                    // recursing into the disclosure logic at all.
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new() }
+                } else {
+                    build_details_node(dom, styles, images, el, style, depth)
+                };
+                return Some(node);
+            }
             let children = if depth >= DEPTH_CAP {
                 Vec::new()
             } else {
@@ -156,6 +167,133 @@ fn apply_align_float_hint(el: &Element, style: &mut ComputedStyle) {
         "left" => style.float = Float::Left,
         "right" => style.float = Float::Right,
         _ => {} // top/middle/bottom/unknown: vertical-align territory, ignored here.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// <details>/<summary> disclosure (M5 dialect-completeness, part 1).
+//
+// Real browsers give `<details>` interactive click-to-toggle behavior; there
+// is no interactive shell in Stele yet (out of scope per the packet brief),
+// so this is the STATIC render of whichever state the `open` attribute (a
+// plain HTML boolean attribute -- present with any/no value means open,
+// absent means closed) already names:
+//   - WITHOUT `open`: collapsed. Only the first direct-child `<summary>` is
+//     built into the box tree (the clickable label); every other child is
+//     dropped entirely -- not laid out, not present in the tree at all,
+//     mirroring `display: none`'s own "absent entirely" contract so nothing
+//     hidden can leak into a tty dump.
+//   - WITH `open` (any/no value): expanded. The summary AND every other
+//     child are built normally, in original document order.
+//   - No `<summary>` DIRECT child at all: real browsers show a default,
+//     localized "Details" label. This dialect has one locale, so the
+//     default is always the literal string "Details" (documented choice --
+//     the alternative, rendering nothing at all for the label, would make a
+//     collapsed no-summary `<details>` silently vanish from the page, which
+//     is worse than a slightly-wrong-sounding default).
+//   - Multiple `<summary>` children: only the FIRST becomes the disclosure
+//     label (matches every real browser). Any later `<summary>` is just
+//     ordinary content -- shown (unmarked) when open, dropped when
+//     collapsed, exactly like any other non-summary child.
+//   - A `<summary>` nested inside some OTHER element (`<details><div>
+//     <summary>...` ) is not recognized as the direct-child label at all
+//     (matches the HTML5 "first summary element child" rule) -- falls back
+//     to the default "Details" label, with the wrapper + buried summary
+//     themselves treated as ordinary content.
+//
+// Disclosure marker (documented convention, since there is no click/icon
+// affordance in a text-mode dump to show open/closed otherwise): the
+// rendered summary is prefixed with `"> "` when collapsed or `"v "` when
+// open -- ASCII-only (matching the bitmap font's own ASCII-only glyph set),
+// deterministic, and legible as a crude "twisty" in a tty golden (`v` reads
+// as an open-triangle stand-in, `>` as a closed one). The marker is
+// synthesized as its own leading `Text` child glued onto the summary box's
+// existing children (the same "synthesize a leaf carrying a stand-in"
+// pattern `build_form_control` already uses for form placeholders above),
+// not spliced into the summary's own text content -- keeps the marker
+// independent of whatever markup a `<summary>` happens to contain.
+// ---------------------------------------------------------------------------
+
+/// Closed-state marker -- see the module doc section above.
+const SUMMARY_CLOSED_MARKER: &str = "> ";
+/// Open-state marker -- see the module doc section above.
+const SUMMARY_OPEN_MARKER: &str = "v ";
+/// The default disclosure label shown when a `<details>` has no direct-child
+/// `<summary>` at all -- matches real browsers' own default ("Details" in
+/// English; this dialect has one locale).
+const DEFAULT_SUMMARY_LABEL: &str = "Details";
+
+fn is_details(el: &Element) -> bool {
+    el.name.as_str() == "details"
+}
+
+/// The first `<summary>` DIRECT child of a `<details>` element's own
+/// `children`, if any -- see the module doc section above for why only a
+/// direct child counts.
+fn find_first_summary(dom: &Dom, el: &Element) -> Option<NodeId> {
+    el.children
+        .iter()
+        .copied()
+        .find(|&c| matches!(dom.node(c), Node::Element(e) if e.name.as_str() == "summary"))
+}
+
+/// Build a `<details>` element's box per the disclosure rules documented
+/// above. `depth` is guaranteed `< DEPTH_CAP` by the caller (`build_node`
+/// handles the past-cap fallback itself, exactly like the generic element
+/// branch does), so every recursive `build_node` call here is safe without
+/// its own extra depth check.
+fn build_details_node(
+    dom: &Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+    el: &Element,
+    style: ComputedStyle,
+    depth: usize,
+) -> LayoutNode {
+    let is_open = el.attrs.get("open").is_some();
+    let marker = if is_open { SUMMARY_OPEN_MARKER } else { SUMMARY_CLOSED_MARKER };
+    let summary_id = find_first_summary(dom, el);
+
+    let summary_box = summary_id
+        .and_then(|sid| build_node(dom, styles, images, sid, depth + 1))
+        .map(|mut node| {
+            node.children.insert(0, marker_node(marker, &node.style));
+            node
+        })
+        .unwrap_or_else(|| default_summary_node(marker, &style));
+
+    let mut children = vec![summary_box];
+    if is_open {
+        for &child in &el.children {
+            if Some(child) == summary_id {
+                continue; // already placed above, markered.
+            }
+            if let Some(node) = build_node(dom, styles, images, child, depth + 1) {
+                children.push(node);
+            }
+        }
+    }
+
+    LayoutNode { style, content: BoxContent::Container, children }
+}
+
+/// The synthesized marker box glued in front of a real `<summary>`'s own
+/// (recursively built) children -- see the module doc section above.
+fn marker_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
+    LayoutNode { style: style.clone(), content: BoxContent::Text(marker.to_string()), children: Vec::new() }
+}
+
+/// The synthesized `"> Details"`/`"v Details"` label shown in place of a
+/// missing `<summary>` -- see the module doc section above.
+fn default_summary_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
+    LayoutNode {
+        style: style.clone(),
+        content: BoxContent::Container,
+        children: vec![LayoutNode {
+            style: style.clone(),
+            content: BoxContent::Text(format!("{marker}{DEFAULT_SUMMARY_LABEL}")),
+            children: Vec::new(),
+        }],
     }
 }
 
@@ -469,6 +607,22 @@ mod tests {
 
     fn count_nodes(node: &LayoutNode) -> usize {
         1 + node.children.iter().map(count_nodes).sum::<usize>()
+    }
+
+    /// Concatenate every `Text` box's content across a `LayoutNode` subtree,
+    /// in tree order, with NO separator inserted between sibling text nodes
+    /// -- unlike `find_text` (which only ever looks inside one node's own
+    /// text at a time), this lets a test assert on text that spans multiple
+    /// adjacent boxes (e.g. a details-disclosure marker box glued in front
+    /// of a `<summary>`'s own text box) the same way it will actually read
+    /// once laid out inline.
+    fn collect_all_text(node: &LayoutNode, out: &mut String) {
+        if let BoxContent::Text(t) = &node.content {
+            out.push_str(t);
+        }
+        for c in &node.children {
+            collect_all_text(c, out);
+        }
     }
 
     fn find_text<'a>(node: &'a LayoutNode, needle: &str) -> Option<&'a LayoutNode> {
@@ -1111,5 +1265,174 @@ mod tests {
             total <= DEPTH_CAP + 5,
             "expected the tree to be truncated near DEPTH_CAP ({DEPTH_CAP}), got {total} nodes — the depth cap may not be firing"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // <details>/<summary> disclosure (M5 part 1): a <details> WITHOUT an
+    // `open` attribute is collapsed -- only its first <summary> child (the
+    // clickable label) is built into the box tree; every other child is
+    // dropped. `<details open>` (any/no value) is expanded -- the summary
+    // AND every other child are built normally. See `build_details_node`'s
+    // doc comment for the full disclosure-marker convention asserted below.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn collapsed_details_without_open_shows_only_the_summary() {
+        let d = dom::parser::parse("<details><summary>Label</summary><p>Hidden content</p></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "Label").is_some());
+        assert!(find_text(&root, "Hidden content").is_none(), "non-summary children must be dropped when collapsed");
+    }
+
+    #[test]
+    fn open_details_shows_the_summary_and_every_other_child() {
+        let d = dom::parser::parse(r#"<details open><summary>Label</summary><p>Shown content</p></details>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "Label").is_some());
+        assert!(find_text(&root, "Shown content").is_some(), "non-summary children must be kept when open");
+    }
+
+    #[test]
+    fn details_open_attribute_with_any_value_still_counts_as_open() {
+        // HTML boolean attribute semantics: `open`, `open=""`, `open="open"`
+        // are all equally "present" -- only its ABSENCE means collapsed.
+        for markup in ["<details open>", "<details open=\"\">", "<details open=\"open\">"] {
+            let html = format!("{markup}<summary>Label</summary><p>Shown</p></details>");
+            let d = dom::parser::parse(&html);
+            let styles = cascade::cascade(&d, &[]);
+            let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+            assert!(find_text(&root, "Shown").is_some(), "for {markup}");
+        }
+    }
+
+    #[test]
+    fn details_disclosure_marker_reflects_open_vs_closed_state() {
+        // Closed: `> ` prefix. Open: `v ` prefix (ASCII, deterministic --
+        // see the module doc section on the disclosure-marker convention).
+        let closed = dom::parser::parse("<details><summary>Label</summary></details>");
+        let styles = cascade::cascade(&closed, &[]);
+        let root = build_box_tree(&closed, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("> Label"), "closed details should show a '> ' marker, got: {text:?}");
+
+        let open = dom::parser::parse("<details open><summary>Label</summary></details>");
+        let styles2 = cascade::cascade(&open, &[]);
+        let root2 = build_box_tree(&open, &styles2, &HashMap::new()).expect("root present");
+        let mut text2 = String::new();
+        collect_all_text(&root2, &mut text2);
+        assert!(text2.contains("v Label"), "open details should show a 'v ' marker, got: {text2:?}");
+    }
+
+    #[test]
+    fn details_with_no_summary_uses_the_default_label_when_collapsed() {
+        let d = dom::parser::parse("<details><p>Only content</p></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("> Details"), "no <summary> should fall back to the default label, got: {text:?}");
+        assert!(!text.contains("Only content"), "still collapsed: non-summary content must not appear");
+    }
+
+    #[test]
+    fn details_with_no_summary_uses_the_default_label_when_open() {
+        let d = dom::parser::parse("<details open><p>Only content</p></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("v Details"), "no <summary> should fall back to the default label, got: {text:?}");
+        assert!(text.contains("Only content"), "open: the real content should still show alongside the default label");
+    }
+
+    #[test]
+    fn multiple_summaries_only_the_first_becomes_the_disclosure_label_when_open() {
+        let d = dom::parser::parse("<details open><summary>First</summary><summary>Second</summary></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("v First"), "the FIRST summary carries the marker, got: {text:?}");
+        assert!(text.contains("Second"), "a second <summary> still renders as ordinary content when open");
+        assert!(!text.contains("v Second"), "only the first summary gets the disclosure marker");
+    }
+
+    #[test]
+    fn multiple_summaries_collapsed_shows_only_the_first_summary() {
+        let d = dom::parser::parse("<details><summary>First</summary><summary>Second</summary></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("> First"));
+        assert!(!text.contains("Second"), "everything past the first summary must be dropped when collapsed");
+    }
+
+    #[test]
+    fn summary_not_a_direct_child_is_not_recognized_as_the_disclosure_label() {
+        // Only a DIRECT-child <summary> is the disclosure label (matches the
+        // HTML5 "first summary element child" rule) -- one buried inside a
+        // wrapper element falls back to the default label, and (since it's
+        // not treated as the summary) is itself just ordinary content shown
+        // or dropped along with everything else per the open/closed state.
+        let d = dom::parser::parse("<details open><div><summary>Buried</summary></div></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("v Details"), "no direct-child summary -> default label, got: {text:?}");
+        assert!(text.contains("Buried"), "the buried summary still renders as ordinary content when open");
+    }
+
+    #[test]
+    fn details_with_no_children_at_all_does_not_panic() {
+        let d = dom::parser::parse("<details></details>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("> Details"));
+    }
+
+    #[test]
+    fn nested_details_do_not_panic() {
+        let d = dom::parser::parse(
+            "<details open><summary>Outer</summary><details><summary>Inner</summary><p>Inner content</p></details></details>",
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new());
+        assert!(root.is_some());
+        let root = root.unwrap();
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("v Outer"));
+        assert!(text.contains("> Inner"), "the nested (collapsed) details keeps its own marker/summary");
+        assert!(!text.contains("Inner content"), "the nested details is itself collapsed (no open attr)");
+    }
+
+    // ------------------------------------------------------------------
+    // <noscript> (M5 part 2): Stele has no JavaScript by construction, so
+    // <noscript> content is exactly "what to show when scripting is
+    // unavailable" -- always, here. It must render like any other block
+    // container, never like <script>/<style>/<head> (display: none).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn noscript_content_is_visible_not_hidden() {
+        let d = dom::parser::parse("<noscript><p>fallback content</p></noscript>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "fallback content").is_some());
+    }
+
+    #[test]
+    fn noscript_is_block_level_per_the_ua_sheet() {
+        let d = dom::parser::parse("<noscript>x</noscript>");
+        let styles = cascade::cascade(&d, &[]);
+        let noscript_id = find(&d, "noscript").expect("noscript present");
+        assert_eq!(styles[noscript_id].display, Display::Block);
     }
 }

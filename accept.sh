@@ -381,6 +381,71 @@ else
     bad "A3i: tty dump of $FIXTURE_MEDIA at 40 cols differs from $GOLDEN_TTY_MEDIA_NARROW"
     sed 's/^/    /' /tmp/stele_a3i.diff
   fi
+
+  # A3j -- the dialect-completeness packet's own tty golden (M5):
+  # fixtures/details.html, exercising <details>/<summary> disclosure
+  # collapse (a collapsed <details> shows only its markered summary; a
+  # <details open> shows the summary AND its body). Same blessing
+  # discipline as every other tty golden here.
+  GOLDEN_TTY_DETAILS="goldens/details.tty.txt"
+  FIXTURE_DETAILS="fixtures/details.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3j: host binary still not found at $HOST_BIN"
+  elif ! out_details="$("$HOST_BIN" --headless --dump-text "$FIXTURE_DETAILS" 2>/tmp/stele_a3j.err)"; then
+    bad "A3j: stele --headless --dump-text crashed on $FIXTURE_DETAILS"
+    sed 's/^/    /' /tmp/stele_a3j.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_details" > "$GOLDEN_TTY_DETAILS"
+    pass "A3j: blessed details tty golden -> $GOLDEN_TTY_DETAILS (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_DETAILS" <(printf '%s\n' "$out_details") >/tmp/stele_a3j.diff 2>&1; then
+    pass "A3j: tty dump of $FIXTURE_DETAILS matches golden"
+  else
+    bad "A3j: tty dump of $FIXTURE_DETAILS differs from $GOLDEN_TTY_DETAILS"
+    sed 's/^/    /' /tmp/stele_a3j.diff
+  fi
+
+  # A3k -- the dialect-completeness packet's own tty golden (M5):
+  # fixtures/noscript.html, confirming <noscript> content actually renders
+  # (Stele has no JavaScript by construction, so <noscript> is precisely
+  # "what to show when scripting is unavailable" -- always, here). Same
+  # blessing discipline.
+  GOLDEN_TTY_NOSCRIPT="goldens/noscript.tty.txt"
+  FIXTURE_NOSCRIPT="fixtures/noscript.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3k: host binary still not found at $HOST_BIN"
+  elif ! out_noscript="$("$HOST_BIN" --headless --dump-text "$FIXTURE_NOSCRIPT" 2>/tmp/stele_a3k.err)"; then
+    bad "A3k: stele --headless --dump-text crashed on $FIXTURE_NOSCRIPT"
+    sed 's/^/    /' /tmp/stele_a3k.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_noscript" > "$GOLDEN_TTY_NOSCRIPT"
+    pass "A3k: blessed noscript tty golden -> $GOLDEN_TTY_NOSCRIPT (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_NOSCRIPT" <(printf '%s\n' "$out_noscript") >/tmp/stele_a3k.diff 2>&1; then
+    pass "A3k: tty dump of $FIXTURE_NOSCRIPT matches golden"
+  else
+    bad "A3k: tty dump of $FIXTURE_NOSCRIPT differs from $GOLDEN_TTY_NOSCRIPT"
+    sed 's/^/    /' /tmp/stele_a3k.diff
+  fi
+
+  # A3l -- the dialect-completeness packet's own tty golden (M5):
+  # fixtures/entities.html, locking in HTML entity decoding coverage (named,
+  # numeric, hex numeric, and an unrecognized entity passing through
+  # literally) through the real render pipeline. Same blessing discipline.
+  GOLDEN_TTY_ENTITIES="goldens/entities.tty.txt"
+  FIXTURE_ENTITIES="fixtures/entities.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3l: host binary still not found at $HOST_BIN"
+  elif ! out_entities="$("$HOST_BIN" --headless --dump-text "$FIXTURE_ENTITIES" 2>/tmp/stele_a3l.err)"; then
+    bad "A3l: stele --headless --dump-text crashed on $FIXTURE_ENTITIES"
+    sed 's/^/    /' /tmp/stele_a3l.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_entities" > "$GOLDEN_TTY_ENTITIES"
+    pass "A3l: blessed entities tty golden -> $GOLDEN_TTY_ENTITIES (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_ENTITIES" <(printf '%s\n' "$out_entities") >/tmp/stele_a3l.diff 2>&1; then
+    pass "A3l: tty dump of $FIXTURE_ENTITIES matches golden"
+  else
+    bad "A3l: tty dump of $FIXTURE_ENTITIES differs from $GOLDEN_TTY_ENTITIES"
+    sed 's/^/    /' /tmp/stele_a3l.diff
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
