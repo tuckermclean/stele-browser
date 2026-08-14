@@ -223,6 +223,19 @@ pub struct ComputedStyle {
     // Text & font
     pub color: Color,
     pub background_color: Color,
+    /// `background-image: url(...)` (or the `background` shorthand's own
+    /// `url(...)` component) — the RAW, unresolved URL string exactly as
+    /// written in the stylesheet (freeze amendment, packet bg-image: brief
+    /// §10 sanctions this ONE field addition to the otherwise-frozen
+    /// `ComputedStyle`). Deliberately not a decoded image or a resolved
+    /// `Url`: resolving/fetching/decoding is driver-level work (`bg_images`
+    /// module) that only the pixel backends run — the tty backend has no use
+    /// for it (a char grid can't show an image; the tty already shows
+    /// `background_color` via ANSI). CSS initial value is `none`, so `None`
+    /// here. Like `background_color`, this is NOT inherited (see `cascade::
+    /// resolve`'s `own!` treatment below) — a child with no `background-
+    /// image` declaration of its own never picks up its parent's.
+    pub background_image: Option<Box<str>>,
     pub font_family: FontFamily,
     pub font_size: f32,
     pub font_weight: FontWeight,
@@ -261,6 +274,7 @@ impl Default for ComputedStyle {
         ComputedStyle {
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            background_image: None,
             font_family: FontFamily::Serif,
             font_size: 16.0,
             font_weight: FontWeight::Normal,
@@ -304,6 +318,7 @@ mod tests {
         assert_eq!(s.display, Display::Inline);
         assert_eq!(s.color, Color::BLACK);
         assert_eq!(s.background_color, Color::TRANSPARENT);
+        assert_eq!(s.background_image, None);
         assert_eq!(s.flex_shrink, 1.0);
         assert_eq!(s.flex_grow, 0.0);
         assert_eq!(s.margin.top, LengthPercentageAuto::Px(0.0));

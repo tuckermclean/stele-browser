@@ -44,7 +44,7 @@ fn render_png(html: &str) -> Vec<u8> {
     let height = if content_bottom > 0.0 { content_bottom.ceil() as u32 } else { 1 };
 
     let mut surface = MemSurface::new(VIEWPORT_WIDTH, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments);
+    raster::paint(&mut surface, &fragments, &HashMap::new());
     raster::encode_png(&surface)
 }
 

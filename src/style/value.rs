@@ -92,6 +92,13 @@ impl<T: Copy> EdgesRaw<T> {
 pub(crate) struct Declarations {
     pub color: Option<Color>,
     pub background_color: Option<Color>,
+    /// Raw (unresolved) `background-image`/`background` shorthand URL —
+    /// mirrors `ComputedStyle::background_image`'s own doc comment (packet
+    /// bg-image). Not `Copy` (heap-allocated `Box<str>`), so it's overlaid
+    /// by hand in `Declarations::overlay` below rather than through the
+    /// `ov!` macro (which every OTHER field here can use only because every
+    /// other `Option<T>` in this struct is `Copy`).
+    pub background_image: Option<Box<str>>,
     pub font_family: Option<FontFamily>,
     pub font_size: Option<RawLength>,
     pub font_weight: Option<FontWeight>,
@@ -165,6 +172,12 @@ impl Declarations {
         ov!(gap);
         self.margin.overlay(&other.margin);
         self.padding.overlay(&other.padding);
+        // `background_image` isn't `Copy` (see its field doc comment), so it
+        // can't go through the `ov!` macro above -- same last-writer-wins
+        // semantics, just spelled with an explicit `.clone()`.
+        if other.background_image.is_some() {
+            self.background_image = other.background_image.clone();
+        }
     }
 }
 
@@ -289,6 +302,101 @@ fn parse_background_color_component(tokens: &[Token]) -> Option<Color> {
             }
             Token::Ident(name) if named_color(name).is_some() => {
                 return named_color(name);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The literal text one CSS token contributes inside an UNQUOTED `url(...)`
+/// value (packet bg-image). The tokenizer (`style::tokenizer`) has no
+/// special-cased `url-token` production — an unquoted URL like
+/// `images/tile.png` tokenizes into a run of ordinary tokens (`Ident`,
+/// `Dot`, `Delim('/')`, ...), so reconstructing the original text means
+/// concatenating each token's own text back together. Covers exactly the
+/// token kinds a bare, unescaped URL can plausibly tokenize into; anything
+/// else (`Whitespace`, a nested `Function`, a brace/semicolon, ...) returns
+/// `None` and the caller treats the whole `url(...)` as malformed (charter
+/// C2: fails to parse, never guessed at) rather than silently dropping a
+/// token.
+fn unquoted_url_token_text(t: &Token) -> Option<String> {
+    Some(match t {
+        Token::Ident(s) => s.clone(),
+        Token::Hash(s) => format!("#{s}"),
+        Token::Number(n) => format!("{n}"),
+        Token::Dimension(n, unit) => format!("{n}{unit}"),
+        Token::Percentage(n) => format!("{n}%"),
+        Token::Colon => ":".to_string(),
+        Token::Comma => ",".to_string(),
+        Token::Dot => ".".to_string(),
+        Token::Star => "*".to_string(),
+        Token::Delim(c) => c.to_string(),
+        _ => return None,
+    })
+}
+
+/// Parse one `url(...)` function, given `tokens[i] == Token::Function("url")`
+/// (case-insensitive — checked by every caller before calling this). Returns
+/// the URL string and the index just past the matching `RParen`, or `None`
+/// if the parens don't hold a single quoted string or a well-formed run of
+/// unquoted url tokens (see `unquoted_url_token_text`) — including an
+/// unterminated `url(` with no matching `RParen` at all, or an empty
+/// `url()`. Total: `k` only ever advances, so this always terminates.
+fn parse_url_function(tokens: &[Token], i: usize) -> Option<(String, usize)> {
+    let mut j = i + 1;
+    while j < tokens.len() && tokens[j] == Token::Whitespace {
+        j += 1;
+    }
+    if let Some(Token::Str(s)) = tokens.get(j) {
+        let mut k = j + 1;
+        while k < tokens.len() && tokens[k] == Token::Whitespace {
+            k += 1;
+        }
+        return if tokens.get(k) == Some(&Token::RParen) { Some((s.clone(), k + 1)) } else { None };
+    }
+    let mut s = String::new();
+    let mut k = j;
+    while k < tokens.len() && tokens[k] != Token::RParen {
+        s.push_str(&unquoted_url_token_text(&tokens[k])?);
+        k += 1;
+    }
+    if k >= tokens.len() || s.is_empty() {
+        return None; // unterminated `url(` or an empty `url()`
+    }
+    Some((s, k + 1))
+}
+
+/// Extract just the `url(...)` component of a `background` shorthand value
+/// (color/position/repeat/size are parsed elsewhere or curated-out — see
+/// `parse_background_color_component`'s own doc comment; this is that
+/// function's packet-bg-image companion). Scans left to right for the FIRST
+/// `url(...)` function; every other token (a color, `no-repeat`, a length
+/// for `background-position`, ...) is simply skipped, including another
+/// function's own contents (e.g. `rgb(...)`, consumed to its matching
+/// `RParen` so it can never be mistaken for a url). `None` for `background:
+/// none` or any value with no (well-formed) `url(...)` at all — matching
+/// `parse_background_color_component`'s own "ignored, not guessed at"
+/// contract (charter C2). Total: the scan index only ever advances.
+fn parse_background_image_component(tokens: &[Token]) -> Option<String> {
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+                if let Some((url, _next)) = parse_url_function(tokens, i) {
+                    return Some(url);
+                }
+                // A malformed url(...) here means this whole declaration is
+                // malformed too -- real CSS doesn't keep scanning past a
+                // broken function looking for another one.
+                return None;
+            }
+            Token::Function(_) => {
+                i += 1;
+                while i < tokens.len() && tokens[i] != Token::RParen {
+                    i += 1;
+                }
+                i += 1;
             }
             _ => i += 1,
         }
@@ -421,6 +529,8 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
     match name {
         "color" => parse_color(tokens).map(|c| d.color = Some(c)).is_some(),
         "background-color" => parse_color(tokens).map(|c| d.background_color = Some(c)).is_some(),
+        // TODO(bg-image, red): background-image parsing not yet implemented.
+        "background-image" => false,
         // Curated subset of the `background` shorthand: color only (brief
         // §4's image scope is later). See `parse_background_color_component`.
         "background" => parse_background_color_component(tokens).map(|c| d.background_color = Some(c)).is_some(),
@@ -993,18 +1103,14 @@ mod tests {
     }
 
     #[test]
-    fn background_shorthand_with_no_color_is_not_applied() {
-        // `background: none` and pure image/position/repeat values (no
-        // color component) are total (never panic) but don't set
-        // `background_color` — charter C2: unrecognized/uncovered parts of
-        // a value are ignored, not guessed at.
+    fn background_shorthand_with_no_color_or_url_is_not_applied() {
+        // `background: none` (no color, no image component) is total (never
+        // panics) but sets neither field — charter C2: unrecognized/
+        // uncovered parts of a value are ignored, not guessed at.
         let mut d = Declarations::default();
         assert!(!apply_property("background", &toks("none"), &mut d));
         assert_eq!(d.background_color, None);
-
-        let mut d = Declarations::default();
-        assert!(!apply_property("background", &toks("url(x.png) no-repeat"), &mut d));
-        assert_eq!(d.background_color, None);
+        assert_eq!(d.background_image, None);
     }
 
     #[test]
@@ -1012,6 +1118,96 @@ mod tests {
         let mut d = Declarations::default();
         assert!(!apply_property("background", &toks("bogus"), &mut d));
         assert_eq!(d.background_color, None);
+        assert_eq!(d.background_image, None);
+    }
+
+    // ------------------------------------------- background-image (bg-image)
+
+    #[test]
+    fn background_image_parses_a_bare_url() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("url(x.png)"), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some("x.png"));
+    }
+
+    #[test]
+    fn background_image_parses_a_quoted_url() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks(r#"url("x.png")"#), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some("x.png"));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("url('images/tile.png')"), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some("images/tile.png"));
+    }
+
+    #[test]
+    fn background_image_parses_an_unquoted_url_with_a_path() {
+        // Unquoted url() contents tokenize into several tokens (Ident, Dot,
+        // Delim('/'), ...) rather than one Str -- must be reconstructed.
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("url(images/tile.png)"), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some("images/tile.png"));
+    }
+
+    #[test]
+    fn background_image_none_clears_and_is_not_applied() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("background-image", &toks("none"), &mut d));
+        assert_eq!(d.background_image, None);
+    }
+
+    #[test]
+    fn background_image_garbage_is_not_applied() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("background-image", &toks("bogus"), &mut d));
+        assert_eq!(d.background_image, None);
+    }
+
+    #[test]
+    fn background_image_unterminated_url_does_not_panic_and_is_not_applied() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("background-image", &toks("url(x.png"), &mut d));
+        assert_eq!(d.background_image, None);
+    }
+
+    #[test]
+    fn background_shorthand_extracts_both_color_and_image() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("#fff url(x.png) no-repeat"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 255, 255)));
+        assert_eq!(d.background_image.as_deref(), Some("x.png"));
+    }
+
+    #[test]
+    fn background_shorthand_extracts_image_regardless_of_token_order() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("url(x.png) no-repeat red"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+        assert_eq!(d.background_image.as_deref(), Some("x.png"));
+    }
+
+    #[test]
+    fn background_shorthand_with_a_url_but_no_color_sets_image_only() {
+        // Packet bg-image extends the `background` shorthand (previously
+        // color-only, packet D36) to also extract the image component --
+        // `background: url(x.png) no-repeat` now succeeds (returns `true`,
+        // no longer counted against `ignored_declarations`) even with no
+        // color component, since the image half DID parse.
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("url(x.png) no-repeat"), &mut d));
+        assert_eq!(d.background_color, None);
+        assert_eq!(d.background_image.as_deref(), Some("x.png"));
+    }
+
+    #[test]
+    fn background_shorthand_url_inside_never_misidentified_as_color() {
+        // `url(red.png)` -- "red" inside the url() must not be picked up as
+        // a named color by the color half of the shorthand scan.
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("url(red.png)"), &mut d));
+        assert_eq!(d.background_color, None);
+        assert_eq!(d.background_image.as_deref(), Some("red.png"));
     }
 
     #[test]

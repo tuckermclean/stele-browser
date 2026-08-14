@@ -192,6 +192,8 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
     ComputedStyle {
         color: inherited!(color),
         background_color: own!(background_color),
+        // TODO(bg-image, red): not wired up yet.
+        background_image: None,
         font_family: inherited!(font_family),
         font_size,
         font_weight: inherited!(font_weight),
@@ -376,6 +378,23 @@ mod tests {
         let span = find(&d, "span");
         assert_eq!(styles[span].color, Color::rgb(0, 128, 0));
         assert_eq!(styles[span].font_family, FontFamily::Monospace);
+    }
+
+    #[test]
+    fn background_image_does_not_inherit() {
+        // Packet bg-image: background_image is a box property (like
+        // background_color right above it in ComputedStyle) -- a child with
+        // no background-image declaration of its own must NOT pick up its
+        // parent's, even though it inherits `color` from the very same
+        // parent in the very same cascade pass.
+        let d = dom::parser::parse(r#"<div><span>x</span></div>"#);
+        let sheet = parser::parse("div { background-image: url(x.png); color: green; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        let span = find(&d, "span");
+        assert_eq!(styles[div].background_image.as_deref(), Some("x.png"));
+        assert_eq!(styles[span].background_image, None);
+        assert_eq!(styles[span].color, Color::rgb(0, 128, 0), "color still inherits normally");
     }
 
     #[test]

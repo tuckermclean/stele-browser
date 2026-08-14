@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 pub mod backend;
+pub mod bg_images;
 pub mod browser;
 pub mod dom;
 mod dom_util;
