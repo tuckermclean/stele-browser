@@ -19,6 +19,24 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Layout — Block-in-inline
+
+### D44 — an inline box containing a block descendant is not folded into an IFC
+`block.rs` gains `contains_block_descendant(n, depth)` (DEPTH_CAP-bounded);
+`is_inline_ish` requires `display == Inline && !contains_block_descendant(n,0)`.
+So a `display:inline` element (`<font>`, `<b>`, ...) that wraps a block
+(`<ol>`, `<li>`, `<div>`, `<table>`) is translated as its own box instead of
+being flattened into an inline formatting context — the normal container
+partitioning then splits inline runs from block children (anonymous-block
+behavior it already had for direct mixed children). **Why:** real vintage/hand
+HTML nests block lists inside `<font>` (68k.news), and the old fold erased all
+block structure → run-on text. **Scope/limits:** this is the pragmatic
+block-in-inline resolution — the whole inline wrapper blockifies rather than
+CSS's precise "split the inline into before/after fragments around the block";
+visually equivalent for the common wrapper case. `Text`/`Replaced` never count
+as block, preserving D14 inline-replaced (`<em><img></em>`). Depth-capped for
+totality (degrades to `false` past DEPTH_CAP, same as `flatten_inline`).
+
 ## UI — Wrapped-link highlight
 
 ### D43 — highlight a focusable's actual per-line cells, not its bounding box
