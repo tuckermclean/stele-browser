@@ -12,6 +12,7 @@
 //! There is, and by construction will be, no engine anywhere in this
 //! program that runs code shipped by the wire (charter C3).
 
+use stele::backend::raster;
 use stele::backend::tty;
 use stele::dom;
 use stele::fetch::file::FileFetcher;
@@ -21,6 +22,7 @@ use stele::frames;
 use stele::layout::box_tree::build_box_tree;
 use stele::layout::{self, Size};
 use stele::style::cascade;
+use stele::surface::{Color, MemSurface};
 
 /// Default terminal width in character cells for `--dump-text` when
 /// `--cols` isn't given.
@@ -32,16 +34,34 @@ const DEFAULT_COLS: usize = 80;
 /// actually load-bearing — see `layout::block::layout_tree`'s doc comments.
 const HEADLESS_VIEWPORT_HEIGHT: f32 = 100_000.0;
 
+/// Fixed viewport width (CSS px) `--dump-png` lays out at, absent any CLI
+/// flag to override it (M4 pixel foundation scope: no `--width` yet — a
+/// later packet can add one). 800px is a common-enough "screenshot" width
+/// for a document-web page and, not coincidentally, exactly 100 columns at
+/// the 8px-per-column `text::BitmapFont::vga_8x16` cell width `--dump-text`
+/// already keys its own layout off of.
+const DEFAULT_PNG_WIDTH: u32 = 800;
+
+/// Hard cap on the PNG surface's content-driven height, independent of the
+/// document. Mirrors `backend::tty::MAX_GRID_ROWS`'s rationale: a hostile or
+/// merely huge document must not drive an unbounded `MemSurface`
+/// allocation (`width * height * 4` bytes). 20,000px is a page taller than
+/// any real fixture is ever going to produce (`fixtures/basic.html` is a
+/// few hundred px) while keeping the worst case (`800 * 20_000 * 4` == 64MB)
+/// bounded.
+const MAX_PNG_HEIGHT: u32 = 20_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
     headless: bool,
     dump_text: Option<String>,
+    dump_png: Option<(String, String)>,
     cols: usize,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, cols: DEFAULT_COLS }
+        Args { headless: false, dump_text: None, dump_png: None, cols: DEFAULT_COLS }
     }
 }
 
@@ -60,6 +80,18 @@ fn parse_args(argv: &[String]) -> Args {
                 i += 1;
                 if let Some(v) = argv.get(i) {
                     out.dump_text = Some(v.clone());
+                }
+            }
+            "--dump-png" => {
+                // Two positional args follow: <src> <out.png>. A missing
+                // trailing value (either or both absent) leaves `dump_png`
+                // at `None` rather than partially populating it — matching
+                // `--dump-text`'s own "trailing flag, no value" totality.
+                let src = argv.get(i + 1).cloned();
+                let out_path = argv.get(i + 2).cloned();
+                if let (Some(src), Some(out_path)) = (src, out_path) {
+                    i += 2;
+                    out.dump_png = Some((src, out_path));
                 }
             }
             "--cols" => {
@@ -148,6 +180,43 @@ fn dump_text(source: &str, cols: usize) -> String {
     tty::render(&fragments, cols).to_text()
 }
 
+/// A minimal valid single white pixel, PNG-encoded — the clean fallback
+/// `dump_png` returns for a fetch error, an empty/`display:none` document,
+/// or a frameset (pixel rendering of `<frameset>` documents is out of scope
+/// for this packet; frames get real pixels in a later one). Mirrors
+/// `dump_text`'s own "clean empty string, never a panic" totality contract,
+/// just in PNG-shaped terms (there's no equivalent of an empty string for a
+/// raster image — a 1x1 blank canvas is the smallest well-formed PNG this
+/// module ever needs to produce, and `raster::encode_png` itself keys off
+/// exactly this same "1x1 white" fallback for a zero-dimension surface).
+fn blank_png() -> Vec<u8> {
+    todo!("M4 Part 4: encode a blank 1x1 PNG")
+}
+
+/// Drive the full headless pixel pipeline for `--dump-png`: fetch, parse,
+/// cascade, box-tree, layout at a fixed-width/content-height viewport, paint
+/// fragments onto a `MemSurface`, and PNG-encode it. Total, mirroring
+/// `dump_text`'s own contract: a fetch error, empty document, or frameset
+/// document all resolve to [`blank_png`] rather than a panic. Frames: same
+/// scope call as `blank_png`'s doc comment — a `<frameset>` document has no
+/// single `layout::layout` call to drive (see `dump_text`'s own frames
+/// carve-out), and wiring the frames compositor to pixels is a follow-up,
+/// not this packet's job.
+fn dump_png(source: &str) -> Vec<u8> {
+    let _ = source;
+    todo!("M4 Part 4: drive the headless pixel pipeline")
+}
+
+/// `--dump-png <src> <out.png>`'s CLI-facing wrapper: render `source` and
+/// write the PNG bytes to `out_path`. The render half ([`dump_png`]) is
+/// total (never fails); the only failure mode here is the filesystem write,
+/// reported as a clean `Err` rather than a panic (e.g. an unwritable
+/// directory, a hostile/invalid `out_path`).
+fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
+    let _ = (source, out_path);
+    todo!("M4 Part 4: write the rendered PNG to disk")
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
@@ -157,10 +226,17 @@ fn main() {
 
     let args = parse_args(&argv);
     if args.headless {
-        match args.dump_text {
-            Some(source) => println!("{}", dump_text(&source, args.cols)),
-            None => eprintln!("stele: --headless requires --dump-text <path-or-url>"),
+        if let Some(source) = args.dump_text {
+            println!("{}", dump_text(&source, args.cols));
+            return;
         }
+        if let Some((source, out_path)) = args.dump_png {
+            if let Err(e) = write_dump_png(&source, &out_path) {
+                eprintln!("stele: --dump-png failed: {e}");
+            }
+            return;
+        }
+        eprintln!("stele: --headless requires --dump-text <path-or-url> or --dump-png <path-or-url> <out.png>");
         return;
     }
 
@@ -264,5 +340,78 @@ mod tests {
         for line in narrow.lines() {
             assert!(line.chars().count() <= 10, "line exceeds requested cols: {line:?}");
         }
+    }
+
+    // ------------------------------------------------------------- --dump-png
+
+    #[test]
+    fn parse_args_reads_dump_png_source_and_out_path() {
+        let a = parse_args(&args(&["--headless", "--dump-png", "fixtures/basic.html", "/tmp/out.png"]));
+        assert!(a.headless);
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+    }
+
+    #[test]
+    fn parse_args_dump_png_missing_out_path_does_not_panic_or_partially_set() {
+        let a = parse_args(&args(&["--dump-png", "fixtures/basic.html"]));
+        assert_eq!(a.dump_png, None);
+    }
+
+    fn decode_png_dims(bytes: &[u8]) -> (u32, u32) {
+        let decoder = png::Decoder::new(bytes);
+        let reader = decoder.read_info().expect("dump_png must always produce a valid PNG");
+        (reader.info().width, reader.info().height)
+    }
+
+    #[test]
+    fn dump_png_over_file_fetch_produces_a_valid_png_at_the_default_width() {
+        let bytes = dump_png("fixtures/basic.html");
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        let (w, h) = decode_png_dims(&bytes);
+        assert_eq!(w, DEFAULT_PNG_WIDTH);
+        assert!(h > 0, "content-driven height should be nonzero for a real document");
+    }
+
+    #[test]
+    fn dump_png_on_a_missing_file_is_a_clean_blank_png_not_a_panic() {
+        let bytes = dump_png("fixtures/does-not-exist-nope.html");
+        assert_eq!(bytes, blank_png());
+    }
+
+    #[test]
+    fn dump_png_on_an_unsupported_scheme_is_a_clean_blank_png() {
+        let bytes = dump_png("ftp://example.com/x");
+        assert_eq!(bytes, blank_png());
+    }
+
+    #[test]
+    fn dump_png_on_a_frameset_document_is_a_clean_blank_png() {
+        // Pixel rendering of framesets is out-of-scope for this packet (see
+        // dump_png's doc comment) -- must degrade cleanly, not panic.
+        let bytes = dump_png("fixtures/frames.html");
+        assert_eq!(bytes, blank_png());
+    }
+
+    #[test]
+    fn write_dump_png_writes_valid_png_bytes_to_disk() {
+        let out = std::env::temp_dir().join(format!("stele-test-{}.png", std::process::id()));
+        let out_str = out.to_string_lossy().to_string();
+        write_dump_png("fixtures/basic.html", &out_str).expect("write should succeed");
+        let on_disk = std::fs::read(&out).expect("file should exist");
+        assert_eq!(on_disk, dump_png("fixtures/basic.html"));
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn write_dump_png_to_an_unwritable_path_is_a_clean_err_not_a_panic() {
+        let result = write_dump_png("fixtures/basic.html", "/nonexistent-dir-xyz/out.png");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn blank_png_is_a_valid_1x1_png() {
+        let bytes = blank_png();
+        let (w, h) = decode_png_dims(&bytes);
+        assert_eq!((w, h), (1, 1));
     }
 }
