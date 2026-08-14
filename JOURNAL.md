@@ -426,6 +426,28 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-4 · mouse (gpm + xterm) — point and click
+
+- Mouse is first-class, on a bare Linux VT via **gpm** AND in terminal
+  emulators via xterm SGR (auto-detected: `/dev/gpmctl` if present, else
+  `\e[?1000h\e[?1006h`; never both). Click a link → follow; wheel → scroll
+  (3 lines/notch). Reuses the shell's pure `hit_test` + `enter_command` (a
+  click activates exactly like Enter).
+- **Bespoke gpm** — no libgpm, no FFI, no `unsafe`: a `std` `UnixStream` to
+  `/dev/gpmctl`, hand-serialized `Gpm_Connect` (16B) / parsed `Gpm_Event` (28B,
+  exact LE offsets, size-checked → `None` on a short record). VC derived from
+  `/proc/self/fd/0` (`/dev/ttyN`→N, else 0 fallback). rustix gained the
+  `"event"` feature for `poll(2)` (watch stdin + the gpm fd) — cross-compiled +
+  ran on i486 (CI green); no new crates.
+- Pure + unit-tested (14 new): SGR parse, gpm (de)serialize, `apply_mouse`
+  (viewport→page via scroll offset → hit_test → Command). Thin/manual: the
+  socket connect + poll loop (no gpm/mouse-tty in CI — verify on a VT with gpm,
+  or an xterm/tmux/ssh; mouse mode is disabled again on quit). Frozen types
+  untouched; 521 lib tests green. See D38.
+- **Stele is a browser you drive with keyboard AND mouse** — on a 486 console.
+  NEXT: (e) background-image + `--no-bg-images` (the last of the requested
+  round).
+
 ## 2026-08-14 — UI-3 · interactive shell (keyboard) — STELE IS A BROWSER
 
 - `stele <url>` (no `--headless`) now launches a live terminal browser you
