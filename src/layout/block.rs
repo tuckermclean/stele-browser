@@ -218,7 +218,7 @@ enum NodeCtx<'a> {
 enum Built<'a> {
     Container { style: &'a ComputedStyle, taffy_id: TNodeId, children: Vec<Built<'a>> },
     Inline { taffy_id: TNodeId, runs: Vec<InlineRun> },
-    Replaced { style: &'a ComputedStyle, taffy_id: TNodeId, intrinsic: Size },
+    Replaced { style: &'a ComputedStyle, taffy_id: TNodeId, intrinsic: Size, image: Option<std::rc::Rc<crate::img::RgbaImage>> },
     /// A `display: table` box, translated as a single bespoke leaf (module
     /// docs). `emit` fetches the table's `LayoutNode`, nested-table budget,
     /// and cached solve back out of the taffy tree's own node context for
@@ -308,13 +308,18 @@ fn translate_any<'a>(
                 .expect("taffy leaf alloc is infallible for a fresh tree");
             Built::Inline { taffy_id: id, runs }
         }
-        BoxContent::Replaced { intrinsic, .. } => {
+        BoxContent::Replaced { intrinsic, image } => {
             let mut style = base_style(&node.style);
             let iw = finite_nonneg(intrinsic.w);
             let ih = finite_nonneg(intrinsic.h);
             style.size = TSize { width: length(iw), height: length(ih) };
             let id = taffy.new_leaf(style).expect("taffy leaf alloc is infallible for a fresh tree");
-            Built::Replaced { style: &node.style, taffy_id: id, intrinsic: Size { w: iw, h: ih } }
+            Built::Replaced {
+                style: &node.style,
+                taffy_id: id,
+                intrinsic: Size { w: iw, h: ih },
+                image: image.clone(),
+            }
         }
         // A `display: table` box (real HTML `<table>`, or any element styled
         // `display: table`) becomes a single bespoke leaf — see the module
@@ -901,12 +906,27 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 emit(child, taffy, origin, metrics, out);
             }
         }
-        Built::Replaced { style, .. } => {
-            // M2 scope: no pixel data on the frozen `Replaced` node yet, so
-            // a replaced element paints as a plain box at its intrinsic
-            // rect (real image blitting is P9's fb backend).
-            out.push(Fragment { rect: Rect { origin, size }, kind: FragmentKind::Box { style: (*style).clone() } });
-        }
+        Built::Replaced { style, image, .. } => match image {
+            // A decoded image: paint it, not a placeholder box. The image
+            // itself may be a different pixel size than this box's laid-out
+            // `size` (the `width`/`height` attributes that set `intrinsic`
+            // aren't required to match the real decoded dimensions) — that
+            // mismatch is exactly what `MemSurface::blit`'s nearest-neighbor
+            // scaling exists to absorb at paint time; `emit` just reports
+            // the box's own rect here.
+            Some(img) => {
+                out.push(Fragment {
+                    rect: Rect { origin, size },
+                    kind: FragmentKind::Image { image: (**img).clone() },
+                });
+            }
+            // No decoded image (not fetched, fetch/decode failed, or this
+            // is the tty-only pipeline which never populates the images
+            // map) — fall back to the M2-era placeholder box.
+            None => {
+                out.push(Fragment { rect: Rect { origin, size }, kind: FragmentKind::Box { style: (*style).clone() } });
+            }
+        },
         Built::Inline { runs, .. } => {
             let available_w = size.w;
             let laid_out = inline::layout_runs(runs, available_w, metrics);
