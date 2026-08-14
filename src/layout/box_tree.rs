@@ -72,6 +72,9 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
                     children: Vec::new(),
                 });
             }
+            if is_form_control(el) {
+                return build_form_control(dom, el, style);
+            }
             let children = if depth >= DEPTH_CAP {
                 Vec::new()
             } else {
@@ -114,6 +117,288 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
         Some(v)
     } else {
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Form-control rendering (P-forms, part 2).
+//
+// Real form widgets (a text field you can type into, a real dropdown) are
+// the fb backend's job (M4) -- there is no pixel surface here, only a box
+// tree that eventually becomes tty text. `backend::tty` paints NOTHING for
+// a plain `Box` fragment (DECISIONS D17), so a control left as an empty
+// generated box would be invisible in the golden. Instead, each control
+// synthesizes a small `Container` holding exactly one synthesized
+// `BoxContent::Text` placeholder label (mirroring the `img` -> `Replaced`
+// mapping above: a DOM element becomes a leaf-ish box carrying a stand-in,
+// not its literal DOM children) -- the label flows through the ordinary
+// inline/text pipeline and shows up as real characters in the tty dump.
+//
+// Placeholder convention (documented for the DECISIONS ledger -- see the
+// packet report):
+//   - text-like `<input>` (`text`/`password`/`search`/`email`/`url`/`tel`/
+//     `number`, or no `type` at all): `[<value>]`, tight brackets; with no
+//     `value`, `[<spaces sized to the `size` attr, default 10>]`.
+//     `password` masks its value with one `*` per character instead of the
+//     literal text (no `value` still falls back to blank spaces -- nothing
+//     to mask).
+//   - `<input type=checkbox>`: `[x]` checked, `[ ]` unchecked.
+//   - `<input type=radio>`: `(*)` checked, `( )` unchecked.
+//   - `<input type=submit|image>`, `<input type=reset>`, `<input
+//     type=button>`, and `<button>` (any/no `type`): `[ <label> ]` --
+//     spaced brackets, distinct from the tight text-field brackets so a
+//     document with both a text field and a submit button doesn't read as
+//     visually identical. Label priority: `value` attribute, else (for
+//     `<button>` only, which can hold markup) its child text, else a
+//     default ("Submit" for submit/image/`<button>`, "Reset" for reset,
+//     "Button" for the `button` input type).
+//   - `<input type=hidden>`: no box, no text at all -- hidden really means
+//     invisible, even in a text-mode dump.
+//   - `<textarea>`: its own text content verbatim if short and single-line;
+//     otherwise the first line, hard-truncated to
+//     [`MAX_TEXTAREA_CHARS`] characters, with a trailing `[...]` marker
+//     (also appended, untruncated, when the first line is short but more
+//     lines follow) -- "first line + [...] if long", per the packet brief.
+//   - `<select>`: `[ <selected option's text> v]` -- the `v` is a crude
+//     ASCII stand-in for a dropdown affordance. The selected option is the
+//     first descendant `<option selected>`; with none marked, the first
+//     `<option>` at all (matching every real browser's fallback, not
+//     spec-mandated but universal practice); with no options whatsoever,
+//     the text is simply empty (`[  v]`) -- total, not a special case.
+//
+// `display` for all of these (UUA sheet, `style/ua.rs`): `inline`. This is
+// CSS's own initial value already (`ComputedStyle::default().display ==
+// Display::Inline`), so the explicit UA rule is redundant with that
+// default -- it's added anyway, spelled out, so the choice is a documented
+// decision rather than an accident of what the initial value happens to
+// be. Inline lets a control flow naturally after its `<label>` text on the
+// same line (`Name: [__________]`), which is legible in a text-mode dump;
+// `block` would force every control onto its own line, wasting vertical
+// space a 25x80 terminal doesn't have to spare. Real widget geometry
+// (fixed pixel width matching `size`, a real dropdown affordance) is the
+// fb backend's job (M4) -- this is a text placeholder, not a form widget.
+// ---------------------------------------------------------------------------
+
+/// Default `<input>` "visible width" (the `size` attribute) when absent --
+/// matches the packet brief's "default ~10".
+const DEFAULT_CONTROL_SIZE: usize = 10;
+/// Upper bound on a (possibly hostile) `size` attribute, so a document
+/// author (or attacker) can't make this synthesize an arbitrarily long
+/// placeholder string. Far past any real form field.
+const MAX_CONTROL_SIZE: usize = 100;
+/// How many characters of a `<textarea>`'s first line are shown before
+/// truncating with `[...]` -- generous enough to be legible, short enough
+/// to keep a form fixture's golden readable in an 80-column dump.
+const MAX_TEXTAREA_CHARS: usize = 20;
+
+fn is_form_control(el: &Element) -> bool {
+    matches!(el.name.as_str(), "input" | "button" | "textarea" | "select")
+}
+
+/// Build a form control's box: a childless-in-DOM `Container` holding
+/// exactly one synthesized `Text` child (the placeholder label). Returns
+/// `None` for `<input type=hidden>` (and, defensively, any future control
+/// kind added to [`is_form_control`] without a matching arm below) -- no
+/// box at all, matching `display: none`'s own "absent entirely" contract
+/// so a hidden field can never leak its value into the tty dump.
+fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle) -> Option<LayoutNode> {
+    let label = control_label(dom, el)?;
+    Some(LayoutNode {
+        content: BoxContent::Container,
+        children: vec![LayoutNode { style: style.clone(), content: BoxContent::Text(label), children: Vec::new() }],
+        style,
+    })
+}
+
+fn control_label(dom: &Dom, el: &Element) -> Option<String> {
+    match el.name.as_str() {
+        "input" => input_label(el),
+        "button" => Some(bracket_spaced(&button_label(dom, el))),
+        "textarea" => Some(textarea_label(dom, el)),
+        "select" => Some(select_label(dom, el)),
+        _ => None,
+    }
+}
+
+fn input_label(el: &Element) -> Option<String> {
+    let ty = el.attrs.get("type").unwrap_or("text").to_ascii_lowercase();
+    Some(match ty.as_str() {
+        "hidden" => return None,
+        "checkbox" => {
+            if is_checked(el) {
+                "[x]".to_string()
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        "radio" => {
+            if is_checked(el) {
+                "(*)".to_string()
+            } else {
+                "( )".to_string()
+            }
+        }
+        "submit" | "image" => bracket_spaced(&attr_or(el, "value", "Submit")),
+        "reset" => bracket_spaced(&attr_or(el, "value", "Reset")),
+        "button" => bracket_spaced(&attr_or(el, "value", "Button")),
+        "password" => bracket_tight(&password_mask(el)),
+        // text/search/email/url/tel/number, and any unrecognized/future
+        // type, all render as a plain text field.
+        _ => bracket_tight(&text_field_value(el)),
+    })
+}
+
+fn is_checked(el: &Element) -> bool {
+    el.attrs.get("checked").is_some()
+}
+
+fn bracket_tight(s: &str) -> String {
+    format!("[{s}]")
+}
+
+fn bracket_spaced(s: &str) -> String {
+    format!("[ {s} ]")
+}
+
+fn attr_or(el: &Element, name: &str, default: &str) -> String {
+    match el.attrs.get(name) {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => default.to_string(),
+    }
+}
+
+/// `size` attribute, defaulted and clamped -- see [`DEFAULT_CONTROL_SIZE`]/
+/// [`MAX_CONTROL_SIZE`]. `0` (technically meaningless as a field width) and
+/// anything unparseable also fall back to the default rather than
+/// synthesizing an empty/zero-width placeholder.
+fn control_size(el: &Element) -> usize {
+    el.attrs
+        .get("size")
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .map(|n| n.min(MAX_CONTROL_SIZE))
+        .unwrap_or(DEFAULT_CONTROL_SIZE)
+}
+
+fn text_field_value(el: &Element) -> String {
+    match el.attrs.get("value") {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => " ".repeat(control_size(el)),
+    }
+}
+
+fn password_mask(el: &Element) -> String {
+    match el.attrs.get("value") {
+        Some(v) if !v.is_empty() => "*".repeat(v.chars().count()),
+        _ => " ".repeat(control_size(el)),
+    }
+}
+
+/// `<button>`'s label: an explicit `value` attribute wins if present
+/// (mirroring `<input type=submit>`'s own value-attribute-first rule so the
+/// two stay consistent), else the button's own child text (it's the one
+/// form control that can hold markup/text content), else "Submit" -- HTML's
+/// own default `type` for a `<button>` with no `type` attribute at all.
+fn button_label(dom: &Dom, el: &Element) -> String {
+    if let Some(v) = el.attrs.get("value") {
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    let text = collect_text(dom, el);
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        trimmed.to_string()
+    } else {
+        "Submit".to_string()
+    }
+}
+
+/// See the module-level "Placeholder convention" doc comment above for the
+/// exact truncation rule.
+fn textarea_label(dom: &Dom, el: &Element) -> String {
+    let text = collect_text(dom, el);
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("");
+    let has_more_lines = lines.next().is_some();
+    let char_count = first.chars().count();
+    if char_count > MAX_TEXTAREA_CHARS {
+        let truncated: String = first.chars().take(MAX_TEXTAREA_CHARS).collect();
+        format!("{truncated}[...]")
+    } else if has_more_lines {
+        format!("{first}[...]")
+    } else {
+        first.to_string()
+    }
+}
+
+fn select_label(dom: &Dom, el: &Element) -> String {
+    let options = collect_options(dom, el, 0);
+    let chosen = options.iter().find(|o| o.selected).or_else(|| options.first());
+    let text = chosen.map(|o| o.text.as_str()).unwrap_or("");
+    format!("[ {text} v]")
+}
+
+struct SelectOption {
+    text: String,
+    selected: bool,
+}
+
+/// Depth-first collect every `<option>` reachable under `el` (handles the
+/// common flat case and `<optgroup>`-wrapped options alike, since any
+/// non-`option` element in between is simply recursed through). Bounded by
+/// [`DEPTH_CAP`] against pathologically nested/hostile markup, exactly like
+/// every other recursive walk in this module.
+fn collect_options(dom: &Dom, el: &Element, depth: usize) -> Vec<SelectOption> {
+    let mut out = Vec::new();
+    collect_options_into(dom, el, depth, &mut out);
+    out
+}
+
+fn collect_options_into(dom: &Dom, el: &Element, depth: usize, out: &mut Vec<SelectOption>) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    for &child in &el.children {
+        if child >= dom.len() {
+            continue;
+        }
+        if let Node::Element(ce) = dom.node(child) {
+            if ce.name.as_str() == "option" {
+                out.push(SelectOption {
+                    text: collect_text(dom, ce).trim().to_string(),
+                    selected: ce.attrs.get("selected").is_some(),
+                });
+            } else {
+                collect_options_into(dom, ce, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// Concatenate every text-node descendant of `el`. `<textarea>` is a
+/// RAWTEXT element in this parser's dialect (a single already-decoded
+/// `Text` child), so this degenerates to reading that one child in the
+/// common case; it also handles `<button>`/`<option>`'s ordinary (possibly
+/// mixed-markup) children unchanged. Bounded by [`DEPTH_CAP`].
+fn collect_text(dom: &Dom, el: &Element) -> String {
+    let mut out = String::new();
+    collect_text_into(dom, el, 0, &mut out);
+    out
+}
+
+fn collect_text_into(dom: &Dom, el: &Element, depth: usize, out: &mut String) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    for &child in &el.children {
+        if child >= dom.len() {
+            continue;
+        }
+        match dom.node(child) {
+            Node::Text(t) => out.push_str(t),
+            Node::Element(e) => collect_text_into(dom, e, depth + 1, out),
+        }
     }
 }
 
