@@ -63,16 +63,31 @@ const DEPTH_CAP: usize = 100;
 /// `--dump-text` passes an empty map instead (see `main.rs`), since a tty
 /// dump never paints pixels and has no use for decoded image data.
 pub fn collect_images(dom: &Dom, base: &Url) -> HashMap<NodeId, Rc<RgbaImage>> {
-    // RED stub (test-first): always empty, so every test below documents
-    // the real behavior and fails against this stub before the real walk +
-    // fetch + decode pipeline is implemented.
-    let _ = (dom, base);
-    HashMap::new()
+    let mut out = HashMap::new();
+    if dom.is_empty() {
+        return out;
+    }
+    walk(dom, dom.root(), base, &mut out, 0);
+    out
 }
 
-#[allow(dead_code)]
 fn walk(dom: &Dom, id: NodeId, base: &Url, out: &mut HashMap<NodeId, Rc<RgbaImage>>, depth: usize) {
-    let _ = (dom, id, base, out, depth);
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    let Node::Element(el) = dom.node(id) else { return };
+
+    if el.name.as_str() == "img" && out.len() < MAX_IMAGES {
+        if let Some(src) = el.attrs.get("src") {
+            if let Some(image) = fetch_and_decode(base, src) {
+                out.insert(id, Rc::new(image));
+            }
+        }
+    }
+
+    for &child in &el.children {
+        walk(dom, child, base, out, depth + 1);
+    }
 }
 
 /// Resolve `src` against `base`, fetch it, and decode frame 0. `None` on any
@@ -81,7 +96,6 @@ fn walk(dom: &Dom, id: NodeId, base: &Url, out: &mut HashMap<NodeId, Rc<RgbaImag
 /// Animated images (GIF) decode every frame; only the first is used for this
 /// static render, matching the packet brief ("animated GIF -> first frame;
 /// the ticking loop is a later/interactive concern").
-#[allow(dead_code)]
 fn fetch_and_decode(base: &Url, src: &str) -> Option<RgbaImage> {
     let url = base.resolve(src);
     let response = fetch_response(&url).ok()?;
@@ -98,7 +112,6 @@ fn fetch_and_decode(base: &Url, src: &str) -> Option<RgbaImage> {
 /// three call sites. This copy additionally returns the full [`Response`]
 /// (not just the body) because [`fetch_and_decode`] needs its `Content-Type`
 /// header as a decode hint (`img::decode_bytes`'s `content_type` parameter).
-#[allow(dead_code)]
 fn fetch_response(url: &Url) -> Result<Response, String> {
     match url.scheme().as_str() {
         "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
