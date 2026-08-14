@@ -17,6 +17,7 @@ use stele::dom;
 use stele::fetch::file::FileFetcher;
 use stele::fetch::http1::Http1Client;
 use stele::fetch::{Fetch, Request, Url};
+use stele::frames;
 use stele::layout::box_tree::build_box_tree;
 use stele::layout::{self, Size};
 use stele::style::cascade;
@@ -116,6 +117,15 @@ fn fetch_body(url: &Url) -> Result<Vec<u8>, String> {
 /// error, non-UTF-8 body (lossily recovered), empty document, or
 /// `display: none` root all resolve to a clean empty string rather than a
 /// panic — the caller prints whatever comes back verbatim.
+///
+/// Frames (packet `frames`): if the fetched document's `<html>` contains a
+/// `<frameset>` anywhere (`stele::frames::find_frameset`), this routes to
+/// the frames renderer (`stele::frames::render`) INSTEAD of the ordinary
+/// cascade->box-tree->layout->tty chain below — a frameset document has no
+/// `<body>` to run that chain over; each `<frame src>` gets its own
+/// independent instance of it, recursively, driven from `frames.rs`. See
+/// that module's docs for the full design (track sizing, compositing,
+/// totality bounds).
 fn dump_text(source: &str, cols: usize) -> String {
     let url = resolve_url(source);
     let body = match fetch_body(&url) {
@@ -124,6 +134,11 @@ fn dump_text(source: &str, cols: usize) -> String {
     };
     let html = String::from_utf8_lossy(&body);
     let dom_tree = dom::parser::parse(&html);
+
+    if let Some(frameset_id) = frames::find_frameset(&dom_tree) {
+        return frames::render(&url, &dom_tree, frameset_id, cols).to_text();
+    }
+
     let styles = cascade::cascade(&dom_tree, &[]);
     let Some(root) = build_box_tree(&dom_tree, &styles) else {
         return String::new();

@@ -68,14 +68,19 @@
 
 use crate::layout::{Fragment, FragmentKind};
 
-const CELL_W: f32 = 8.0;
-const CELL_H: f32 = 16.0;
+/// `pub(crate)`, not just private: the frames packet (`crate::frames`)
+/// composites multiple independently-rendered `TextGrid`s into one viewport
+/// and needs the exact same cell-mapping constants this module's own
+/// docs pin — duplicating the magic numbers would risk the two modules
+/// silently drifting. Still not part of the public API surface.
+pub(crate) const CELL_W: f32 = 8.0;
+pub(crate) const CELL_H: f32 = 16.0;
 
 /// Hard cap on grid rows, independent of document content. Far beyond any
 /// realistic document (10,000 lines is a ~160,000px-tall page) but bounded,
 /// so a hostile/degenerate layout (huge margins, huge coordinates) can't
 /// drive an unbounded allocation. See module docs.
-const MAX_GRID_ROWS: usize = 10_000;
+pub(crate) const MAX_GRID_ROWS: usize = 10_000;
 
 /// Hard cap on grid columns, independent of the caller-supplied `cols`.
 /// `cols` is directly attacker/user-controlled (it's `--cols` on the CLI,
@@ -89,7 +94,7 @@ const MAX_GRID_ROWS: usize = 10_000;
 /// `2_000 * 10_000 * size_of::<char>()` = 80MB — bounded, not necessarily
 /// cheap, but a `--cols` flag alone can no longer drive an unbounded
 /// allocation.
-const MAX_GRID_COLS: usize = 2_000;
+pub(crate) const MAX_GRID_COLS: usize = 2_000;
 
 /// A rendered character grid: rows of columns, ready to print.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +103,48 @@ pub struct TextGrid {
 }
 
 impl TextGrid {
+    /// A blank (all-space) grid of the given size — the canvas the frames
+    /// packet (`crate::frames`) builds before [`blit`](Self::blit)-ing each
+    /// frame's own independently-rendered grid into place. `cols`/`rows` are
+    /// clamped to [`MAX_GRID_COLS`]/[`MAX_GRID_ROWS`] (same totality
+    /// rationale as `render`: a frameset's computed grid dimensions are
+    /// ultimately attacker/document-controlled, same as `--cols`); either
+    /// dimension being `0` yields an empty grid, matching `render`'s own
+    /// `cols == 0` / `rows_needed == 0` short-circuits.
+    pub fn blank(cols: usize, rows: usize) -> Self {
+        if cols == 0 || rows == 0 {
+            return TextGrid { rows: Vec::new() };
+        }
+        let cols = cols.min(MAX_GRID_COLS);
+        let rows = rows.min(MAX_GRID_ROWS);
+        TextGrid { rows: vec![vec![' '; cols]; rows] }
+    }
+
+    /// This grid's row count (its rendered/content-driven height in cells).
+    pub fn rows_len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Blit `other` into `self` at cell offset `(col_off, row_off)`, clipped
+    /// to `self`'s own bounds in both axes — cells of `other` that would
+    /// land outside `self` are silently dropped rather than panicking (an
+    /// out-of-range offset, or `other` wider/taller than the remaining
+    /// space, are both ordinary inputs from the frames packet's grid math,
+    /// not something exceptional). Later writes at the same cell (e.g. two
+    /// overlapping `blit` calls) win over earlier ones, mirroring `render`'s
+    /// own "paint order wins ties" rule.
+    pub fn blit(&mut self, other: &TextGrid, col_off: usize, row_off: usize) {
+        for (r, src_row) in other.rows.iter().enumerate() {
+            let dst_r = row_off + r;
+            let Some(dst_row) = self.rows.get_mut(dst_r) else { break };
+            for (c, &ch) in src_row.iter().enumerate() {
+                let dst_c = col_off + c;
+                let Some(cell) = dst_row.get_mut(dst_c) else { break };
+                *cell = ch;
+            }
+        }
+    }
+
     /// Join rows with `\n`, trimming trailing spaces from each row and
     /// dropping any trailing (bottom) blank rows — deterministic output with
     /// no dangling whitespace, suitable for an exact-match golden. Interior
@@ -207,7 +254,7 @@ fn write_marker(rows: &mut [Vec<char>], fragment: &Fragment, text: &str, cols: u
 /// Non-finite or negative inputs clamp to `0`; absurdly large inputs clamp
 /// to a large-but-safe index (never overflows the `f32 -> usize` cast, never
 /// panics) — see module docs on totality.
-fn cell_index(v: f32, cell: f32) -> usize {
+pub(crate) fn cell_index(v: f32, cell: f32) -> usize {
     if !v.is_finite() || cell <= 0.0 {
         return 0;
     }
@@ -414,5 +461,74 @@ mod tests {
         let grid = render(&fragments, 10);
         assert_eq!(grid.rows.len(), 21); // row 20 (320/16) + 1
         assert!(grid.row_text(20).starts_with('b'));
+    }
+
+    // ------------------------------- blank / blit (frames compositing) -----
+
+    #[test]
+    fn blank_grid_is_all_spaces_of_the_requested_size() {
+        let grid = TextGrid::blank(5, 3);
+        assert_eq!(grid.rows_len(), 3);
+        for r in 0..3 {
+            assert_eq!(grid.row_text(r), "     ");
+        }
+    }
+
+    #[test]
+    fn blank_grid_with_a_zero_dimension_is_empty() {
+        assert_eq!(TextGrid::blank(0, 3).rows_len(), 0);
+        assert_eq!(TextGrid::blank(5, 0).rows_len(), 0);
+    }
+
+    #[test]
+    fn blank_grid_dimensions_are_clamped_not_a_panic() {
+        let grid = TextGrid::blank(999_999_999, 999_999_999);
+        assert!(grid.rows_len() <= MAX_GRID_ROWS);
+        for r in 0..grid.rows_len().min(2) {
+            assert!(grid.row_text(r).chars().count() <= MAX_GRID_COLS);
+        }
+    }
+
+    #[test]
+    fn blit_places_a_grid_at_the_given_cell_offset() {
+        let fragments = vec![text_fragment(0.0, 0.0, 16.0, 16.0, "hi")];
+        let small = render(&fragments, 4);
+        let mut canvas = TextGrid::blank(10, 5);
+        canvas.blit(&small, 3, 2);
+        assert_eq!(canvas.row_text(2).chars().nth(3), Some('h'));
+        assert_eq!(canvas.row_text(2).chars().nth(4), Some('i'));
+        // Untouched cells stay blank.
+        assert_eq!(canvas.row_text(0), "          ");
+        assert_eq!(canvas.row_text(2).chars().nth(0), Some(' '));
+    }
+
+    #[test]
+    fn blit_clips_at_the_canvas_bounds_instead_of_panicking() {
+        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "abcdef")];
+        let wide = render(&fragments, 6);
+        let mut canvas = TextGrid::blank(4, 2);
+        // Offset already past the canvas width/height, and content wider
+        // than what remains either way: must clip silently, not panic.
+        canvas.blit(&wide, 2, 1);
+        assert_eq!(canvas.row_text(1), "  ab");
+    }
+
+    #[test]
+    fn blit_with_offset_entirely_outside_the_canvas_is_a_silent_no_op() {
+        let fragments = vec![text_fragment(0.0, 0.0, 16.0, 16.0, "x")];
+        let small = render(&fragments, 4);
+        let mut canvas = TextGrid::blank(3, 3);
+        canvas.blit(&small, 100, 100);
+        assert_eq!(canvas.to_text(), "");
+    }
+
+    #[test]
+    fn later_blit_wins_over_an_earlier_overlapping_one() {
+        let first = render(&[text_fragment(0.0, 0.0, 16.0, 16.0, "AA")], 4);
+        let second = render(&[text_fragment(0.0, 0.0, 16.0, 16.0, "BB")], 4);
+        let mut canvas = TextGrid::blank(4, 1);
+        canvas.blit(&first, 0, 0);
+        canvas.blit(&second, 0, 0);
+        assert_eq!(canvas.row_text(0), "BB  ");
     }
 }
