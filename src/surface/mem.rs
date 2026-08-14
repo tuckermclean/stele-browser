@@ -112,4 +112,156 @@ mod tests {
         s.put_pixel(0, 5, Color::BLACK);
         assert_eq!(&s.bytes()[0..4], &[255, 255, 255, 255]);
     }
+
+    // --------------------------------------------------------------- draw_text
+
+    /// Read back the RGBA pixel at `(x, y)` as an `(r, g, b, a)` tuple.
+    fn px(s: &MemSurface, x: i32, y: i32) -> (u8, u8, u8, u8) {
+        let i = ((y as usize) * (s.width as usize) + (x as usize)) * 4;
+        (s.pixels[i], s.pixels[i + 1], s.pixels[i + 2], s.pixels[i + 3])
+    }
+
+    /// `true` at every `(x, y)` where the embedded 'A' glyph
+    /// (`text::glyphs`'s `0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00`,
+    /// bit 0 = leftmost pixel) is lit, for an 8x8 block whose top-left is
+    /// `(x0, y0)`.
+    fn a_glyph_lit(x: i32, y: i32, x0: i32, y0: i32) -> bool {
+        const A: [u8; 8] = [0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00];
+        let (dx, dy) = (x - x0, y - y0);
+        if !(0..8).contains(&dx) || !(0..8).contains(&dy) {
+            return false;
+        }
+        A[dy as usize] & (1 << dx) != 0
+    }
+
+    #[test]
+    fn draw_text_paints_a_native_size_glyph_bottom_aligned_to_the_baseline() {
+        // size_px == 16 == BitmapFont::vga_8x16's cell_height -> scale 1.0,
+        // so the 8x8 glyph paints 1:1. The glyph's own doc-comment placement
+        // rule (bitmap.rs / mem.rs draw_text): the glyph's bottom row sits
+        // exactly on `baseline`, so its pixel box spans
+        // `[baseline - 8, baseline)` vertically and `[x, x + 8)` horizontally.
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let run = TextRun { text: "A", x: 4, baseline: 12, size_px: 16.0, color: Color::BLACK };
+        s.draw_text(&run);
+
+        for y in 0..20 {
+            for x in 0..20 {
+                let expect_lit = a_glyph_lit(x, y, 4, 12 - 8);
+                let got = px(&s, x, y);
+                if expect_lit {
+                    assert_eq!(got, (0, 0, 0, 255), "expected glyph pixel lit at ({x},{y})");
+                } else {
+                    assert_eq!(got, (255, 255, 255, 255), "expected background at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draw_text_advances_by_the_font_cell_width_between_chars() {
+        // "II" at size 16: cell_width 8px advance between the two glyphs'
+        // origins. Just assert both glyph columns show *some* black ink
+        // (rather than re-deriving the full 'I' bitmap) and that there is a
+        // gap of all-background columns is not required (font glyphs may
+        // touch their cell edge) — the real assertion is total pixel count
+        // roughly doubles versus a single "I".
+        let mut one = MemSurface::new(24, 20, Color::WHITE);
+        one.draw_text(&TextRun { text: "I", x: 0, baseline: 12, size_px: 16.0, color: Color::BLACK });
+        let mut two = MemSurface::new(24, 20, Color::WHITE);
+        two.draw_text(&TextRun { text: "II", x: 0, baseline: 12, size_px: 16.0, color: Color::BLACK });
+
+        let count_black = |s: &MemSurface| s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
+        let n1 = count_black(&one);
+        let n2 = count_black(&two);
+        assert!(n1 > 0, "single glyph should paint some ink");
+        assert_eq!(n2, n1 * 2, "two identical glyphs should paint exactly twice the ink of one");
+    }
+
+    #[test]
+    fn draw_text_scales_the_glyph_nearest_neighbor_at_2x_size() {
+        // size_px == 32 -> scale 2.0: each source pixel becomes a 2x2 block.
+        // Spot-check a couple of lit/unlit source pixels from the 'A' glyph
+        // (row 4 == the crossbar, 0x3F, columns 0..=5 lit; column 6 unlit)
+        // rather than the whole 16x16 box.
+        let mut s = MemSurface::new(40, 40, Color::WHITE);
+        let run = TextRun { text: "A", x: 0, baseline: 24, size_px: 32.0, color: Color::BLACK };
+        s.draw_text(&run);
+
+        // Row 4 (crossbar) at scale 2 occupies output rows [8,10) within the
+        // glyph box, whose box top is baseline - 16 = 8. So output rows
+        // 8+4*2=16..18.
+        for y in 16..18 {
+            for x in 0..12 {
+                // columns 0..5 lit -> scaled x in [0,12)
+                assert_eq!(px(&s, x, y), (0, 0, 0, 255), "expected crossbar ink at ({x},{y})");
+            }
+            // column 6 (0x3F bit6==0) unlit -> scaled x in [12,14)
+            assert_eq!(px(&s, 12, y), (255, 255, 255, 255), "expected gap after crossbar at (12,{y})");
+        }
+    }
+
+    #[test]
+    fn draw_text_empty_string_is_a_no_op() {
+        let mut s = MemSurface::new(10, 10, Color::WHITE);
+        s.draw_text(&TextRun { text: "", x: 0, baseline: 8, size_px: 16.0, color: Color::BLACK });
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn draw_text_degenerate_size_px_is_a_no_op_not_a_panic() {
+        for size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut s = MemSurface::new(10, 10, Color::WHITE);
+            s.draw_text(&TextRun { text: "A", x: 0, baseline: 8, size_px: size, color: Color::BLACK });
+            for i in (0..s.bytes().len()).step_by(4) {
+                assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn draw_text_off_surface_bounds_never_panics() {
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        let degenerate = [
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+            (-1000, -1000),
+            (10_000, 10_000),
+        ];
+        for (x, baseline) in degenerate {
+            s.draw_text(&TextRun { text: "hello world", x, baseline, size_px: 16.0, color: Color::BLACK });
+        }
+        // Must not panic; surface stays a valid 4x4 buffer.
+        assert_eq!(s.bytes().len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn draw_text_huge_size_px_is_bounded_not_a_hang_or_panic() {
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        s.draw_text(&TextRun { text: "A", x: 0, baseline: 0, size_px: f32::MAX, color: Color::BLACK });
+        assert_eq!(s.bytes().len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn draw_text_respects_run_color() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let red = Color::rgb(200, 10, 10);
+        s.draw_text(&TextRun { text: "A", x: 4, baseline: 12, size_px: 16.0, color: red });
+        // The 'A' glyph's crossbar row (design row 4) is fully lit
+        // columns 0..=5; at x0=4 that's surface columns 4..=9, row
+        // baseline-8+4 = 8.
+        assert_eq!(px(&s, 4, 8), (200, 10, 10, 255));
+    }
+
+    #[test]
+    fn draw_text_zero_alpha_color_is_a_no_op() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let transparent_black = Color::rgba(0, 0, 0, 0);
+        s.draw_text(&TextRun { text: "A", x: 4, baseline: 12, size_px: 16.0, color: transparent_black });
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+        }
+    }
 }
