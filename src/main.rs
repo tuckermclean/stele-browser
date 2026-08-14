@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use stele::backend::fb;
 use stele::backend::raster;
 use stele::backend::tty;
 use stele::dom;
@@ -53,17 +54,26 @@ const DEFAULT_PNG_WIDTH: u32 = 800;
 /// bounded.
 const MAX_PNG_HEIGHT: u32 = 20_000;
 
+/// Fallback viewport width (CSS px) for `--render-fb` when the framebuffer's
+/// own geometry (`/sys/class/graphics/fb0/virtual_size`) can't be read —
+/// e.g. no `fbdev`/`vesafb`/`simplefb` driver loaded. Picked for the same
+/// reason as `DEFAULT_PNG_WIDTH`: a common-enough real framebuffer width
+/// (many VESA/console modes are 1024px wide or wider) that still keeps the
+/// worst-case `MemSurface` allocation bounded alongside `MAX_PNG_HEIGHT`.
+const DEFAULT_FB_WIDTH: u32 = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
     headless: bool,
     dump_text: Option<String>,
     dump_png: Option<(String, String)>,
+    render_fb: Option<String>,
     cols: usize,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, dump_png: None, cols: DEFAULT_COLS }
+        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS }
     }
 }
 
@@ -95,6 +105,10 @@ fn parse_args(argv: &[String]) -> Args {
                     i += 2;
                     out.dump_png = Some((src, out_path));
                 }
+            }
+            "--render-fb" => {
+                // RED stub: not yet implemented.
+                i += 1;
             }
             "--cols" => {
                 i += 1;
@@ -276,6 +290,52 @@ fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
+/// Drive the fetch->parse->cascade->(image pre-pass)->box_tree->layout->paint
+/// pipeline for `--render-fb`, laying out at a fixed `width` (the
+/// framebuffer's own width when known, [`DEFAULT_FB_WIDTH`] otherwise — see
+/// [`render_fb`]) and a content-driven height, mirroring [`dump_png`]'s own
+/// viewport/height derivation. Unlike `dump_png` (which is total and always
+/// returns *some* PNG, even a blank one), this returns `Err` on a fetch
+/// failure, an empty/`display:none` document, or a frameset document: there
+/// is no pixel-sensible "blank screen" fallback to paint onto real hardware
+/// the way there's a trivial 1x1 blank PNG to encode, and the CLI layer
+/// ([`render_fb`]) reports whichever of these `Err`s comes back rather than
+/// silently painting nothing.
+fn render_fb_surface(_source: &str, _width: u32) -> Result<MemSurface, String> {
+    // RED stub: not yet implemented.
+    Err("not yet implemented".to_string())
+}
+
+/// `--render-fb <src>`'s CLI-facing driver: render `source` to a
+/// `MemSurface` sized to the real framebuffer's width (read from
+/// `backend::fb::DEFAULT_SYSFS_DIR`; falls back to [`DEFAULT_FB_WIDTH`] and
+/// reports the geometry error to stderr if sysfs is unreadable -- e.g. no fb
+/// driver loaded), convert it to the device's own pixel layout, and write it
+/// to `backend::fb::DEFAULT_DEVICE_PATH`.
+///
+/// Total: every failure mode (fetch error, empty/frameset document,
+/// unreadable framebuffer geometry, unsupported `bits_per_pixel`, an absent
+/// or unwritable `/dev/fb0`) is a clean `Err(String)`, never a panic --
+/// this is the path brief calls out as un-integration-testable in CI (no
+/// `/dev/fb0` on the runner), so its device-facing half is only ever
+/// exercised via this same error path there.
+fn render_fb(source: &str) -> Result<(), String> {
+    let fb_info = fb::read_fb_info(fb::DEFAULT_SYSFS_DIR);
+    let width = match &fb_info {
+        Ok(info) => info.width,
+        Err(e) => {
+            eprintln!("stele: framebuffer geometry unavailable ({e}); using default width {DEFAULT_FB_WIDTH}");
+            DEFAULT_FB_WIDTH
+        }
+    };
+
+    let surface = render_fb_surface(source, width)?;
+    let info = fb_info.map_err(|e| e.to_string())?;
+    let (surf_w, surf_h) = stele::surface::Surface::size(&surface);
+    let bytes = fb::convert_to_fb_bytes(surface.bytes(), surf_w, surf_h, info).map_err(|e| e.to_string())?;
+    fb::write_to_device(&bytes, fb::DEFAULT_DEVICE_PATH).map_err(|e| e.to_string())
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
@@ -295,7 +355,14 @@ fn main() {
             }
             return;
         }
-        eprintln!("stele: --headless requires --dump-text <path-or-url> or --dump-png <path-or-url> <out.png>");
+        if let Some(source) = args.render_fb {
+            if let Err(e) = render_fb(&source) {
+                eprintln!("stele: no framebuffer (/dev/fb0): {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        eprintln!("stele: --headless requires --dump-text <path-or-url>, --dump-png <path-or-url> <out.png>, or --render-fb <path-or-url>");
         return;
     }
 
@@ -563,5 +630,69 @@ mod tests {
         let bytes = blank_png();
         let (w, h) = decode_png_dims(&bytes);
         assert_eq!((w, h), (1, 1));
+    }
+
+    // ------------------------------------------------------------ --render-fb
+
+    #[test]
+    fn parse_args_reads_render_fb_source() {
+        let a = parse_args(&args(&["--headless", "--render-fb", "fixtures/basic.html"]));
+        assert!(a.headless);
+        assert_eq!(a.render_fb.as_deref(), Some("fixtures/basic.html"));
+    }
+
+    #[test]
+    fn parse_args_render_fb_missing_value_does_not_panic_or_partially_set() {
+        let a = parse_args(&args(&["--headless", "--render-fb"]));
+        assert!(a.headless);
+        assert_eq!(a.render_fb, None);
+    }
+
+    /// The core of the totality contract this packet exists to prove:
+    /// there is no `/dev/fb0` (and no `/sys/class/graphics/fb0`) in this
+    /// sandbox, mirroring the CI runner exactly. `render_fb` must still
+    /// degrade to a clean `Err`, never a panic/abort, even though it drives
+    /// the full fetch->parse->cascade->box-tree->layout->paint pipeline
+    /// before ever touching the (absent) device.
+    #[test]
+    fn render_fb_on_a_real_document_with_no_framebuffer_device_is_a_clean_err() {
+        let result = render_fb("fixtures/basic.html");
+        assert!(result.is_err(), "expected Err: no /dev/fb0 in this environment");
+    }
+
+    #[test]
+    fn render_fb_on_a_missing_file_is_a_clean_err_not_a_panic() {
+        let result = render_fb("fixtures/does-not-exist-nope.html");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_fb_on_an_unsupported_scheme_is_a_clean_err() {
+        let result = render_fb("ftp://example.com/x");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_fb_on_a_frameset_document_is_a_clean_err_not_a_panic() {
+        // Mirrors dump_png's own frameset carve-out (pixel rendering of
+        // <frameset> documents is out of scope here too), just surfaced as
+        // an Err instead of a blank-PNG fallback -- see render_fb_surface's
+        // doc comment for why there's no pixel-sensible blank-screen
+        // fallback to paint onto real hardware.
+        let result = render_fb("fixtures/frames.html");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_fb_surface_paints_a_real_document_at_the_requested_width() {
+        let surface = render_fb_surface("fixtures/basic.html", 640).expect("basic.html renders");
+        assert_eq!(stele::surface::Surface::size(&surface).0, 640);
+        assert!(stele::surface::Surface::size(&surface).1 > 0);
+    }
+
+    #[test]
+    fn render_fb_surface_on_a_missing_file_is_a_clean_err_not_a_panic() {
+        let result = render_fb_surface("fixtures/does-not-exist-nope.html", 640);
+        assert!(result.is_err());
     }
 }
