@@ -188,7 +188,10 @@ fn translate_any<'a>(node: &'a LayoutNode, taffy: &mut TaffyTree<Vec<InlineRun>>
             let id = taffy.new_leaf(style).expect("taffy leaf alloc is infallible for a fresh tree");
             Built::Replaced { style: &node.style, taffy_id: id, intrinsic: Size { w: iw, h: ih } }
         }
-        BoxContent::Container => {
+        // TODO(table-layout packet): real table layout via solve_table. For
+        // now a table cell translates exactly like a Container — a plain
+        // stacked block — until the column solver lands.
+        BoxContent::Container | BoxContent::TableCell { .. } => {
             let mut style = base_style(&node.style);
             style.display = map_display(node.style.display);
             apply_flex(&mut style, &node.style);
@@ -223,7 +226,10 @@ fn translate_any<'a>(node: &'a LayoutNode, taffy: &mut TaffyTree<Vec<InlineRun>>
 fn is_inline_ish(n: &LayoutNode) -> bool {
     match &n.content {
         BoxContent::Text(_) => true,
-        BoxContent::Container => n.style.display == Display::Inline,
+        // TODO(table-layout packet): once real table layout lands, a table
+        // cell is never inline-ish regardless of `style.display` — for now
+        // it's routed exactly like Container.
+        BoxContent::Container | BoxContent::TableCell { .. } => n.style.display == Display::Inline,
         BoxContent::Replaced { .. } => false,
     }
 }
@@ -245,7 +251,9 @@ fn is_inline_ish(n: &LayoutNode) -> bool {
 fn flatten_inline(node: &LayoutNode, out: &mut Vec<InlineRun>, depth: usize) {
     match &node.content {
         BoxContent::Text(text) => out.push(InlineRun { text: text.clone(), style: node.style.clone() }),
-        BoxContent::Container => {
+        // TODO(table-layout packet): a table cell reaching this path is
+        // routed exactly like Container for now (see `is_inline_ish`).
+        BoxContent::Container | BoxContent::TableCell { .. } => {
             if depth >= DEPTH_CAP {
                 return; // over-deep inline subtree: drop gracefully, don't recurse further.
             }

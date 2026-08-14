@@ -80,7 +80,13 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
                     .filter_map(|&child| build_node(dom, styles, child, depth + 1))
                     .collect()
             };
-            Some(LayoutNode { style, content: BoxContent::Container, children })
+            let content = if style.display == Display::TableCell {
+                let (colspan, rowspan) = cell_spans(el);
+                BoxContent::TableCell { colspan, rowspan }
+            } else {
+                BoxContent::Container
+            };
+            Some(LayoutNode { style, content, children })
         }
     }
 }
@@ -108,6 +114,40 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
         Some(v)
     } else {
         None
+    }
+}
+
+/// Max `colspan`/`rowspan` a table cell is allowed to carry, per the HTML
+/// spec's own limits on these attributes. Clamping here — rather than
+/// trusting the wire — keeps the eventual column solver (P8) from being
+/// handed an attacker-controlled grid width/height to iterate over.
+const MAX_COLSPAN: u16 = 1000;
+const MAX_ROWSPAN: u16 = 65534;
+
+/// Parse a `<td>`/`<th>`'s `colspan`/`rowspan` attributes. Missing,
+/// unparseable, or zero values default to `1` (HTML's own default and floor
+/// for both attributes — a span of 0 has no visual meaning); out-of-range
+/// values clamp to [`MAX_COLSPAN`]/[`MAX_ROWSPAN`] rather than being rejected
+/// outright, so a hostile document degrades to a large-but-bounded cell
+/// instead of losing the cell's content entirely.
+fn cell_spans(el: &Element) -> (u16, u16) {
+    (parse_span(el.attrs.get("colspan"), MAX_COLSPAN), parse_span(el.attrs.get("rowspan"), MAX_ROWSPAN))
+}
+
+fn parse_span(raw: Option<&str>, max: u16) -> u16 {
+    // Parse as u32 first so an absurdly large literal (more digits than a
+    // u16 holds) parses successfully and then clamps, rather than failing
+    // to parse and silently falling back to the same default (1) a
+    // deliberately malformed value would — clamping and defaulting are
+    // different outcomes worth keeping distinct even though both are safe.
+    let v: u32 = match raw.and_then(|s| s.trim().parse().ok()) {
+        Some(v) => v,
+        None => return 1,
+    };
+    if v == 0 {
+        1
+    } else {
+        v.min(max as u32) as u16
     }
 }
 
