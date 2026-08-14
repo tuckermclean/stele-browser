@@ -697,8 +697,11 @@ fn run_browser(source: &str) {
             Ok(n) => n,
         };
 
-        for key in parser.feed(&buf[..n]) {
-            let (next_view, cmd) = browser::apply_key(key, view, &page);
+        for event in parser.feed(&buf[..n]) {
+            let (next_view, cmd) = match event {
+                browser::InputEvent::Key(key) => browser::apply_key(key, view, &page),
+                browser::InputEvent::Mouse(mouse) => browser::apply_mouse(mouse, view, &page),
+            };
             view = next_view;
             match cmd {
                 browser::Command::None => {}

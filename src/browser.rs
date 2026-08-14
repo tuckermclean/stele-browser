@@ -397,6 +397,63 @@ pub enum Key {
     Char(char),
 }
 
+// =========================================================================
+// Mouse input (pure): xterm SGR wire parsing lives here, alongside the gpm
+// byte layer further down — see that section's own doc comment for why gpm
+// is split the same "pure (de)serialize, unit-tested" vs "thin socket
+// connect/read loop, main.rs, manual" way this whole module already splits
+// keyboard input.
+// =========================================================================
+
+/// Which physical button a press/release [`MouseEvent`] names — xterm SGR's
+/// `Cb & 0b11` and gpm's `GPM_B_LEFT`/`GPM_B_MIDDLE`/`GPM_B_RIGHT` bits both
+/// collapse onto this one small enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+/// What happened, decoded from either the xterm SGR wire format
+/// ([`parse_sgr_mouse`]) or a gpm `Gpm_Event` record ([`gpm_event_to_mouse`]).
+/// `Move` covers both xterm's motion bit and gpm's `GPM_MOVE`/`GPM_DRAG` —
+/// kept as a variant (rather than dropped at the parse boundary) so a future
+/// packet has something to build on; [`apply_mouse`] treats it as a no-op
+/// today (this packet's brief only asks for click-to-follow + wheel-to-scroll).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    WheelUp,
+    WheelDown,
+    Move,
+}
+
+/// A decoded mouse event in VIEWPORT cell coordinates (0-based: `col`/`row`
+/// `0` is the top-left cell of whatever's currently on screen — the SAME
+/// coordinate space `render_frame`'s window uses, NOT the full page's cell
+/// grid). [`apply_mouse`] is the one place that translates `row` into a page
+/// row, via `view.scroll_row`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub col: usize,
+    pub row: usize,
+    pub kind: MouseKind,
+}
+
+/// Everything [`KeyParser::feed`] can produce: a keyboard [`Key`] (c1,
+/// unchanged) or a mouse [`MouseEvent`] (c2, parsed from an xterm SGR
+/// sequence — see [`parse_escape`]'s `b'<'` arm). One parser, two event
+/// kinds — the packet brief's own "extend it to also emit mouse events"
+/// framing, rather than a sibling parser duplicating all the buffering/
+/// partial-sequence logic `KeyParser` already has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    Key(Key),
+    Mouse(MouseEvent),
+}
+
 enum ParseOutcome {
     Empty,
     Incomplete,
@@ -404,14 +461,14 @@ enum ParseOutcome {
     /// or invalid prefix) and keep parsing whatever's left in the SAME
     /// `feed` call — see [`KeyParser::feed`].
     Invalid(usize),
-    Complete(Key, usize),
+    Complete(InputEvent, usize),
 }
 
-/// A small buffering byte-stream -> [`Key`] parser, so a keypress whose
-/// escape sequence arrives split across two `read()`s (entirely plausible
-/// over a slow pty/serial link — an i486-era concern, not a theoretical
-/// one) still resolves correctly instead of misparsing the tail as
-/// something else. Pure: `feed` takes bytes, returns keys, no I/O.
+/// A small buffering byte-stream -> [`InputEvent`] parser, so a keypress or
+/// mouse sequence whose bytes arrive split across two `read()`s (entirely
+/// plausible over a slow pty/serial link — an i486-era concern, not a
+/// theoretical one) still resolves correctly instead of misparsing the tail
+/// as something else. Pure: `feed` takes bytes, returns events, no I/O.
 #[derive(Debug, Default)]
 pub struct KeyParser {
     buf: Vec<u8>,
@@ -422,16 +479,16 @@ impl KeyParser {
         KeyParser { buf: Vec::new() }
     }
 
-    /// Feed newly-read bytes in; returns every [`Key`] that became complete
-    /// as a result (zero, one, or several — a fast paste/repeat can deliver
-    /// many keys in one `read()`). Any trailing partial escape sequence
-    /// stays buffered for the next call. Total: the internal loop always
-    /// consumes at least one byte per iteration on anything but
+    /// Feed newly-read bytes in; returns every [`InputEvent`] that became
+    /// complete as a result (zero, one, or several — a fast paste/repeat or
+    /// a drag can deliver many events in one `read()`). Any trailing partial
+    /// sequence stays buffered for the next call. Total: the internal loop
+    /// always consumes at least one byte per iteration on anything but
     /// `Empty`/`Incomplete` (which both `break`), so it can never spin
     /// forever on adversarial input.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<InputEvent> {
         self.buf.extend_from_slice(bytes);
-        let mut keys = Vec::new();
+        let mut events = Vec::new();
         loop {
             match try_parse_one(&self.buf) {
                 ParseOutcome::Empty | ParseOutcome::Incomplete => break,
@@ -439,14 +496,14 @@ impl KeyParser {
                     let n = n.min(self.buf.len());
                     self.buf.drain(0..n);
                 }
-                ParseOutcome::Complete(key, n) => {
-                    keys.push(key);
+                ParseOutcome::Complete(event, n) => {
+                    events.push(event);
                     let n = n.min(self.buf.len());
                     self.buf.drain(0..n);
                 }
             }
         }
-        keys
+        events
     }
 }
 
@@ -454,11 +511,11 @@ fn try_parse_one(buf: &[u8]) -> ParseOutcome {
     let Some(&b0) = buf.first() else { return ParseOutcome::Empty };
     match b0 {
         0x1b => parse_escape(buf),
-        0x09 => ParseOutcome::Complete(Key::Tab, 1),
-        0x0d | 0x0a => ParseOutcome::Complete(Key::Enter, 1),
-        0x7f | 0x08 => ParseOutcome::Complete(Key::Backspace, 1),
-        0x03 => ParseOutcome::Complete(Key::CtrlC, 1),
-        0x20..=0x7e => ParseOutcome::Complete(Key::Char(b0 as char), 1),
+        0x09 => ParseOutcome::Complete(InputEvent::Key(Key::Tab), 1),
+        0x0d | 0x0a => ParseOutcome::Complete(InputEvent::Key(Key::Enter), 1),
+        0x7f | 0x08 => ParseOutcome::Complete(InputEvent::Key(Key::Backspace), 1),
+        0x03 => ParseOutcome::Complete(InputEvent::Key(Key::CtrlC), 1),
+        0x20..=0x7e => ParseOutcome::Complete(InputEvent::Key(Key::Char(b0 as char)), 1),
         _ => ParseOutcome::Invalid(1),
     }
 }
@@ -474,14 +531,15 @@ fn parse_escape(buf: &[u8]) -> ParseOutcome {
         return ParseOutcome::Incomplete;
     }
     match buf[2] {
-        b'A' => ParseOutcome::Complete(Key::Up, 3),
-        b'B' => ParseOutcome::Complete(Key::Down, 3),
-        b'C' => ParseOutcome::Complete(Key::Right, 3),
-        b'D' => ParseOutcome::Complete(Key::Left, 3),
-        b'Z' => ParseOutcome::Complete(Key::ShiftTab, 3),
+        b'A' => ParseOutcome::Complete(InputEvent::Key(Key::Up), 3),
+        b'B' => ParseOutcome::Complete(InputEvent::Key(Key::Down), 3),
+        b'C' => ParseOutcome::Complete(InputEvent::Key(Key::Right), 3),
+        b'D' => ParseOutcome::Complete(InputEvent::Key(Key::Left), 3),
+        b'Z' => ParseOutcome::Complete(InputEvent::Key(Key::ShiftTab), 3),
         b'5' => parse_tilde_seq(buf, Key::PageUp),
         b'6' => parse_tilde_seq(buf, Key::PageDown),
         b'1' => parse_f5_seq(buf),
+        b'<' => parse_sgr_mouse(buf),
         _ => ParseOutcome::Invalid(2), // drop "\e[", reparse buf[2..] fresh
     }
 }
@@ -492,7 +550,7 @@ fn parse_tilde_seq(buf: &[u8], key: Key) -> ParseOutcome {
         return ParseOutcome::Incomplete;
     }
     if buf[3] == b'~' {
-        ParseOutcome::Complete(key, 4)
+        ParseOutcome::Complete(InputEvent::Key(key), 4)
     } else {
         ParseOutcome::Invalid(2)
     }
@@ -510,10 +568,194 @@ fn parse_f5_seq(buf: &[u8]) -> ParseOutcome {
         return ParseOutcome::Incomplete;
     }
     if buf[4] == b'~' {
-        ParseOutcome::Complete(Key::F5, 5)
+        ParseOutcome::Complete(InputEvent::Key(Key::F5), 5)
     } else {
         ParseOutcome::Invalid(2)
     }
+}
+
+/// Bound on how many bytes of a `<params>` body a SGR mouse sequence can
+/// grow to before giving up and declaring it garbage rather than waiting
+/// forever for a terminator that will never come — a hostile/binary stream
+/// on stdin must never make `KeyParser::feed` buffer unboundedly. Real SGR
+/// sequences are a handful of bytes (`"<0;999;999M"` is 12 including the
+/// `<`); 64 is generous headroom.
+const MAX_SGR_MOUSE_LEN: usize = 64;
+
+/// `"\e[<Cb;Cx;CyM"` (button press/drag/wheel) or `"\e[<Cb;Cx;Cym"`
+/// (release) — xterm's SGR extended mouse-reporting format, enabled by
+/// writing `\e[?1000h\e[?1006h` at shell start (see `main.rs`). `buf[0..3]`
+/// is already known to be `ESC [ <` (this fn is only reached from
+/// `parse_escape`'s `b'<'` arm). Scans for the terminating `M`/`m` byte;
+/// any OTHER byte in between that isn't a digit or `;` is garbage — dropped
+/// (consuming through the offending byte, so the same byte is never
+/// reparsed and can't cause an infinite loop), never a panic.
+fn parse_sgr_mouse(_buf: &[u8]) -> ParseOutcome {
+    // RED stub (packet/shell-mouse, test-first): SGR mouse decoding isn't
+    // implemented yet -- treat it the same as any other unrecognized CSI
+    // sequence for now.
+    ParseOutcome::Invalid(2)
+}
+
+/// Parse the `Cb;Cx;Cy` body (ASCII, already isolated from its `ESC [ <`
+/// prefix and `M`/`m` terminator by [`parse_sgr_mouse`]) into a
+/// [`MouseEvent`]. `None` for anything malformed: non-UTF8 body, wrong
+/// field count, a non-numeric field, or `Cx`/`Cy` of `0` (xterm's columns/
+/// rows are 1-based; `0` never occurs on the wire and isn't representable
+/// as a 0-based `usize` coordinate after subtracting 1).
+fn decode_sgr_body(body: &[u8], is_release: bool) -> Option<MouseEvent> {
+    let s = std::str::from_utf8(body).ok()?;
+    let mut parts = s.split(';');
+    let cb: u32 = parts.next()?.parse().ok()?;
+    let cx: usize = parts.next()?.parse().ok()?;
+    let cy: usize = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None; // an extra field -- not a well-formed SGR triple
+    }
+    if cx == 0 || cy == 0 {
+        return None;
+    }
+    let kind = decode_sgr_button(cb, is_release)?;
+    Some(MouseEvent { col: cx - 1, row: cy - 1, kind })
+}
+
+/// Decode `Cb` (the xterm SGR button/modifier byte) per the packet brief:
+/// `Cb & 64` set -> a wheel notch (`Cb & 1` picks up/down); `Cb & 32` set ->
+/// motion (a drag if a button is also held, a bare move otherwise — this
+/// build doesn't distinguish the two, see `MouseKind::Move`'s doc comment);
+/// otherwise `Cb & 0b11` names the button, and `is_release` (from the `M`
+/// vs `m` terminator) picks `Press`/`Release`. `Cb & 0b11 == 3` (the legacy
+/// X10 "no button" sentinel SGR mode has no need for, since SGR always uses
+/// an explicit `m` suffix for releases) is treated as `Move` too, rather
+/// than fabricating a button that was never actually pressed.
+fn decode_sgr_button(cb: u32, is_release: bool) -> Option<MouseKind> {
+    if cb & 64 != 0 {
+        return Some(if cb & 1 != 0 { MouseKind::WheelDown } else { MouseKind::WheelUp });
+    }
+    if cb & 32 != 0 {
+        return Some(MouseKind::Move);
+    }
+    let button = match cb & 0b11 {
+        0 => MouseButton::Left,
+        1 => MouseButton::Middle,
+        2 => MouseButton::Right,
+        _ => return Some(MouseKind::Move),
+    };
+    Some(if is_release { MouseKind::Release(button) } else { MouseKind::Press(button) })
+}
+
+// =========================================================================
+// gpm client protocol (Linux-console mouse daemon) — pure byte
+// (de)serialization only, unit-tested below. The live `/dev/gpmctl`
+// `UnixStream` connect/write/read loop is thin, manual glue that lives in
+// `main.rs` (no gpm daemon in CI, same "NOT end-to-end CI-testable" split
+// this whole module already applies to raw-mode termios).
+// =========================================================================
+
+/// `Gpm_Connect`'s exact wire layout (`gpm.h`; i486 target: little-endian,
+/// natural C alignment, `short`=2B `int`=4B) — four `u16`s then two `i32`s,
+/// NO padding (the `i32`s already start 4-byte aligned, at offset 8). Total
+/// 16 bytes, written once immediately after connecting to `/dev/gpmctl` —
+/// see `main.rs`'s connect call for the live write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpmConnect {
+    pub event_mask: u16,
+    pub default_mask: u16,
+    pub min_mod: u16,
+    pub max_mod: u16,
+    pub pid: i32,
+    pub vc: i32,
+}
+
+pub const GPM_CONNECT_SIZE: usize = 16;
+
+/// `0xFFFF` — "receive every event type" (`eventMask`); see `main.rs`'s
+/// connect call, which uses this for `event_mask` and `0` for the other
+/// three `u16` fields (`defaultMask`/`minMod`/`maxMod` — accept any
+/// modifier state, pass nothing through to a default handler).
+pub const GPM_EVENT_MASK_ALL: u16 = 0xFFFF;
+
+impl GpmConnect {
+    /// Serialize to the exact 16-byte little-endian record gpm expects on
+    /// the wire — see [`GpmConnect`]'s own doc comment for the byte layout.
+    pub fn to_bytes(&self) -> [u8; GPM_CONNECT_SIZE] {
+        // RED stub (packet/shell-mouse, test-first).
+        [0u8; GPM_CONNECT_SIZE]
+    }
+}
+
+/// `Gpm_Event`'s exact wire layout (`gpm.h`). Byte offsets (verified against
+/// the natural-alignment rules the packet brief names — `int`=4B `short`=2B,
+/// no `#pragma pack`):
+///
+/// | field       | offset | size | type |
+/// |-------------|--------|------|------|
+/// | buttons     | 0      | 1    | u8   |
+/// | modifiers   | 1      | 1    | u8   |
+/// | vc          | 2      | 2    | u16  |
+/// | dx          | 4      | 2    | i16  |
+/// | dy          | 6      | 2    | i16  |
+/// | x           | 8      | 2    | i16  |
+/// | y           | 10     | 2    | i16  |
+/// | event_type  | 12     | 4    | i32  |
+/// | clicks      | 16     | 4    | i32  |
+/// | margin      | 20     | 4    | i32  |
+/// | wdx         | 24     | 2    | i16  |
+/// | wdy         | 26     | 2    | i16  |
+///
+/// Total 28 bytes. No padding anywhere: the four `i16`s at offsets 4-11 land
+/// the following `i32` at offset 12, already 4-byte aligned; `wdx`/`wdy`
+/// tack directly onto the end after the third `i32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpmEvent {
+    pub buttons: u8,
+    pub modifiers: u8,
+    pub vc: u16,
+    pub dx: i16,
+    pub dy: i16,
+    pub x: i16,
+    pub y: i16,
+    pub event_type: i32,
+    pub clicks: i32,
+    pub margin: i32,
+    pub wdx: i16,
+    pub wdy: i16,
+}
+
+pub const GPM_EVENT_SIZE: usize = 28;
+
+pub const GPM_B_LEFT: u8 = 4;
+pub const GPM_B_MIDDLE: u8 = 2;
+pub const GPM_B_RIGHT: u8 = 1;
+
+pub const GPM_MOVE: i32 = 1;
+pub const GPM_DRAG: i32 = 2;
+pub const GPM_DOWN: i32 = 4;
+pub const GPM_UP: i32 = 8;
+
+/// Parse one fixed-size `Gpm_Event` record off `buf` (`main.rs`'s live
+/// socket read loop hands in exactly `GPM_EVENT_SIZE` bytes at a time —
+/// see its own doc comment). `None` for anything shorter than
+/// `GPM_EVENT_SIZE` — a short/garbled read (the totality contract the
+/// packet brief calls for: "a short/garbled record from the socket ->
+/// skip, no panic") rather than an out-of-bounds index panic.
+pub fn parse_gpm_event(_buf: &[u8]) -> Option<GpmEvent> {
+    // RED stub (packet/shell-mouse, test-first).
+    None
+}
+
+/// Map a decoded `Gpm_Event` to a [`MouseEvent`] in the SAME 0-based
+/// viewport-cell coordinate space [`parse_sgr_mouse`] produces (`x`/`y` are
+/// gpm's 1-based absolute cell position — see [`GpmEvent`]'s field table).
+/// A wheel record (`wdy != 0` — only present on gpm builds that report it,
+/// per the packet brief) takes priority over the button fields, mirroring a
+/// real mouse: a wheel notch and a button press never arrive as the same
+/// physical event. `x`/`y` of `0` or negative (shouldn't happen on a real
+/// gpm stream, but nothing stops a garbled record from claiming it) ->
+/// `None`, never an underflow panic on the `- 1`.
+pub fn gpm_event_to_mouse(_ev: &GpmEvent) -> Option<MouseEvent> {
+    // RED stub (packet/shell-mouse, test-first).
+    None
 }
 
 /// The outcome of an action: either nothing (a pure scroll/focus change,
@@ -622,6 +864,49 @@ fn enter_command(view: ViewState, page: &Page) -> Command {
                 _ => Command::None,
             }
         }
+    }
+}
+
+/// Scroll amount (in cell rows) for one wheel notch — "a few lines per
+/// notch" (packet brief), matching common terminal-emulator/browser feel
+/// without needing per-notch acceleration. Documented choice, DECISIONS-
+/// worthy (not derived from anything else in this codebase).
+const WHEEL_SCROLL_LINES: i64 = 3;
+
+/// The pure mouse counterpart to [`apply_key`]: given a [`MouseEvent`] in
+/// VIEWPORT cell coordinates and the current view over `page`, return the
+/// next `ViewState` and any `Command` the thin I/O loop should carry out.
+/// Total over any `ViewState`/`Page`/`MouseEvent` — an empty page, an
+/// off-grid `row`/`col`, a click on the status line — see each branch/
+/// helper's own comment.
+pub fn apply_mouse(_ev: MouseEvent, view: ViewState, _page: &Page) -> (ViewState, Command) {
+    // RED stub (packet/shell-mouse, test-first).
+    (view, Command::None)
+}
+
+/// A left click/press at viewport `(col, row)`: `row >= view.rows` is the
+/// status line `render_frame` always draws below the content window (or
+/// further off-grid still) — ignored (documented: "clicks on the status
+/// line row are ignored"). Otherwise translate to a PAGE row via
+/// `view.scroll_row` (col unchanged, `saturating_add` so an adversarial/
+/// huge `row` can't overflow) and `page.hit_test` it: a hit sets
+/// `view.focus` and activates it exactly like `Enter` (`enter_command`, the
+/// SAME follow/submit path `apply_key(Key::Enter, ...)` uses); a miss
+/// (empty space) leaves `view` untouched entirely — no focus change, no
+/// command (documented choice, brief: "your call" — a stray click on empty
+/// space never loses whatever was already focused, e.g. mid-form).
+fn mouse_click(col: usize, row: usize, view: ViewState, page: &Page) -> (ViewState, Command) {
+    if row >= view.rows {
+        return (view, Command::None);
+    }
+    let page_row = view.scroll_row.saturating_add(row);
+    match page.hit_test(col, page_row) {
+        Some(idx) => {
+            let next = ViewState { focus: Some(idx), ..view };
+            let cmd = enter_command(next, page);
+            (next, cmd)
+        }
+        None => (view, Command::None),
     }
 }
 
@@ -949,61 +1234,71 @@ mod tests {
 
     // --------------------------------------------------------- key parsing
 
+    fn keys(events: Vec<InputEvent>) -> Vec<Key> {
+        events
+            .into_iter()
+            .map(|e| match e {
+                InputEvent::Key(k) => k,
+                InputEvent::Mouse(m) => panic!("expected only Key events, got a Mouse event: {m:?}"),
+            })
+            .collect()
+    }
+
     #[test]
     fn parses_arrow_keys() {
         let mut p = KeyParser::new();
-        assert_eq!(p.feed(b"\x1b[A"), vec![Key::Up]);
-        assert_eq!(p.feed(b"\x1b[B"), vec![Key::Down]);
-        assert_eq!(p.feed(b"\x1b[C"), vec![Key::Right]);
-        assert_eq!(p.feed(b"\x1b[D"), vec![Key::Left]);
+        assert_eq!(keys(p.feed(b"\x1b[A")), vec![Key::Up]);
+        assert_eq!(keys(p.feed(b"\x1b[B")), vec![Key::Down]);
+        assert_eq!(keys(p.feed(b"\x1b[C")), vec![Key::Right]);
+        assert_eq!(keys(p.feed(b"\x1b[D")), vec![Key::Left]);
     }
 
     #[test]
     fn parses_page_up_down_and_shift_tab_and_f5() {
         let mut p = KeyParser::new();
-        assert_eq!(p.feed(b"\x1b[5~"), vec![Key::PageUp]);
-        assert_eq!(p.feed(b"\x1b[6~"), vec![Key::PageDown]);
-        assert_eq!(p.feed(b"\x1b[Z"), vec![Key::ShiftTab]);
-        assert_eq!(p.feed(b"\x1b[15~"), vec![Key::F5]);
+        assert_eq!(keys(p.feed(b"\x1b[5~")), vec![Key::PageUp]);
+        assert_eq!(keys(p.feed(b"\x1b[6~")), vec![Key::PageDown]);
+        assert_eq!(keys(p.feed(b"\x1b[Z")), vec![Key::ShiftTab]);
+        assert_eq!(keys(p.feed(b"\x1b[15~")), vec![Key::F5]);
     }
 
     #[test]
     fn parses_tab_enter_backspace_and_plain_chars() {
         let mut p = KeyParser::new();
-        assert_eq!(p.feed(b"\t"), vec![Key::Tab]);
-        assert_eq!(p.feed(b"\r"), vec![Key::Enter]);
-        assert_eq!(p.feed(b"\n"), vec![Key::Enter]);
-        assert_eq!(p.feed(&[0x7f]), vec![Key::Backspace]);
-        assert_eq!(p.feed(&[0x08]), vec![Key::Backspace]);
-        assert_eq!(p.feed(b"q"), vec![Key::Char('q')]);
-        assert_eq!(p.feed(b"r"), vec![Key::Char('r')]);
-        assert_eq!(p.feed(&[0x03]), vec![Key::CtrlC]);
+        assert_eq!(keys(p.feed(b"\t")), vec![Key::Tab]);
+        assert_eq!(keys(p.feed(b"\r")), vec![Key::Enter]);
+        assert_eq!(keys(p.feed(b"\n")), vec![Key::Enter]);
+        assert_eq!(keys(p.feed(&[0x7f])), vec![Key::Backspace]);
+        assert_eq!(keys(p.feed(&[0x08])), vec![Key::Backspace]);
+        assert_eq!(keys(p.feed(b"q")), vec![Key::Char('q')]);
+        assert_eq!(keys(p.feed(b"r")), vec![Key::Char('r')]);
+        assert_eq!(keys(p.feed(&[0x03])), vec![Key::CtrlC]);
     }
 
     #[test]
     fn a_partial_escape_sequence_split_across_two_feeds_still_resolves() {
         let mut p = KeyParser::new();
-        assert_eq!(p.feed(b"\x1b"), Vec::<Key>::new(), "buffered, waiting for more");
-        assert_eq!(p.feed(b"[A"), vec![Key::Up]);
+        assert_eq!(p.feed(b"\x1b"), Vec::<InputEvent>::new(), "buffered, waiting for more");
+        assert_eq!(keys(p.feed(b"[A")), vec![Key::Up]);
     }
 
     #[test]
     fn a_partial_tilde_sequence_split_byte_by_byte_still_resolves() {
         let mut p = KeyParser::new();
-        assert_eq!(p.feed(b"\x1b"), Vec::<Key>::new());
-        assert_eq!(p.feed(b"["), Vec::<Key>::new());
-        assert_eq!(p.feed(b"1"), Vec::<Key>::new());
-        assert_eq!(p.feed(b"5"), Vec::<Key>::new());
-        assert_eq!(p.feed(b"~"), vec![Key::F5]);
+        assert_eq!(p.feed(b"\x1b"), Vec::<InputEvent>::new());
+        assert_eq!(p.feed(b"["), Vec::<InputEvent>::new());
+        assert_eq!(p.feed(b"1"), Vec::<InputEvent>::new());
+        assert_eq!(p.feed(b"5"), Vec::<InputEvent>::new());
+        assert_eq!(keys(p.feed(b"~")), vec![Key::F5]);
     }
 
     #[test]
     fn a_lone_escape_with_nothing_following_stays_buffered_not_a_panic() {
         let mut p = KeyParser::new();
-        assert_eq!(p.feed(b"\x1b"), Vec::<Key>::new());
+        assert_eq!(p.feed(b"\x1b"), Vec::<InputEvent>::new());
         // Nothing more ever arrives -- must not panic on repeated feeds of
         // more of the same, or an empty feed.
-        assert_eq!(p.feed(b""), Vec::<Key>::new());
+        assert_eq!(p.feed(b""), Vec::<InputEvent>::new());
     }
 
     #[test]
@@ -1013,9 +1308,11 @@ mod tests {
         // recognized sequence -- must terminate (no infinite loop) and
         // never panic.
         let garbage: Vec<u8> = (0u8..=255).collect();
-        let keys = p.feed(&garbage);
-        for k in keys {
-            assert!(!matches!(k, Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::F5 | Key::ShiftTab));
+        let events = p.feed(&garbage);
+        for e in events {
+            if let InputEvent::Key(k) = e {
+                assert!(!matches!(k, Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::F5 | Key::ShiftTab));
+            }
         }
     }
 
@@ -1025,7 +1322,68 @@ mod tests {
         // "\e[Q" isn't a recognized sequence; the ESC+'[' prefix is
         // discarded and 'Q' is reparsed as a plain character, matching real
         // terminal input parsers (never silently drops real keystrokes).
-        assert_eq!(p.feed(b"\x1b[Q"), vec![Key::Char('Q')]);
+        assert_eq!(keys(p.feed(b"\x1b[Q")), vec![Key::Char('Q')]);
+    }
+
+    // ------------------------------------------------------- mouse parsing
+
+    #[test]
+    fn parses_sgr_mouse_left_press() {
+        let mut p = KeyParser::new();
+        let events = p.feed(b"\x1b[<0;10;5M");
+        assert_eq!(events, vec![InputEvent::Mouse(MouseEvent { col: 9, row: 4, kind: MouseKind::Press(MouseButton::Left) })]);
+    }
+
+    #[test]
+    fn parses_sgr_mouse_wheel_up() {
+        let mut p = KeyParser::new();
+        let events = p.feed(b"\x1b[<64;3;2M");
+        assert_eq!(events, vec![InputEvent::Mouse(MouseEvent { col: 2, row: 1, kind: MouseKind::WheelUp })]);
+    }
+
+    #[test]
+    fn parses_sgr_mouse_wheel_down() {
+        let mut p = KeyParser::new();
+        let events = p.feed(b"\x1b[<65;3;2M");
+        assert_eq!(events, vec![InputEvent::Mouse(MouseEvent { col: 2, row: 1, kind: MouseKind::WheelDown })]);
+    }
+
+    #[test]
+    fn parses_sgr_mouse_right_press() {
+        let mut p = KeyParser::new();
+        let events = p.feed(b"\x1b[<2;1;1M");
+        assert_eq!(events, vec![InputEvent::Mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::Press(MouseButton::Right) })]);
+    }
+
+    #[test]
+    fn parses_sgr_mouse_release() {
+        let mut p = KeyParser::new();
+        let events = p.feed(b"\x1b[<0;10;5m");
+        assert_eq!(events, vec![InputEvent::Mouse(MouseEvent { col: 9, row: 4, kind: MouseKind::Release(MouseButton::Left) })]);
+    }
+
+    #[test]
+    fn malformed_sgr_mouse_sequence_is_dropped_not_panicking() {
+        let mut p = KeyParser::new();
+        let events = p.feed(b"\x1b[<abc");
+        assert!(events.iter().all(|e| !matches!(e, InputEvent::Mouse(_))), "malformed SGR sequence must never produce a mouse event: {events:?}");
+    }
+
+    #[test]
+    fn a_partial_sgr_mouse_sequence_split_across_two_feeds_still_resolves() {
+        let mut p = KeyParser::new();
+        assert_eq!(p.feed(b"\x1b[<0;10;"), Vec::<InputEvent>::new(), "buffered, waiting for the rest");
+        let events = p.feed(b"5M");
+        assert_eq!(events, vec![InputEvent::Mouse(MouseEvent { col: 9, row: 4, kind: MouseKind::Press(MouseButton::Left) })]);
+    }
+
+    #[test]
+    fn an_unterminated_sgr_mouse_sequence_past_the_length_cap_is_dropped_not_panicking() {
+        let mut p = KeyParser::new();
+        let mut junk = b"\x1b[<".to_vec();
+        junk.extend(std::iter::repeat(b'9').take(200)); // digits forever, no M/m terminator
+        let events = p.feed(&junk);
+        assert!(events.iter().all(|e| !matches!(e, InputEvent::Mouse(_))));
     }
 
     // --------------------------------------------------------------- frame
@@ -1101,5 +1459,212 @@ mod tests {
         let (_, cmd) = apply_key(Key::Enter, view, &page);
         assert!(matches!(cmd, Command::None));
         let _ = render_frame(&page, &view); // must not panic either
+    }
+
+    // ------------------------------------------------------------- gpm wire
+
+    #[test]
+    fn gpm_connect_serializes_to_the_exact_16_byte_record() {
+        let c = GpmConnect { event_mask: GPM_EVENT_MASK_ALL, default_mask: 0, min_mod: 0, max_mod: 0, pid: 1234, vc: 1 };
+        let bytes = c.to_bytes();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&GPM_EVENT_MASK_ALL.to_le_bytes());
+        expected.extend_from_slice(&0u16.to_le_bytes());
+        expected.extend_from_slice(&0u16.to_le_bytes());
+        expected.extend_from_slice(&0u16.to_le_bytes());
+        expected.extend_from_slice(&1234i32.to_le_bytes());
+        expected.extend_from_slice(&1i32.to_le_bytes());
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[..], &expected[..]);
+    }
+
+    /// Hand-build a `Gpm_Event` byte record field-by-field at the exact
+    /// offsets [`GpmEvent`]'s doc comment documents, rather than going
+    /// through `GpmEvent`/a serializer (there is no client-side serializer —
+    /// only gpmd ever writes these) -- this is what actually pins the wire
+    /// layout down.
+    fn build_gpm_event_bytes(buttons: u8, event_type: i32, x: i16, y: i16, wdy: i16) -> [u8; GPM_EVENT_SIZE] {
+        let mut buf = [0u8; GPM_EVENT_SIZE];
+        buf[0] = buttons;
+        buf[1] = 0; // modifiers
+        buf[2..4].copy_from_slice(&1u16.to_le_bytes()); // vc
+        buf[4..6].copy_from_slice(&0i16.to_le_bytes()); // dx
+        buf[6..8].copy_from_slice(&0i16.to_le_bytes()); // dy
+        buf[8..10].copy_from_slice(&x.to_le_bytes());
+        buf[10..12].copy_from_slice(&y.to_le_bytes());
+        buf[12..16].copy_from_slice(&event_type.to_le_bytes());
+        buf[16..20].copy_from_slice(&1i32.to_le_bytes()); // clicks
+        buf[20..24].copy_from_slice(&0i32.to_le_bytes()); // margin
+        buf[24..26].copy_from_slice(&0i16.to_le_bytes()); // wdx
+        buf[26..28].copy_from_slice(&wdy.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn gpm_event_parses_a_hand_built_left_down_record() {
+        let buf = build_gpm_event_bytes(GPM_B_LEFT, GPM_DOWN, 10, 5, 0);
+        let ev = parse_gpm_event(&buf).expect("a well-formed 28-byte record parses");
+        assert_eq!(ev.buttons, GPM_B_LEFT);
+        assert_eq!(ev.x, 10);
+        assert_eq!(ev.y, 5);
+        assert_eq!(ev.event_type, GPM_DOWN);
+        assert_eq!(ev.wdy, 0);
+
+        let mouse = gpm_event_to_mouse(&ev).expect("a left-down record maps to a MouseEvent");
+        assert_eq!(mouse, MouseEvent { col: 9, row: 4, kind: MouseKind::Press(MouseButton::Left) });
+    }
+
+    #[test]
+    fn gpm_event_wheel_record_maps_to_wheel_up_and_down() {
+        let up = build_gpm_event_bytes(0, GPM_MOVE, 3, 3, 1);
+        let ev_up = parse_gpm_event(&up).unwrap();
+        assert_eq!(gpm_event_to_mouse(&ev_up).unwrap().kind, MouseKind::WheelUp);
+
+        let down = build_gpm_event_bytes(0, GPM_MOVE, 3, 3, -1);
+        let ev_down = parse_gpm_event(&down).unwrap();
+        assert_eq!(gpm_event_to_mouse(&ev_down).unwrap().kind, MouseKind::WheelDown);
+    }
+
+    #[test]
+    fn gpm_event_too_short_record_is_skipped_not_panicking() {
+        let buf = [0u8; 10];
+        assert_eq!(parse_gpm_event(&buf), None);
+        let almost = [0u8; GPM_EVENT_SIZE - 1];
+        assert_eq!(parse_gpm_event(&almost), None);
+    }
+
+    #[test]
+    fn gpm_event_with_no_button_and_no_wheel_maps_to_no_mouse_event_on_a_down_type() {
+        // A DOWN-typed record but `buttons == 0` (nothing pressed, hostile/
+        // garbled) has no meaningful button to report -- must not
+        // fabricate one.
+        let buf = build_gpm_event_bytes(0, GPM_DOWN, 1, 1, 0);
+        let ev = parse_gpm_event(&buf).unwrap();
+        assert_eq!(gpm_event_to_mouse(&ev), None);
+    }
+
+    #[test]
+    fn gpm_event_zero_or_negative_coordinates_never_underflow_panic() {
+        let buf = build_gpm_event_bytes(GPM_B_LEFT, GPM_DOWN, 0, 0, 0);
+        let ev = parse_gpm_event(&buf).unwrap();
+        assert_eq!(gpm_event_to_mouse(&ev), None);
+    }
+
+    // ------------------------------------------------------------ apply_mouse
+
+    #[test]
+    fn apply_mouse_wheel_scrolls_a_few_lines_and_clamps() {
+        let html: String = (0..100).map(|i| format!("<p>line {i}</p>")).collect();
+        let page = build_page(&html, 40, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5 };
+        let (next, cmd) = apply_mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::WheelDown }, view, &page);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(next.scroll_row, WHEEL_SCROLL_LINES as usize);
+
+        let (back, _) = apply_mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::WheelUp }, next, &page);
+        assert_eq!(back.scroll_row, 0);
+        let (still_zero, _) = apply_mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::WheelUp }, back, &page);
+        assert_eq!(still_zero.scroll_row, 0, "must clamp at zero, not underflow");
+
+        let max = page.grid_rows().saturating_sub(5);
+        let at_bottom = ViewState { scroll_row: max, focus: None, cols: 40, rows: 5 };
+        let (after, _) = apply_mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::WheelDown }, at_bottom, &page);
+        assert_eq!(after.scroll_row, max, "must clamp at max, not overshoot");
+    }
+
+    #[test]
+    fn apply_mouse_click_on_a_link_focuses_and_navigates() {
+        let html = r#"<a href="/next">Next</a>"#;
+        let page = build_page(html, 80, "http://example.com/dir/page.html");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let (c, r, _, _) = page.focusables[0].rect_cells;
+        let ev = MouseEvent { col: c, row: r, kind: MouseKind::Press(MouseButton::Left) };
+        let (next, cmd) = apply_mouse(ev, view, &page);
+        assert_eq!(next.focus, Some(0));
+        match cmd {
+            Command::Navigate(url) => assert_eq!(url.as_str(), "http://example.com/next"),
+            other => panic!("expected Navigate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_mouse_click_on_a_submit_control_builds_the_request_accounting_for_scroll_offset() {
+        let html: String = (0..50).map(|i| format!("<p>line {i}</p>")).collect::<String>()
+            + r#"<form action="/search" method="get"><input type="text" name="q"><input type="submit" name="go" value="Go"></form>"#;
+        let page = build_page(&html, 80, "http://example.com/");
+        let submit_idx = page.focusables.len() - 1;
+        let (c, r, _, _) = page.focusables[submit_idx].rect_cells;
+        // Scroll so the control is a few rows down in the viewport (not at
+        // viewport row 0) -- this is the whole point of the test: the click
+        // coordinate is in VIEWPORT space and must be translated through
+        // `scroll_row` to the right PAGE row before hit-testing.
+        let scroll_row = r.saturating_sub(2);
+        let view = ViewState { scroll_row, focus: None, cols: 80, rows: 24 };
+        let viewport_row = r - scroll_row;
+        let ev = MouseEvent { col: c, row: viewport_row, kind: MouseKind::Press(MouseButton::Left) };
+        let (next, cmd) = apply_mouse(ev, view, &page);
+        assert_eq!(next.focus, Some(submit_idx));
+        match cmd {
+            Command::Submit(req) => assert_eq!(req.url.as_str(), "http://example.com/search?q=&go=Go"),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_mouse_click_on_empty_space_is_a_no_op() {
+        let html = r#"<a href="/x">link</a>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24 };
+        let ev = MouseEvent { col: 70, row: 20, kind: MouseKind::Press(MouseButton::Left) };
+        let (next, cmd) = apply_mouse(ev, view, &page);
+        assert_eq!(next, view, "no focus/scroll change on a miss");
+        assert!(matches!(cmd, Command::None));
+    }
+
+    #[test]
+    fn apply_mouse_click_on_the_status_line_row_is_ignored() {
+        let html = r#"<a href="/x">link</a>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 5 };
+        // `view.rows` is the content-row count; row == view.rows is the
+        // status line render_frame draws just below it.
+        let ev = MouseEvent { col: 0, row: 5, kind: MouseKind::Press(MouseButton::Left) };
+        let (next, cmd) = apply_mouse(ev, view, &page);
+        assert_eq!(next, view);
+        assert!(matches!(cmd, Command::None));
+    }
+
+    #[test]
+    fn apply_mouse_off_grid_coordinates_never_panic() {
+        let page = build_page(r#"<a href="/x">l</a>"#, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let ev = MouseEvent { col: usize::MAX, row: usize::MAX, kind: MouseKind::Press(MouseButton::Left) };
+        let (_, cmd) = apply_mouse(ev, view, &page);
+        assert!(matches!(cmd, Command::None));
+
+        // A huge column but an in-viewport row: hit_test must still just
+        // report "no match" rather than panic on the bounds comparison.
+        let ev2 = MouseEvent { col: usize::MAX, row: 0, kind: MouseKind::Press(MouseButton::Left) };
+        let (_, cmd2) = apply_mouse(ev2, view, &page);
+        assert!(matches!(cmd2, Command::None));
+    }
+
+    #[test]
+    fn apply_mouse_right_and_middle_press_and_release_and_move_are_no_ops() {
+        let html = r#"<a href="/x">link</a>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let (c, r, _, _) = page.focusables[0].rect_cells;
+        for kind in [
+            MouseKind::Press(MouseButton::Right),
+            MouseKind::Press(MouseButton::Middle),
+            MouseKind::Release(MouseButton::Left),
+            MouseKind::Move,
+        ] {
+            let ev = MouseEvent { col: c, row: r, kind };
+            let (next, cmd) = apply_mouse(ev, view, &page);
+            assert_eq!(next, view, "{kind:?} must not change view");
+            assert!(matches!(cmd, Command::None), "{kind:?} must be a no-op command");
+        }
     }
 }
