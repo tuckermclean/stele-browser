@@ -39,6 +39,22 @@ fn table(children: Vec<LayoutNode>) -> LayoutNode {
     LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children }
 }
 
+/// Wrap a table in a plain block container, matching a real document's
+/// shape (`<body><table>...</table></body>` — a table is a normal
+/// block-level child, not itself the document root). Geometry assertions
+/// use this rather than passing the bare table as `layout()`'s root: the
+/// root box is unconditionally viewport-stretched (see `block::layout_tree`'s
+/// "root itself is stretched to the viewport width" step, a UA-stylesheet-
+/// less-`<html>` documented behavior) — stretching a *table's own* box that
+/// way would fix its outer size at the full viewport width regardless of
+/// its solved content width, which is correct only when a table really is
+/// the root (an edge case `layout_table`'s totality tests exercise on
+/// purpose) and would otherwise make geometry assertions about the table's
+/// OWN box ambiguous with the (wider) stretched viewport box.
+fn root_with(table_node: LayoutNode) -> LayoutNode {
+    LayoutNode { style: styled(Display::Block), content: BoxContent::Container, children: vec![table_node] }
+}
+
 fn box_fragments(fragments: &[Fragment]) -> Vec<&Fragment> {
     fragments.iter().filter(|f| matches!(f.kind, FragmentKind::Box { .. })).collect()
 }
@@ -67,10 +83,10 @@ fn assert_all_finite_nonneg(fragments: &[Fragment]) {
 /// rows), and rows stack (row1 sits below row0).
 #[test]
 fn plain_2x2_table_columns_align_across_rows() {
-    let t = table(vec![
+    let t = root_with(table(vec![
         row(vec![cell(1, 1, "aa"), cell(1, 1, "bbbb")]),
         row(vec![cell(1, 1, "c"), cell(1, 1, "d")]),
-    ]);
+    ]));
     let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
     assert_all_finite_nonneg(&fragments);
 
@@ -92,78 +108,84 @@ fn plain_2x2_table_columns_align_across_rows() {
     assert_eq!(c.rect.origin.y, d.rect.origin.y, "row1's two cells share a y origin");
 }
 
-/// A colspan=2 cell's Box fragment spans the summed width of its two columns
-/// (matching the two single-column cells below it in the next row).
+/// A colspan=2 cell's Box fragment spans the summed width of its two
+/// columns. Cell text is chosen so every column width is fixed by an
+/// unsplittable single word (min == max, no proportional-distribution
+/// arithmetic in play — that math is `layout::table::solve_table`'s own
+/// unit-tested territory; this integration test only needs to prove the
+/// WIRING): col0's width is pinned by "aaaaaaaaaa" (80px, 8px/char
+/// monospace), col1's by "b" (8px) -- both distinct from every other box's
+/// width in this tree, so they're found unambiguously. The header's own
+/// text ("TOTAL", 40px) is well under col0+col1 (88px), so it needs no
+/// excess-width distribution and the columns stay exactly at their
+/// row-1-derived widths.
 #[test]
 fn colspan_cell_box_spans_summed_column_width() {
-    let t = table(vec![
-        row(vec![cell(2, 1, "spanning header")]),
+    let t = root_with(table(vec![
+        row(vec![cell(2, 1, "TOTAL")]),
         row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")]),
-    ]);
+    ]));
     let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
     assert_all_finite_nonneg(&fragments);
     let boxes = box_fragments(&fragments);
 
-    // Find the two narrow row-1 cell boxes by width ordering: the wider one
-    // (10 chars) and the narrow one (1 char) -- table box + header box +
-    // two cell boxes. We instead locate via text fragments' rects and match
-    // widths against box fragments containing them.
-    let texts = text_fragments(&fragments);
-    let a = *texts.iter().find(|f| text_of(f) == "aaaaaaaaaa").expect("present");
-    let b = *texts.iter().find(|f| text_of(f) == "b").expect("present");
-    let header = *texts.iter().find(|f| text_of(f) == "spanning" || text_of(f).contains("spanning")).expect("present");
+    let col0_box = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1_box = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    // A colspan-2 cell's rect also includes the one border-spacing gap
+    // *between* its two spanned columns (`layout::table::solve_table`'s own
+    // `cell_rects` formula: span width = summed column widths + (colspan-1)
+    // gaps) -- `block::BORDER_SPACING_X` (private to that module) is `8.0`
+    // px, mirrored here rather than imported.
+    const BORDER_SPACING_X: f32 = 8.0;
+    let summed = col0_box.rect.size.w + col1_box.rect.size.w + BORDER_SPACING_X;
 
-    // The spanning header cell's box should be exactly as wide as
-    // col0_width + col1_width (i.e. reach at least to where col1 ends).
-    // Find the two single-column cell boxes (smallest boxes containing the
-    // narrow text) by rect matches.
-    let col0_box = boxes
-        .iter()
-        .find(|bx| bx.rect.origin.x <= a.rect.origin.x && bx.rect.origin.x + bx.rect.size.w >= a.rect.origin.x + a.rect.size.w && bx.rect.origin.y > header.rect.origin.y)
-        .expect("col0 cell box present");
-    let col1_box = boxes
-        .iter()
-        .find(|bx| bx.rect.origin.x <= b.rect.origin.x && bx.rect.origin.x + bx.rect.size.w >= b.rect.origin.x + b.rect.size.w && bx.rect.origin.y > header.rect.origin.y && bx.rect.origin.x > col0_box.rect.origin.x)
-        .expect("col1 cell box present");
-
+    // The header cell's box and the table's own outer box are BOTH exactly
+    // `summed` wide (the table shrink-wraps to its content) -- disambiguate
+    // by height: the header only covers row 0 (one line tall), while the
+    // table's own box covers both rows (two lines tall, since col0/col1's
+    // cells are unambiguously one line each here).
+    let row_h = col0_box.rect.size.h;
+    assert_eq!(col1_box.rect.size.h, row_h, "col0/col1 share a single-line row height");
     let header_box = boxes
         .iter()
-        .find(|bx| bx.rect.origin.x <= header.rect.origin.x && bx.rect.origin.y <= header.rect.origin.y && bx.rect.size.w > col0_box.rect.size.w && bx.rect.size.w > col1_box.rect.size.w)
-        .expect("spanning header box present");
+        .find(|bx| (bx.rect.size.w - summed).abs() < 0.5 && (bx.rect.size.h - row_h).abs() < 0.5)
+        .expect("spanning header box (one row tall, summed width) present");
+    let table_box = boxes
+        .iter()
+        .find(|bx| (bx.rect.size.w - summed).abs() < 0.5 && bx.rect.size.h > row_h + 0.5)
+        .expect("table's own box (two rows tall, summed width) present");
 
-    let summed = col0_box.rect.size.w + col1_box.rect.size.w;
     assert!((header_box.rect.size.w - summed).abs() < 0.01, "header {} vs summed {}", header_box.rect.size.w, summed);
+    assert!((table_box.rect.size.h - 2.0 * row_h).abs() < 0.5, "table height should be two row heights");
 }
 
 /// A rowspan=2 cell's Box fragment spans the summed height of the two rows
 /// it covers.
 #[test]
 fn rowspan_cell_box_spans_summed_row_height() {
-    let t = table(vec![
-        row(vec![cell(1, 2, "tall"), cell(1, 1, "top")]),
-        row(vec![cell(1, 1, "bottom")]),
-    ]);
+    // col0 ("TALL", 4 chars) is pinned to 32px by the rowspan cell itself
+    // (the only col0 cell). col1 is pinned to 48px by "BOTTOM" (6 chars) --
+    // "TOP" (3 chars, 24px) is narrower so contributes no baseline excess.
+    // 32 is unique across every box in this tree (col1's two cells share
+    // 48px, the table/root are wider still), so it unambiguously identifies
+    // the rowspan cell's own box.
+    let t = root_with(table(vec![
+        row(vec![cell(1, 2, "TALL"), cell(1, 1, "TOP")]),
+        row(vec![cell(1, 1, "BOTTOM")]),
+    ]));
     let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
     assert_all_finite_nonneg(&fragments);
     let boxes = box_fragments(&fragments);
-    let texts = text_fragments(&fragments);
 
-    let tall = *texts.iter().find(|f| text_of(f) == "tall").expect("present");
-    let top = *texts.iter().find(|f| text_of(f) == "top").expect("present");
-    let bottom = *texts.iter().find(|f| text_of(f) == "bottom").expect("present");
-
-    let top_box = boxes
-        .iter()
-        .find(|bx| bx.rect.origin.y <= top.rect.origin.y && bx.rect.origin.x <= top.rect.origin.x && bx.rect.size.w < 200.0 && bx.rect.origin.x > tall.rect.origin.x - 1.0)
-        .expect("top cell box present");
-    let bottom_box = boxes
-        .iter()
-        .find(|bx| bx.rect.origin.y > top_box.rect.origin.y && bx.rect.origin.x <= bottom.rect.origin.x)
-        .expect("bottom cell box present");
-    let tall_box = boxes
-        .iter()
-        .find(|bx| bx.rect.origin.x <= tall.rect.origin.x && bx.rect.size.h > top_box.rect.size.h)
-        .expect("tall (rowspan) cell box present");
+    let tall_box = *boxes.iter().find(|bx| (bx.rect.size.w - 32.0).abs() < 0.5).expect("tall (32px) box present");
+    let col1_boxes: Vec<&Fragment> = boxes.iter().filter(|bx| (bx.rect.size.w - 48.0).abs() < 0.5).copied().collect();
+    assert_eq!(col1_boxes.len(), 2, "expected exactly the top and bottom col1 cell boxes at 48px");
+    let (top_box, bottom_box) = if col1_boxes[0].rect.origin.y < col1_boxes[1].rect.origin.y {
+        (col1_boxes[0], col1_boxes[1])
+    } else {
+        (col1_boxes[1], col1_boxes[0])
+    };
+    assert!(top_box.rect.origin.y < bottom_box.rect.origin.y, "top above bottom");
 
     let summed = top_box.rect.size.h + bottom_box.rect.size.h;
     assert!((tall_box.rect.size.h - summed).abs() < 0.01, "tall {} vs summed {}", tall_box.rect.size.h, summed);

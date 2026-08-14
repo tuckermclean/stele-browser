@@ -179,6 +179,27 @@ else
     bad "A3: tty dump of $FIXTURE_BASIC differs from $GOLDEN_TTY"
     sed 's/^/    /' /tmp/stele_a3.diff
   fi
+
+  # A3b — the table-layout packet's own tty golden (fixtures/tables.html):
+  # same host binary (already built above), same blessing discipline. Kept
+  # as its own block (not folded into the basic-golden if/elif chain above)
+  # so a failure/bless of one fixture doesn't short-circuit the other.
+  GOLDEN_TTY_TABLES="goldens/tables.tty.txt"
+  FIXTURE_TABLES="fixtures/tables.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3b: host binary still not found at $HOST_BIN"
+  elif ! out_tables="$("$HOST_BIN" --headless --dump-text "$FIXTURE_TABLES" 2>/tmp/stele_a3b.err)"; then
+    bad "A3b: stele --headless --dump-text crashed on $FIXTURE_TABLES"
+    sed 's/^/    /' /tmp/stele_a3b.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_tables" > "$GOLDEN_TTY_TABLES"
+    pass "A3b: blessed tables tty golden -> $GOLDEN_TTY_TABLES (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_TABLES" <(printf '%s\n' "$out_tables") >/tmp/stele_a3b.diff 2>&1; then
+    pass "A3b: tty dump of $FIXTURE_TABLES matches golden"
+  else
+    bad "A3b: tty dump of $FIXTURE_TABLES differs from $GOLDEN_TTY_TABLES"
+    sed 's/^/    /' /tmp/stele_a3b.diff
+  fi
 fi
 pend "A3: mem-Surface PNG goldens — P9/M4"
 
