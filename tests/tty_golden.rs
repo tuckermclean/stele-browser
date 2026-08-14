@@ -9,6 +9,10 @@
 //! instead of `file://`, matching how every other fixture-driven test in
 //! this repo avoids IO) — `accept.sh`'s A3 check separately drives the real
 //! compiled binary end to end, including the fetch layer.
+//!
+//! `fixtures/tables.html`/`goldens/tables.tty.txt` (table-layout packet, M3)
+//! are the same discipline, ALSO PROPOSED, ALSO not self-blessed — see that
+//! packet's report.
 
 use stele::backend::tty;
 use stele::dom;
@@ -16,6 +20,7 @@ use stele::layout::{self, box_tree::build_box_tree, Size};
 use stele::style::cascade;
 
 const BASIC_HTML: &str = include_str!("../fixtures/basic.html");
+const TABLES_HTML: &str = include_str!("../fixtures/tables.html");
 const COLS: usize = 80;
 
 fn dump(html: &str, cols: usize) -> String {
@@ -37,6 +42,13 @@ fn basic_fixture_tty_dump_matches_golden() {
     // `TextGrid::to_text` never emits one (no trailing blank line), so trim
     // the golden's own trailing newline before comparing.
     assert_eq!(actual, golden.trim_end_matches('\n'), "tty dump of fixtures/basic.html changed from the PROPOSED golden");
+}
+
+#[test]
+fn tables_fixture_tty_dump_matches_golden() {
+    let actual = dump(TABLES_HTML, COLS);
+    let golden = include_str!("../goldens/tables.tty.txt");
+    assert_eq!(actual, golden.trim_end_matches('\n'), "tty dump of fixtures/tables.html changed from the PROPOSED golden");
 }
 
 #[test]
