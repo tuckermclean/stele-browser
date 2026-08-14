@@ -86,6 +86,31 @@ impl BitmapFont {
             0.0
         }
     }
+
+    /// Public wrapper over the private design-unit-to-pixel [`Self::scale`]
+    /// factor (M4, pixel foundation) — exposed for the rasterizer
+    /// (`surface::mem::MemSurface::draw_text`), which needs the exact same
+    /// `size_px -> scale` mapping the `Metrics` methods use internally,
+    /// without duplicating (and risking drifting from) `scale`'s totality
+    /// guarantees (always finite, `0.0` for degenerate `size_px`).
+    pub fn glyph_scale(&self, size_px: f32) -> f32 {
+        self.scale(size_px)
+    }
+
+    /// Look up the 8x8 glyph bitmap for `ch` (M4, pixel foundation): one
+    /// `u8` per pixel row, bit 0 (LSB) = leftmost pixel. Delegates to
+    /// [`super::glyphs::lookup`] — see that module's doc comment for the
+    /// embedded font's source URL, license, and full bit-order citation.
+    /// Total over all of `char` (never panics): any scalar without a real
+    /// glyph in the embedded table renders a visible fallback box instead of
+    /// vanishing. Independent of `self`'s own (generalizable, see
+    /// [`Self::with_cell`]) cell geometry — the atlas is always 8x8 source
+    /// pixels; only [`Self::vga_8x16`] is ever used to actually rasterize a
+    /// document (`layout::layout` hardcodes it), so the atlas's fixed 8x8
+    /// shape and `vga_8x16`'s 8-wide cell line up by construction.
+    pub fn glyph(&self, ch: char) -> [u8; 8] {
+        super::glyphs::lookup(ch)
+    }
 }
 
 /// Floor a cell dimension to a sane minimum of `1.0` design unit. Rejects
@@ -310,5 +335,38 @@ mod tests {
         assert!(subnormal.ascent(200.0).is_finite());
         assert!(subnormal.descent(200.0).is_finite());
         assert!(subnormal.line_height(200.0).is_finite());
+    }
+
+    // ------------------------------------------------------------- glyph atlas
+
+    #[test]
+    fn glyph_scale_matches_the_private_scale_used_by_metrics() {
+        let f = BitmapFont::vga_8x16();
+        assert_eq!(f.glyph_scale(16.0), 1.0);
+        assert_eq!(f.glyph_scale(32.0), 2.0);
+        assert_eq!(f.glyph_scale(8.0), 0.5);
+    }
+
+    #[test]
+    fn glyph_scale_is_zero_for_degenerate_size_px() {
+        let f = BitmapFont::vga_8x16();
+        for size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(f.glyph_scale(size), 0.0);
+        }
+    }
+
+    #[test]
+    fn glyph_looks_up_the_embedded_atlas() {
+        let f = BitmapFont::vga_8x16();
+        assert_eq!(f.glyph('A'), [0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00]);
+        assert_eq!(f.glyph(' '), [0u8; 8]);
+    }
+
+    #[test]
+    fn glyph_never_panics_for_any_char() {
+        let f = BitmapFont::vga_8x16();
+        for ch in ['日', '😀', char::REPLACEMENT_CHARACTER, '\u{10FFFF}', '\u{0}'] {
+            let _ = f.glyph(ch); // must not panic
+        }
     }
 }

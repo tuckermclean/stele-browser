@@ -1,15 +1,17 @@
 //! Text metrics: the seam between the font layer and the inline engine.
 //!
 //! P5 (Wave 1) implements [`Metrics`] with a monospace [`bitmap::BitmapFont`]
-//! model (std-only, i486-safe; the brief's bitmap-font lean over a TTF). It is
-//! metrics only — glyph rasterization / the atlas, and any fontdue-vs-atlas
-//! render comparison, are deferred to the fb backend packet (P9), where pixels
-//! are actually consumed. Shaping-free: Latin-1/UTF-8 advance widths, no
-//! complex-script shaping — the inline engine (P6) breaks lines given these
-//! advances. v0 is monospace (matches tty cells); double-width scripts and
-//! proportional fonts are later refinements.
+//! model (std-only, i486-safe; the brief's bitmap-font lean over a TTF).
+//! Originally metrics-only — glyph rasterization / the atlas were deferred to
+//! the fb-backend packet (M4), where pixels are actually consumed; that
+//! packet has now landed [`glyphs`], a compiled-in public-domain 8x8 bitmap
+//! atlas, looked up via [`BitmapFont::glyph`]. Shaping-free: Latin-1/UTF-8
+//! advance widths, no complex-script shaping — the inline engine (P6) breaks
+//! lines given these advances. v0 is monospace (matches tty cells);
+//! double-width scripts and proportional fonts are later refinements.
 
 pub mod bitmap;
+pub(crate) mod glyphs;
 
 pub use bitmap::BitmapFont;
 
