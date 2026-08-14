@@ -68,6 +68,31 @@ pub fn parse(css: &str) -> Stylesheet {
     sheet
 }
 
+/// Parse an inline `style="..."` attribute's value into a [`Declarations`]
+/// block (M5) — the same declaration-block grammar/recovery
+/// `parse_declaration_block` already gives rule bodies (brief §4's curated
+/// property set, charter C2's ignore-unknown treaty, brief §10 recovery: a
+/// bad declaration skips to the next `;`), just fed raw property:value
+/// pairs with no enclosing `{ }` and no selector. `parse_declaration_block`
+/// already tolerates running off the end of its token stream without ever
+/// seeing a `}` (`*pos >= len` is checked first thing every loop iteration)
+/// so it needs no changes to serve this second caller.
+///
+/// The `Stylesheet` `parse_declaration_block` writes its
+/// `ignored_declarations` counter into is discarded here: inline style has
+/// no natural home for that stat yet (no per-element provenance surface
+/// exists in this packet) — it is still counted, just not reported anywhere,
+/// same as the counter on a `Stylesheet` nobody ever inspects.
+///
+/// Total: never panics on any input, including empty/garbage strings — the
+/// underlying tokenizer and `parse_declaration_block` are already total.
+pub(crate) fn parse_inline(css: &str) -> Declarations {
+    let tokens = tokenize(css);
+    let mut pos = 0usize;
+    let mut discarded = Stylesheet::default();
+    parse_declaration_block(&tokens, &mut pos, &mut discarded)
+}
+
 /// Every rule in `sheet` whose selector matches `target` (given its ancestor
 /// chain), unordered. The cascade needs to merge these against matches from
 /// *other* sheets (UA vs. every author sheet) before sorting by precedence —

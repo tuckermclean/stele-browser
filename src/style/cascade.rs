@@ -81,9 +81,18 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                 }
                 Node::Element(el) => {
                     let info = ElementInfo::from_element(&el.name, &el.attrs);
-                    // RED (test-first): inline `style="..."` is not folded
-                    // in yet -- see the immediately-following GREEN commit.
-                    let decls = fold_matching_declarations(ua, author, &ancestors, &info);
+                    let mut decls = fold_matching_declarations(ua, author, &ancestors, &info);
+                    // Inline `style="..."` is the highest-precedence CSS
+                    // origin (beats both UA and every author sheet
+                    // regardless of specificity) — folded in last so it
+                    // wins per property, same `Declarations::overlay`
+                    // last-writer-wins mechanism `fold_matching_declarations`
+                    // already uses for UA vs. author. Reads straight off the
+                    // `Element` already in hand; `cascade`'s frozen signature
+                    // needs no new parameter for this.
+                    if let Some(style_attr) = el.attrs.get("style") {
+                        decls.overlay(&parser::parse_inline(style_attr));
+                    }
                     let style = resolve(&decls, parent.as_ref());
                     out[id] = style.clone();
 

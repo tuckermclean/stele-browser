@@ -10,8 +10,8 @@
 //! entry). A `<link>` with no matching fetch pass just sits inert in the
 //! DOM, exactly as before this packet.
 
-use crate::dom::Dom;
-use crate::style::Stylesheet;
+use crate::dom::{Dom, Node, NodeId};
+use crate::style::{parser, Stylesheet};
 
 /// Walk `dom` in document order, parse every `<style>` element's raw-text
 /// content into a [`Stylesheet`], and return them in document order — later
@@ -26,12 +26,47 @@ use crate::style::Stylesheet;
 /// Depth-safe like `cascade::visit`: an explicit heap stack drives the walk,
 /// not call-stack recursion, so pathologically deep markup can't overflow
 /// it.
-///
-/// RED (test-first): not implemented yet — every fixture's `<style>` still
-/// resolves to no sheets at all here; see the immediately-following GREEN
-/// commit for the real document-order walk.
-pub fn collect_author_sheets(_dom: &Dom) -> Vec<Stylesheet> {
-    Vec::new()
+pub fn collect_author_sheets(dom: &Dom) -> Vec<Stylesheet> {
+    let mut sheets = Vec::new();
+    if dom.is_empty() {
+        return sheets;
+    }
+
+    // Explicit stack, pushed in reverse child order so children pop (and
+    // thus get visited) left-to-right — the same document-order walk
+    // `cascade::visit` drives, just without needing its Enter/Exit ancestor
+    // bookkeeping (nothing here needs an ancestor chain).
+    let mut stack: Vec<NodeId> = vec![dom.root()];
+    while let Some(id) = stack.pop() {
+        let Node::Element(el) = dom.node(id) else {
+            continue;
+        };
+        if el.name.as_str() == "style" {
+            sheets.push(parser::parse(&style_text(dom, id)));
+        }
+        for &child in el.children.iter().rev() {
+            stack.push(child);
+        }
+    }
+    sheets
+}
+
+/// Concatenate a `<style>` element's direct `Text` children's raw content.
+/// In practice `dom::parser` always gives a `<style>` exactly one `Text`
+/// child (it's a RAWTEXT element — see that module's doc comment), but
+/// concatenating defensively rather than indexing `children[0]` keeps this
+/// total even if that invariant ever loosens, and costs nothing when it
+/// doesn't.
+fn style_text(dom: &Dom, style_id: NodeId) -> String {
+    let mut css = String::new();
+    if let Node::Element(el) = dom.node(style_id) {
+        for &child in &el.children {
+            if let Node::Text(t) = dom.node(child) {
+                css.push_str(t);
+            }
+        }
+    }
+    css
 }
 
 #[cfg(test)]
