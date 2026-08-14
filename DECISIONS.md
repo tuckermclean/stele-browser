@@ -19,6 +19,37 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — Editable forms + responsive resize
+
+### D41 — text-input editing lives in ViewState; submit overrides DOM values by NodeId
+Focusing a plain `<input>` (`is_text_input_kind`: text/search/email/url/tel/
+password/number + empty type; excludes submit/button/checkbox/radio/hidden/
+select/textarea) routes keys to `apply_key_editing`. Edit buffers are kept in
+`ViewState.fields` (focusable-idx → String) with a char-offset cursor, seeded
+lazily from the DOM default value, persisted across focus moves, capped at 4096
+chars. Submit reuses the existing `Command::Submit(Request)` +
+`form::encode_www_form` path via a new `serialize_submit_with_overrides` that
+swaps in typed buffers for edited fields (matched by `control_node` NodeId), so
+a whole form submits what the user typed — not just the triggering field.
+**Why in ViewState, not the DOM:** keeps `apply_key` pure/total and the DOM
+immutable; the shell owns transient UI state. **Trade-offs (v0):** GET only
+(POST path preserved, unused here); `select`/`textarea` non-editable; Enter
+doesn't activate a named submit button (activator None) so that button's
+name=value isn't included on the type-then-Enter path. Follow-ups.
+
+### D42 — responsive resize via poll timeout + dirty-gated redraw (no signals)
+`run_browser`'s `poll` uses a 250ms `Timespec` timeout instead of blocking
+forever; the loop re-queries `tcgetwinsize` each tick and rebuilds page +
+`clamp_scroll` only when the size changed, so a resize reflows within ~250ms
+with no keypress — no `SIGWINCH` handler, no `unsafe` (the brief's constraint).
+A `dirty` flag (set on real input or a detected resize) gates the clear+redraw,
+so idle timeout ticks do NOT flicker or busy-spin. **Why polling not signals:**
+signal handlers need `unsafe`/a self-pipe and fight the totality discipline; a
+cheap 4×/sec ioctl poll is simpler and total. **Cost:** resize triggers a full
+`load_page` (re-fetch) at the new width — acceptable since resize is rare;
+re-layout-without-refetch is a follow-up. `clamp_scroll` is unit-tested; the
+loop itself is the manually-pty-verified thin half.
+
 ## UI — tty readability (contrast)
 
 ### D40 — tty defers to the terminal theme by default and guarantees legibility
