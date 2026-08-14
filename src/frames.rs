@@ -136,7 +136,7 @@ use crate::fetch::{Fetch, Request, Url};
 use crate::layout::box_tree::build_box_tree;
 use crate::layout::{self, Fragment, FragmentKind, Point, Rect, Size};
 use crate::style::cascade;
-use crate::style::collect_author_sheets;
+use crate::style::collect_author_sheets_for_viewport;
 use crate::style::ComputedStyle;
 
 /// Maximum nesting depth for framesets/frames (a top-level frameset counts
@@ -392,8 +392,12 @@ fn render_frame(
 fn render_single_document(dom: &Dom, cols: usize) -> TextGrid {
     // M5: same author-CSS wiring as main.rs's own single-document pipeline
     // — each frame gets its own <style> blocks/inline style= applied, not
-    // just the UA sheet.
-    let author_sheets = collect_author_sheets(dom);
+    // just the UA sheet. M5 media: this frame's own viewport width is
+    // `cols * CELL_W` (its region's actual width in px, per the caller's
+    // track-sizing math above) — `@media` inside a frame's <style> is
+    // evaluated against THAT region's width, not the top-level document's.
+    let viewport_width = cols as f32 * CELL_W;
+    let author_sheets = collect_author_sheets_for_viewport(dom, viewport_width);
     let styles = cascade::cascade(dom, &author_sheets);
     // Frames render to a tty text grid, never pixels — no fetch/decode work
     // for images here (mirrors main.rs's own `dump_text` scope), so an
@@ -401,7 +405,7 @@ fn render_single_document(dom: &Dom, cols: usize) -> TextGrid {
     let Some(root) = build_box_tree(dom, &styles, &std::collections::HashMap::new()) else {
         return TextGrid::blank(cols, 0);
     };
-    let viewport = Size { w: cols as f32 * CELL_W, h: SUBDOC_VIEWPORT_HEIGHT };
+    let viewport = Size { w: viewport_width, h: SUBDOC_VIEWPORT_HEIGHT };
     let fragments = layout::layout(&root, viewport);
     tty::render(&fragments, cols)
 }

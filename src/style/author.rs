@@ -11,7 +11,7 @@
 //! DOM, exactly as before this packet.
 
 use crate::dom::{Dom, Node, NodeId};
-use crate::style::{parser, Stylesheet};
+use crate::style::{media, parser, Stylesheet};
 
 /// Walk `dom` in document order, parse every `<style>` element's raw-text
 /// content into a [`Stylesheet`], and return them in document order — later
@@ -57,6 +57,27 @@ pub fn collect_author_sheets(dom: &Dom) -> Vec<Stylesheet> {
 /// concatenating defensively rather than indexing `children[0]` keeps this
 /// total even if that invariant ever loosens, and costs nothing when it
 /// doesn't.
+/// Same document-order walk as [`collect_author_sheets`], but each
+/// resulting `Stylesheet` is run through `style::media::flatten_media`
+/// against `viewport_width_px` before being returned (M5) — so any `@media`
+/// rule inside a `<style>` block actually takes effect (or doesn't) per the
+/// real render viewport, instead of sitting inert.
+///
+/// Every real render entry point (`main.rs`'s `dump_text`/`dump_png`/
+/// `render_fb_surface`, `frames.rs`'s `render_single_document`) calls THIS
+/// rather than the plain [`collect_author_sheets`] — plain
+/// `collect_author_sheets` is kept as-is (and still used directly by
+/// pre-M5 tests/call sites that have no viewport to give and no `@media` in
+/// their fixtures) so this packet adds a new entry point rather than
+/// changing an existing one's behavior/signature.
+///
+/// Total: delegates entirely to `collect_author_sheets` (already total —
+/// see its own doc comment) and `flatten_media` (also total, bounded by the
+/// sheet's own size — see that function's doc comment); no new failure mode.
+pub fn collect_author_sheets_for_viewport(dom: &Dom, viewport_width_px: f32) -> Vec<Stylesheet> {
+    collect_author_sheets(dom).into_iter().map(|s| media::flatten_media(&s, viewport_width_px)).collect()
+}
+
 fn style_text(dom: &Dom, style_id: NodeId) -> String {
     let mut css = String::new();
     if let Node::Element(el) = dom.node(style_id) {
@@ -151,6 +172,57 @@ mod tests {
         let sheets = collect_author_sheets(&d);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "span")].display, Display::Block);
+    }
+
+    // ---- M5: collect_author_sheets_for_viewport / @media -----------------
+
+    #[test]
+    fn viewport_variant_matches_plain_collect_when_no_media_present() {
+        let d = dom::parser::parse("<style>p { color: red }</style><p>x</p>");
+        let plain = collect_author_sheets(&d);
+        let viewport = collect_author_sheets_for_viewport(&d, 320.0);
+        assert_eq!(plain.len(), viewport.len());
+        let styles_plain = cascade::cascade(&d, &plain);
+        let styles_viewport = cascade::cascade(&d, &viewport);
+        assert_eq!(styles_plain[find(&d, "p")].color, styles_viewport[find(&d, "p")].color);
+    }
+
+    #[test]
+    fn end_to_end_media_query_produces_a_responsive_result() {
+        let html = r#"<style>
+            p { color: blue }
+            @media (max-width: 500px) { p { color: red } }
+        </style><p>x</p>"#;
+        let d = dom::parser::parse(html);
+
+        let narrow = collect_author_sheets_for_viewport(&d, 320.0);
+        let narrow_styles = cascade::cascade(&d, &narrow);
+        assert_eq!(narrow_styles[find(&d, "p")].color, Color::rgb(255, 0, 0));
+
+        let wide = collect_author_sheets_for_viewport(&d, 640.0);
+        let wide_styles = cascade::cascade(&d, &wide);
+        assert_eq!(wide_styles[find(&d, "p")].color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn huge_pathological_style_block_with_media_and_deep_dom_do_not_panic() {
+        let mut css = String::new();
+        for i in 0..3000 {
+            css.push_str(&format!("@media (min-width: {i}px) {{ .c{i} {{ color: red; }} }}\n"));
+        }
+        let mut html = format!("<style>{css}</style>");
+        for _ in 0..2000 {
+            html.push_str("<div>");
+        }
+        html.push('x');
+        for _ in 0..2000 {
+            html.push_str("</div>");
+        }
+        let d = dom::parser::parse(&html);
+        let sheets = collect_author_sheets_for_viewport(&d, 1024.0);
+        assert_eq!(sheets.len(), 1);
+        let styles = cascade::cascade(&d, &sheets);
+        assert_eq!(styles.len(), d.len());
     }
 
     /// Totality: a huge, pathological `<style>` block (thousands of rules)
