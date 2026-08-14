@@ -23,6 +23,7 @@ pub mod dom;
 mod dom_util;
 pub mod fetch;
 pub mod form;
+pub mod frames;
 pub mod img;
 pub mod layout;
 pub mod style;
