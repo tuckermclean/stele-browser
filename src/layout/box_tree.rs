@@ -31,7 +31,7 @@ use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, LayoutNode, Size};
-use crate::style::computed::{Display, Float};
+use crate::style::computed::{Display, Float, ListStyleType};
 use crate::style::ComputedStyle;
 
 /// Mirrors `layout::block::DEPTH_CAP` (private to that module). This walk is
@@ -129,6 +129,17 @@ fn build_node(
                     LayoutNode { style, content: BoxContent::Container, children: Vec::new() }
                 } else {
                     build_details_node(dom, styles, images, el, style, depth)
+                };
+                return Some(node);
+            }
+            if is_list_container(el) {
+                let node = if depth >= DEPTH_CAP {
+                    // Same defensive fallback as `is_details` above: past the
+                    // cap, degrade to an empty leaf rather than recursing
+                    // into the marker-synthesis logic at all.
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new() }
+                } else {
+                    build_list_container_node(dom, styles, images, el, style, depth)
                 };
                 return Some(node);
             }
@@ -332,6 +343,151 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// List markers (M6): `<ul>/<ol>/<li>` render with NO bullets/numbers at all
+// otherwise -- the kitchen-sink render exposed this gap. `layout::block`'s
+// curated `Display` set has no `list-item` value (only block/inline/flex/
+// table*, brief §4), so a marker can't be a real CSS `::marker` pseudo-box;
+// instead it's synthesized as its own leading `Text` child glued onto an
+// `<li>`'s (recursively built) children, the exact same "synthesize a leaf
+// carrying a stand-in" convention `build_details_node`'s disclosure marker
+// and `build_form_control`'s placeholder labels already use above.
+//
+// Only a `<ul>`/`<ol>`'s DIRECT `<li>` children are recognized as list
+// items (matches the details/summary "direct child" convention above, and
+// real HTML's own list content model) -- an `<li>` buried inside some other
+// wrapper element, or with no `<ul>`/`<ol>` ancestor at all, is built by the
+// ordinary generic-element path with no marker synthesis at all (documented
+// choice: no marker, not a panic, not some invented default numbering with
+// no list to count against).
+//
+// Ordinal counting is per-list: each call to `build_list_container_node`
+// (one per `<ul>`/`<ol>` box built) keeps its own local counter, so a
+// `<ul>`/`<ol>` nested inside an `<li>` naturally restarts at 1 -- there is
+// no global/shared counter across sibling or ancestor lists. Only `<li>`
+// children that actually produce a box count towards the ordinal (a
+// `display: none` `<li>` -- dropped like any other display:none subtree --
+// does NOT consume a number, so the visible sequence in a tty dump never
+// has a gap); a non-`<li>` child of a `<ul>`/`<ol>` (invalid HTML, but this
+// dialect stays total rather than rejecting it) is still built as ordinary
+// content, just without a marker and without advancing the counter.
+//
+// Marker glyph choice, per `ComputedStyle::list_style_type` (the value is
+// already inherited by cascade -- `cascade.rs`'s `inherited!(list_style_type)`
+// -- so a nested list's own UA-sheet `list-style-type` correctly overrides
+// what it inherited from an ancestor list; this function only owns WHICH
+// item within the nearest enclosing list, not which style applies):
+//   - `None`                    -> no marker at all.
+//   - `Disc`/`Circle`/`Square`  -> `"* "`/`"o "`/`"# "` respectively. Real
+//     CSS's disc/circle/square are `•`/`◦`/`▪` (Unicode), but this dialect's
+//     bitmap font is ASCII-only (brief §4/`fb` backend) -- `•` would render
+//     as a tofu box in the PNG golden. ASCII stand-ins are used instead so
+//     the PNG golden shows a real, distinct glyph per type, not three
+//     identical tofu boxes. (The tty text dump always shows the literal
+//     character regardless of font coverage; this choice only matters for
+//     the PNG path.)
+//   - `Decimal`                 -> `"{ordinal}. "` (`"1. "`, `"2. "`, ...).
+//   - `LowerAlpha`/`UpperAlpha` -> `"{a..z, aa..az, ...}. "`, bijective
+//     base-26 (`alpha_ordinal`) -- CSS's own `lower-alpha`/`upper-alpha`
+//     algorithm. Bounded/cheap even for a huge list (`log26(n)` digits).
+//     `lower-roman`/`upper-roman` are NOT in the curated `ListStyleType`
+//     enum at all (frozen type, brief §4) -- there is nothing to implement;
+//     documented here rather than silently absent.
+//
+// `<ol start="N">` (optional per the packet brief, cheap to support: it's
+// one attribute read) seeds the per-list counter at `N` instead of `1`;
+// missing/unparseable `start` defaults to `1`, exactly like no attribute at
+// all. A non-positive `start` is honored verbatim for `Decimal` (CSS allows
+// negative starts; `i64::to_string()` handles it directly) but clamped up to
+// `1` before alpha conversion (`alpha_ordinal`'s doc comment) since there is
+// no meaningful "zeroth"/negative letter.
+// ---------------------------------------------------------------------------
+
+/// ASCII stand-in glyphs for the three CSS bullet styles -- see the module
+/// doc section above for why ASCII rather than the real Unicode bullets.
+const BULLET_DISC: &str = "* ";
+const BULLET_CIRCLE: &str = "o ";
+const BULLET_SQUARE: &str = "# ";
+
+fn is_list_container(el: &Element) -> bool {
+    matches!(el.name.as_str(), "ul" | "ol")
+}
+
+fn is_li(el: &Element) -> bool {
+    el.name.as_str() == "li"
+}
+
+/// `<ol start="N">` (also harmlessly honored on `<ul>`, which has no real
+/// `start` semantics -- reading a nonexistent attribute is a no-op) -- see
+/// the module doc section above.
+fn list_start(el: &Element) -> i64 {
+    el.attrs.get("start").and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(1)
+}
+
+/// Build a `<ul>`/`<ol>` element's box: recurse into every child normally,
+/// but glue a synthesized marker onto each DIRECT `<li>` child per the
+/// module doc section above. `depth` is guaranteed `< DEPTH_CAP` by the
+/// caller (`build_node` handles the past-cap fallback itself, exactly like
+/// `build_details_node`'s caller does), so every recursive `build_node` call
+/// here is safe without its own extra depth check.
+fn build_list_container_node(
+    dom: &Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+    el: &Element,
+    style: ComputedStyle,
+    depth: usize,
+) -> LayoutNode {
+    let mut ordinal = list_start(el);
+    let mut children = Vec::with_capacity(el.children.len());
+    for &child in &el.children {
+        let is_item = matches!(dom.node(child), Node::Element(e) if is_li(e));
+        let Some(mut node) = build_node(dom, styles, images, child, depth + 1) else {
+            continue; // display:none (or any other total-absence case): no box, no number consumed.
+        };
+        if is_item {
+            if let Some(marker) = marker_text(node.style.list_style_type, ordinal) {
+                node.children.insert(0, marker_node(&marker, &node.style));
+            }
+            ordinal += 1;
+        }
+        children.push(node);
+    }
+    LayoutNode { style, content: BoxContent::Container, children }
+}
+
+/// The marker text for one list item, or `None` when `list_style_type` is
+/// `ListStyleType::None` (no marker at all) -- see the module doc section
+/// above for the full glyph/format convention per variant.
+fn marker_text(list_style_type: ListStyleType, ordinal: i64) -> Option<String> {
+    Some(match list_style_type {
+        ListStyleType::None => return None,
+        ListStyleType::Disc => BULLET_DISC.to_string(),
+        ListStyleType::Circle => BULLET_CIRCLE.to_string(),
+        ListStyleType::Square => BULLET_SQUARE.to_string(),
+        ListStyleType::Decimal => format!("{ordinal}. "),
+        ListStyleType::LowerAlpha => format!("{}. ", alpha_ordinal(ordinal, false)),
+        ListStyleType::UpperAlpha => format!("{}. ", alpha_ordinal(ordinal, true)),
+    })
+}
+
+/// CSS's `lower-alpha`/`upper-alpha` counter style: bijective base-26 (`1` ->
+/// `"a"`, ..., `26` -> `"z"`, `27` -> `"aa"`, `28` -> `"ab"`, ...) -- NOT
+/// ordinary base-26, which would have no representation for `26` without a
+/// "zero" digit. Non-positive `n` (only reachable via a negative/zero `<ol
+/// start>`, since the per-list counter otherwise only ever counts up from
+/// `1`) is clamped to `1` first -- see the module doc section above.
+fn alpha_ordinal(n: i64, upper: bool) -> String {
+    let mut n = if n < 1 { 1 } else { n };
+    let mut letters = Vec::new();
+    while n > 0 {
+        let rem = ((n - 1) % 26) as u8;
+        letters.push(if upper { b'A' + rem } else { b'a' + rem } as char);
+        n = (n - 1) / 26;
+    }
+    letters.iter().rev().collect()
 }
 
 // ---------------------------------------------------------------------------

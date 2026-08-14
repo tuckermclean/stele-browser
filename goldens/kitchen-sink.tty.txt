@@ -13,12 +13,12 @@ A paragraph with bold, italic, emphasis, and strong text, plus a link. Entities:
 Lists
 
 
-     First unordered item
-     Second unordered item, inline-styled bold
+     * First unordered item
+     * Second unordered item, inline-styled bold
 
 
-     First ordered item
-     Second ordered item
+     1. First ordered item
+     2. Second ordered item
 
 
   A blockquote: set apart from the surrounding text, per 1996 convention.
