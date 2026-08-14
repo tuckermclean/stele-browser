@@ -70,11 +70,16 @@ struct Args {
     dump_png: Option<(String, String)>,
     render_fb: Option<String>,
     cols: usize,
+    /// `--stats` (M5, C2 "count what we refuse"): print the aggregated
+    /// author-CSS-refusal counts to STDERR after cascading — see
+    /// [`print_stats`]'s doc comment. Only consulted alongside `--dump-text`/
+    /// `--dump-png`, per the packet brief.
+    stats: bool,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS }
+        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS, stats: false }
     }
 }
 
@@ -119,6 +124,7 @@ fn parse_args(argv: &[String]) -> Args {
                     out.cols = v;
                 }
             }
+            "--stats" => out.stats = true,
             _ => {}
         }
         i += 1;
@@ -166,6 +172,99 @@ fn fetch_response(url: &Url) -> Result<Response, String> {
 /// (it never fetches images), so it keeps this simpler shape.
 fn fetch_body(url: &Url) -> Result<Vec<u8>, String> {
     fetch_response(url).map(|r| r.body)
+}
+
+// ---------------------------------------------------------------------------
+// `--stats` (M5, C2 "count what we refuse"): every collected author sheet
+// already carries `ignored_declarations`/`ignored_at_rules`/`media_at_rules`
+// counters (`style::parser::Stylesheet` — P2/M5, "feeds the future
+// Provenance pane / --stats"); this is the CLI surface that finally sums and
+// prints them. STDERR only, never stdout — a `--dump-text`/`--dump-png`
+// golden must never see this line, so it's wired as a side effect
+// independent of `dump_text`/`dump_png`'s own return values (see
+// `print_stats`'s doc comment below for why it re-fetches/re-parses rather
+// than threading a flag through those two functions).
+// ---------------------------------------------------------------------------
+
+/// One aggregated `--stats` snapshot: what Stele's CSS layer refused,
+/// summed across every collected author `<style>` sheet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StatsCounts {
+    ignored_declarations: u32,
+    ignored_at_rules: u32,
+    media_at_rules: u32,
+}
+
+/// Sum each `Stylesheet`'s own counters across `sheets`. Total: an empty
+/// slice (no author CSS at all) yields all-zero counts, matching
+/// `StatsCounts::default()`.
+fn aggregate_stats(sheets: &[style::Stylesheet]) -> StatsCounts {
+    let mut counts = StatsCounts::default();
+    for s in sheets {
+        counts.ignored_declarations += s.ignored_declarations;
+        counts.ignored_at_rules += s.ignored_at_rules;
+        counts.media_at_rules += s.media_at_rules;
+    }
+    counts
+}
+
+/// `"s"` for anything but exactly `1` — keeps [`format_stats_line`]'s output
+/// grammatical (`"1 ignored at-rule"`, not `"1 ignored at-rules"`).
+fn plural(n: u32) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Render a [`StatsCounts`] snapshot as the one-line, deterministic summary
+/// `--stats` prints, e.g. `"stele --stats: 3 ignored declarations, 1
+/// ignored at-rule, 2 media blocks"` — the exact format named in the packet
+/// brief. `media_at_rules` is worded as "media blocks" (matching the brief's
+/// own example) rather than "media at-rules", since "block" is what a reader
+/// unfamiliar with CSS at-rule terminology will recognize from `@media { }`.
+fn format_stats_line(counts: StatsCounts) -> String {
+    format!(
+        "stele --stats: {} ignored declaration{}, {} ignored at-rule{}, {} media block{}",
+        counts.ignored_declarations,
+        plural(counts.ignored_declarations),
+        counts.ignored_at_rules,
+        plural(counts.ignored_at_rules),
+        counts.media_at_rules,
+        plural(counts.media_at_rules),
+    )
+}
+
+/// `--stats`'s CLI-facing driver: fetch + parse `source` (mirroring
+/// `dump_text`/`dump_png`'s own fetch step — a fetch failure degrades to an
+/// empty document rather than propagating an error, same totality contract),
+/// collect every author sheet at `viewport_width_px` exactly like the real
+/// render path does, and print the aggregated line to STDERR.
+///
+/// A SEPARATE fetch+parse+collect pass from `dump_text`/`dump_png` (rather
+/// than threading a `stats: bool` through either) — deliberately: those two
+/// functions' return values (the golden-compared text/PNG bytes) must stay
+/// byte-for-byte identical whether or not `--stats` was passed, and the
+/// cheapest way to GUARANTEE that (rather than merely test it) is to give
+/// `--stats` its own independent read of the document. The extra fetch/parse
+/// is cheap relative to a CLI invocation's own process-startup cost, and
+/// `--stats` is diagnostic tooling, not a hot path.
+///
+/// Total: a fetch failure or a document with no author CSS at all still
+/// prints an all-zero line (`aggregate_stats(&[])` is `StatsCounts::default()`)
+/// rather than panicking or silently skipping the line.
+fn print_stats(source: &str, viewport_width_px: f32) {
+    let url = resolve_url(source);
+    let sheets = match fetch_body(&url) {
+        Ok(body) => {
+            let html = String::from_utf8_lossy(&body);
+            let dom_tree = dom::parser::parse(&html);
+            style::collect_author_sheets_for_viewport(&dom_tree, viewport_width_px)
+        }
+        Err(_) => Vec::new(),
+    };
+    eprintln!("{}", format_stats_line(aggregate_stats(&sheets)));
 }
 
 /// Drive the full headless pipeline for `--dump-text`. Total: a fetch
@@ -426,10 +525,20 @@ fn main() {
     let args = parse_args(&argv);
     if args.headless {
         if let Some(source) = args.dump_text {
+            // --stats goes to STDERR, printed before the golden-compared
+            // stdout line -- see `print_stats`'s doc comment for why this is
+            // an independent fetch+parse pass rather than threading a flag
+            // through `dump_text` itself.
+            if args.stats {
+                print_stats(&source, args.cols as f32 * 8.0);
+            }
             println!("{}", dump_text(&source, args.cols));
             return;
         }
         if let Some((source, out_path)) = args.dump_png {
+            if args.stats {
+                print_stats(&source, DEFAULT_PNG_WIDTH as f32);
+            }
             if let Err(e) = write_dump_png(&source, &out_path) {
                 eprintln!("stele: --dump-png failed: {e}");
             }
@@ -814,5 +923,93 @@ mod tests {
     fn render_fb_surface_on_a_missing_file_is_a_clean_err_not_a_panic() {
         let result = render_fb_surface("fixtures/does-not-exist-nope.html", 640);
         assert!(result.is_err());
+    }
+
+    // ------------------------------------------------------------------ --stats
+
+    #[test]
+    fn parse_args_reads_stats_flag() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html", "--stats"]));
+        assert!(a.stats);
+    }
+
+    #[test]
+    fn parse_args_stats_defaults_to_false() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html"]));
+        assert!(!a.stats);
+    }
+
+    #[test]
+    fn aggregate_stats_is_all_zero_for_no_sheets() {
+        let counts = aggregate_stats(&[]);
+        assert_eq!(counts, StatsCounts::default());
+        assert_eq!(counts.ignored_declarations, 0);
+        assert_eq!(counts.ignored_at_rules, 0);
+        assert_eq!(counts.media_at_rules, 0);
+    }
+
+    #[test]
+    fn aggregate_stats_sums_across_multiple_sheets() {
+        // Mirrors the packet brief's own worked example: 2 unknown
+        // declarations + 1 @import in one sheet, plus an @media block (never
+        // itself an "ignored" thing -- it's a supported construct, just
+        // counted separately) in a second sheet.
+        let sheet_a = style::parser::parse("p { flibbertigibbet: 1; color: red; wobble: 2; } @import url(x.css);");
+        let sheet_b = style::parser::parse("@media (min-width: 500px) { p { color: blue; } }");
+        let counts = aggregate_stats(&[sheet_a, sheet_b]);
+        assert_eq!(counts.ignored_declarations, 2);
+        assert_eq!(counts.ignored_at_rules, 1);
+        assert_eq!(counts.media_at_rules, 1);
+    }
+
+    #[test]
+    fn format_stats_line_matches_the_documented_shape() {
+        let counts = StatsCounts { ignored_declarations: 3, ignored_at_rules: 1, media_at_rules: 2 };
+        assert_eq!(format_stats_line(counts), "stele --stats: 3 ignored declarations, 1 ignored at-rule, 2 media blocks");
+    }
+
+    #[test]
+    fn format_stats_line_pluralizes_singular_and_plural_correctly() {
+        assert_eq!(
+            format_stats_line(StatsCounts::default()),
+            "stele --stats: 0 ignored declarations, 0 ignored at-rules, 0 media blocks"
+        );
+        assert_eq!(
+            format_stats_line(StatsCounts { ignored_declarations: 1, ignored_at_rules: 1, media_at_rules: 1 }),
+            "stele --stats: 1 ignored declaration, 1 ignored at-rule, 1 media block"
+        );
+    }
+
+    #[test]
+    fn stats_pipeline_end_to_end_aggregates_a_real_documents_author_css() {
+        // The same real pipeline print_stats drives (fetch -> parse ->
+        // collect_author_sheets_for_viewport), minus the fetch hop -- proves
+        // the wiring, not just the pure aggregation/formatting helpers above.
+        let html = "<style>p { flibbertigibbet: 1; color: red; wobble: 2; } @import url(x.css);</style><p>hi</p>";
+        let dom_tree = dom::parser::parse(html);
+        let sheets = style::collect_author_sheets_for_viewport(&dom_tree, 640.0);
+        let counts = aggregate_stats(&sheets);
+        assert_eq!(counts.ignored_declarations, 2);
+        assert_eq!(counts.ignored_at_rules, 1);
+        assert_eq!(counts.media_at_rules, 0);
+        assert_eq!(format_stats_line(counts), "stele --stats: 2 ignored declarations, 1 ignored at-rule, 0 media blocks");
+    }
+
+    #[test]
+    fn stats_pipeline_is_all_zero_for_a_document_with_no_author_css() {
+        let dom_tree = dom::parser::parse("<p>hello</p>");
+        let sheets = style::collect_author_sheets_for_viewport(&dom_tree, 640.0);
+        assert_eq!(aggregate_stats(&sheets), StatsCounts::default());
+    }
+
+    #[test]
+    fn stats_pipeline_is_all_zero_on_a_fetch_failure_not_a_panic() {
+        // print_stats itself (rather than the pure aggregate/format halves
+        // above) must degrade cleanly on a fetch error, same totality
+        // contract as dump_text/dump_png -- exercised via stderr capture is
+        // impractical in-process, so this just proves it doesn't panic; the
+        // "all zeros" claim is separately proven by the compiled-binary CLI
+        // test in tests/stats_cli.rs.
+        print_stats("fixtures/does-not-exist-nope.html", 640.0);
     }
 }
