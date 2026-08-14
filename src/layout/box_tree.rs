@@ -99,6 +99,17 @@ fn build_node(
             if is_form_control(el) {
                 return build_form_control(dom, el, style);
             }
+            if is_details(el) {
+                let node = if depth >= DEPTH_CAP {
+                    // Same defensive fallback as the generic branch below:
+                    // past the cap, degrade to an empty leaf rather than
+                    // recursing into the disclosure logic at all.
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new() }
+                } else {
+                    build_details_node(dom, styles, images, el, style, depth)
+                };
+                return Some(node);
+            }
             let children = if depth >= DEPTH_CAP {
                 Vec::new()
             } else {
@@ -156,6 +167,133 @@ fn apply_align_float_hint(el: &Element, style: &mut ComputedStyle) {
         "left" => style.float = Float::Left,
         "right" => style.float = Float::Right,
         _ => {} // top/middle/bottom/unknown: vertical-align territory, ignored here.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// <details>/<summary> disclosure (M5 dialect-completeness, part 1).
+//
+// Real browsers give `<details>` interactive click-to-toggle behavior; there
+// is no interactive shell in Stele yet (out of scope per the packet brief),
+// so this is the STATIC render of whichever state the `open` attribute (a
+// plain HTML boolean attribute -- present with any/no value means open,
+// absent means closed) already names:
+//   - WITHOUT `open`: collapsed. Only the first direct-child `<summary>` is
+//     built into the box tree (the clickable label); every other child is
+//     dropped entirely -- not laid out, not present in the tree at all,
+//     mirroring `display: none`'s own "absent entirely" contract so nothing
+//     hidden can leak into a tty dump.
+//   - WITH `open` (any/no value): expanded. The summary AND every other
+//     child are built normally, in original document order.
+//   - No `<summary>` DIRECT child at all: real browsers show a default,
+//     localized "Details" label. This dialect has one locale, so the
+//     default is always the literal string "Details" (documented choice --
+//     the alternative, rendering nothing at all for the label, would make a
+//     collapsed no-summary `<details>` silently vanish from the page, which
+//     is worse than a slightly-wrong-sounding default).
+//   - Multiple `<summary>` children: only the FIRST becomes the disclosure
+//     label (matches every real browser). Any later `<summary>` is just
+//     ordinary content -- shown (unmarked) when open, dropped when
+//     collapsed, exactly like any other non-summary child.
+//   - A `<summary>` nested inside some OTHER element (`<details><div>
+//     <summary>...` ) is not recognized as the direct-child label at all
+//     (matches the HTML5 "first summary element child" rule) -- falls back
+//     to the default "Details" label, with the wrapper + buried summary
+//     themselves treated as ordinary content.
+//
+// Disclosure marker (documented convention, since there is no click/icon
+// affordance in a text-mode dump to show open/closed otherwise): the
+// rendered summary is prefixed with `"> "` when collapsed or `"v "` when
+// open -- ASCII-only (matching the bitmap font's own ASCII-only glyph set),
+// deterministic, and legible as a crude "twisty" in a tty golden (`v` reads
+// as an open-triangle stand-in, `>` as a closed one). The marker is
+// synthesized as its own leading `Text` child glued onto the summary box's
+// existing children (the same "synthesize a leaf carrying a stand-in"
+// pattern `build_form_control` already uses for form placeholders above),
+// not spliced into the summary's own text content -- keeps the marker
+// independent of whatever markup a `<summary>` happens to contain.
+// ---------------------------------------------------------------------------
+
+/// Closed-state marker -- see the module doc section above.
+const SUMMARY_CLOSED_MARKER: &str = "> ";
+/// Open-state marker -- see the module doc section above.
+const SUMMARY_OPEN_MARKER: &str = "v ";
+/// The default disclosure label shown when a `<details>` has no direct-child
+/// `<summary>` at all -- matches real browsers' own default ("Details" in
+/// English; this dialect has one locale).
+const DEFAULT_SUMMARY_LABEL: &str = "Details";
+
+fn is_details(el: &Element) -> bool {
+    el.name.as_str() == "details"
+}
+
+/// The first `<summary>` DIRECT child of a `<details>` element's own
+/// `children`, if any -- see the module doc section above for why only a
+/// direct child counts.
+fn find_first_summary(dom: &Dom, el: &Element) -> Option<NodeId> {
+    el.children
+        .iter()
+        .copied()
+        .find(|&c| matches!(dom.node(c), Node::Element(e) if e.name.as_str() == "summary"))
+}
+
+/// Build a `<details>` element's box per the disclosure rules documented
+/// above. `depth` is guaranteed `< DEPTH_CAP` by the caller (`build_node`
+/// handles the past-cap fallback itself, exactly like the generic element
+/// branch does), so every recursive `build_node` call here is safe without
+/// its own extra depth check.
+fn build_details_node(
+    dom: &Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+    el: &Element,
+    style: ComputedStyle,
+    depth: usize,
+) -> LayoutNode {
+    let is_open = el.attrs.get("open").is_some();
+    let marker = if is_open { SUMMARY_OPEN_MARKER } else { SUMMARY_CLOSED_MARKER };
+    let summary_id = find_first_summary(dom, el);
+
+    let summary_box = summary_id
+        .and_then(|sid| build_node(dom, styles, images, sid, depth + 1))
+        .map(|mut node| {
+            node.children.insert(0, marker_node(marker, &node.style));
+            node
+        })
+        .unwrap_or_else(|| default_summary_node(marker, &style));
+
+    let mut children = vec![summary_box];
+    if is_open {
+        for &child in &el.children {
+            if Some(child) == summary_id {
+                continue; // already placed above, markered.
+            }
+            if let Some(node) = build_node(dom, styles, images, child, depth + 1) {
+                children.push(node);
+            }
+        }
+    }
+
+    LayoutNode { style, content: BoxContent::Container, children }
+}
+
+/// The synthesized marker box glued in front of a real `<summary>`'s own
+/// (recursively built) children -- see the module doc section above.
+fn marker_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
+    LayoutNode { style: style.clone(), content: BoxContent::Text(marker.to_string()), children: Vec::new() }
+}
+
+/// The synthesized `"> Details"`/`"v Details"` label shown in place of a
+/// missing `<summary>` -- see the module doc section above.
+fn default_summary_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
+    LayoutNode {
+        style: style.clone(),
+        content: BoxContent::Container,
+        children: vec![LayoutNode {
+            style: style.clone(),
+            content: BoxContent::Text(format!("{marker}{DEFAULT_SUMMARY_LABEL}")),
+            children: Vec::new(),
+        }],
     }
 }
 
