@@ -413,3 +413,55 @@ fn whitespace_only_text_between_flex_items_does_not_consume_gap_space() {
     assert_eq!(formatted_boxes[2].rect.origin.x, unformatted_boxes[2].rect.origin.x);
     assert_eq!(formatted_boxes[2].rect.origin.x, 50.0 + 16.0, "exactly one gap between the two real items, not two");
 }
+
+// ---------------------------------------------------------------------------
+// Block-in-inline (packet/block-in-inline): a block-level box (`<ol>`/`<li>`)
+// nested inside an inline-display `Container` (`<font>`, CSS initial
+// `display: inline`) must NOT be folded into the surrounding inline
+// formatting context -- CSS's "block-in-inline" resolution means it still
+// renders as its own stacked block box. Confirmed real breakage:
+// http://68k.news/ wraps every news list in `<font size="4"><ol><li>...`,
+// collapsing every list to run-on text before this fix. See
+// `fixtures/block-in-inline.html`/`tests/block_in_inline_golden.rs` for the
+// real parse->cascade pipeline coverage of the same shape; this is the
+// narrower hand-built-tree geometry check, matching this file's convention.
+// ---------------------------------------------------------------------------
+
+/// CSS's initial `display` value is `inline` (`ComputedStyle::default()`),
+/// matching a real `<font>`/`<em>`/`<b>` element with no UA/author override.
+fn inline_style() -> ComputedStyle {
+    ComputedStyle::default()
+}
+
+#[test]
+fn block_level_list_inside_an_inline_wrapper_is_not_folded_into_one_inline_leaf() {
+    // <p><font><ol><li>Alpha</li><li>Beta</li></ol></font></p>
+    let li1 = container(block_style(), vec![text_node("Alpha")]);
+    let li2 = container(block_style(), vec![text_node("Beta")]);
+    let ol = container(block_style(), vec![li1, li2]);
+    let font = container(inline_style(), vec![ol]);
+    let p = container(block_style(), vec![font]);
+
+    let fragments = layout(&p, Size { w: 300.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+
+    // Before the fix: `<ol>`/`<li>` get flattened into the SAME inline run
+    // as the `<font>` wrapper (`is_inline_ish(font)` was true regardless of
+    // its block content), so NONE of p/font/ol/li1/li2 besides `p` itself
+    // get their own Box fragment. After the fix: each of
+    // p, font, ol, li1, li2 is its own stacked block box.
+    assert_eq!(boxes.len(), 5, "expected p+font+ol+li1+li2 as five separate Box fragments, got {}", boxes.len());
+
+    let text_ys: Vec<f32> = fragments
+        .iter()
+        .filter_map(|f| match &f.kind {
+            FragmentKind::Text { text, .. } if text.contains("Alpha") || text.contains("Beta") => Some(f.rect.origin.y),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text_ys.len(), 2, "expected one text fragment for each list item, got {text_ys:?}");
+    assert_ne!(
+        text_ys[0], text_ys[1],
+        "Alpha and Beta must render on separate lines (block-level li), not run together in one inline run"
+    );
+}

@@ -426,6 +426,29 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-9 · fix: block content inside an inline wrapper collapsed to one line (68k.news)
+
+- **Bug (user-reported, http://68k.news/):** every news list is
+  `<font size="4"><ol><li>...`, and Stele rendered all items run-on on one line
+  (`1. A2. B3. C`) — the whole site was unusable. Isolated to a 2-line repro:
+  `<ol><li>` in `<body>` breaks correctly; the same list inside `<font>` did not.
+- **Root cause:** `block.rs::is_inline_ish` judged a `display:inline` container
+  (`<font>`) inline-ish regardless of contents, so `translate_container_children`
+  folded it — and its block `<ol>`/`<li>` descendants — into ONE inline
+  formatting-context leaf via `flatten_inline` (which recursed unconditionally),
+  erasing the block boundaries (breaks, list-item layout).
+- **Fix (CSS block-in-inline):** new depth-capped `contains_block_descendant`;
+  `is_inline_ish` now requires `display==Inline && !contains_block_descendant`.
+  An inline box holding a block descendant is no longer folded — it's translated
+  as its own node and the existing block/inline partitioning (which already
+  handles mixed children via anonymous-block splitting) lays the list out
+  correctly. `Text`/`Replaced` never count as block, so D14's `<em><img></em>`
+  stays inline. No frozen type; no unsafe; depth-capped (total). 854 tests green,
+  new accept.sh check A3n. Golden `block-in-inline.txt` blessed. See D44.
+- **68k.news now renders as a real news site**: headlines, then each source's
+  articles as a proper numbered list, one per line — with the per-link
+  highlighting from UI-8 (D43).
+
 ## 2026-08-14 — UI-8 · fix: wrapped link highlighted its whole bounding box
 
 - **Bug (user-reported):** focusing a link whose text wraps across >1 terminal

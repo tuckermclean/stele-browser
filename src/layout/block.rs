@@ -426,9 +426,58 @@ fn is_inline_ish(n: &LayoutNode) -> bool {
         // reaching here (an orphan `<td>`, see `translate_any`) is routed
         // exactly like a plain Container, matching pre-table-layout-packet
         // behavior.
-        BoxContent::Container | BoxContent::TableCell { .. } => n.style.display == Display::Inline,
+        //
+        // An inline-display `Container`/`TableCell` is only inline-ish if it
+        // has no block-level descendant (block-in-inline resolution, CSS2.1
+        // §9.2.1.1 / CSS Display Level 3 §2.7) — see
+        // `contains_block_descendant`'s doc comment for why: without this,
+        // an inline wrapper (`<font>`, `<b>`, ...) around a block list
+        // (`<ol>`/`<li>`) gets folded whole into the inline formatting
+        // context by `flatten_inline`, silently dropping the list items'
+        // block-level line breaks (confirmed real-world breakage:
+        // http://68k.news/ wraps every news list in
+        // `<font size="4"><ol><li>...`).
+        BoxContent::Container | BoxContent::TableCell { .. } => {
+            n.style.display == Display::Inline && !contains_block_descendant(n, 0)
+        }
         BoxContent::Replaced { .. } => true,
     }
+}
+
+/// True if `n` (typically an inline-display container) contains a
+/// block-level box somewhere in its inline subtree — in which case CSS's
+/// "block-in-inline" resolution (CSS2.1 §9.2.1.1 / CSS Display Level 3 §2.7)
+/// means `n` can't be folded whole into one inline formatting context leaf:
+/// `<font>` wrapping an `<ol>` must still produce real block list-item
+/// boxes (each on its own line), not run every item together on one line
+/// the way folding `<font>`'s entire subtree into `flatten_inline` would.
+///
+/// A `Text` or `Replaced` child is an inline ATOM, never block-level —
+/// `<em><img></em>` must stay foldable into one inline run (the D14 fix
+/// this helper must not regress: see `flatten_inline`'s doc comment). Only
+/// a `Container`/`TableCell` child whose own `style.display` is anything
+/// other than `Inline` (`Block`, `Flex`, `Table`, `TableRow`, `TableCell`,
+/// `TableRowGroup`, ...) counts as block-level itself; an inline
+/// `Container` child is not itself block-level but IS recursed into — a
+/// block box can be nested arbitrarily deep inside a chain of inline
+/// wrappers (`<font><b><ol>...`).
+///
+/// `depth` mirrors `flatten_inline`/`translate_any`'s own cap (see
+/// [`DEPTH_CAP`]) — this is independent recursion (it never goes through
+/// `translate_any`), so it needs its own bound against a hostile/
+/// pathologically deep inline nest; past the cap it degrades gracefully
+/// (returns `false`, i.e. "not blockified") rather than risking a stack
+/// overflow.
+fn contains_block_descendant(n: &LayoutNode, depth: usize) -> bool {
+    if depth >= DEPTH_CAP {
+        return false;
+    }
+    n.children.iter().any(|child| match &child.content {
+        BoxContent::Container | BoxContent::TableCell { .. } => {
+            child.style.display != Display::Inline || contains_block_descendant(child, depth + 1)
+        }
+        BoxContent::Text(_) | BoxContent::Replaced { .. } => false,
+    })
 }
 
 /// Flatten a node's inline-level content (itself, if it's `Text` or
@@ -1121,5 +1170,107 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_node(s: &str) -> LayoutNode {
+        LayoutNode { style: ComputedStyle::default(), content: BoxContent::Text(s.to_string()), children: Vec::new(), interactive: None }
+    }
+
+    fn block_style() -> ComputedStyle {
+        ComputedStyle { display: Display::Block, ..ComputedStyle::default() }
+    }
+
+    /// CSS's initial `display` value is `inline` (`ComputedStyle::default()`
+    /// already carries it — see `computed.rs`'s `impl Default`), matching a
+    /// real `<font>`/`<em>`/`<b>` element with no UA/author override.
+    fn inline_style() -> ComputedStyle {
+        ComputedStyle::default()
+    }
+
+    fn container(style: ComputedStyle, children: Vec<LayoutNode>) -> LayoutNode {
+        LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    }
+
+    fn replaced(style: ComputedStyle) -> LayoutNode {
+        LayoutNode {
+            style,
+            content: BoxContent::Replaced { intrinsic: Size { w: 10.0, h: 10.0 }, image: None },
+            children: Vec::new(),
+            interactive: None,
+        }
+    }
+
+    #[test]
+    fn contains_block_descendant_true_for_inline_wrapping_a_block_list() {
+        // <font><ol><li>a</li></ol></font> -- the exact 68k.news shape.
+        let li = container(block_style(), vec![text_node("a")]);
+        let ol = container(block_style(), vec![li]);
+        let font = container(inline_style(), vec![ol]);
+        assert!(contains_block_descendant(&font, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_true_through_a_chain_of_inline_wrappers() {
+        // <font><b><ol><li>a</li></ol></b></font> -- the block descendant is
+        // two inline levels down, not a direct child.
+        let li = container(block_style(), vec![text_node("a")]);
+        let ol = container(block_style(), vec![li]);
+        let b = container(inline_style(), vec![ol]);
+        let font = container(inline_style(), vec![b]);
+        assert!(contains_block_descendant(&font, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_false_for_inline_wrapping_only_text() {
+        // <em>hello</em>
+        let em = container(inline_style(), vec![text_node("hello")]);
+        assert!(!contains_block_descendant(&em, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_false_for_inline_wrapping_a_replaced_atom() {
+        // <em><img></em> -- a Replaced element is an inline atom, never
+        // block-level, regardless of nesting (D14 regression guard).
+        let em = container(inline_style(), vec![replaced(inline_style())]);
+        assert!(!contains_block_descendant(&em, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_false_for_a_leaf_inline_container() {
+        let em = container(inline_style(), Vec::new());
+        assert!(!contains_block_descendant(&em, 0));
+    }
+
+    #[test]
+    fn is_inline_ish_false_for_inline_container_with_a_block_descendant() {
+        let li = container(block_style(), vec![text_node("a")]);
+        let ol = container(block_style(), vec![li]);
+        let font = container(inline_style(), vec![ol]);
+        assert!(!is_inline_ish(&font), "an inline container holding a block box must not be folded into an IFC leaf");
+    }
+
+    #[test]
+    fn is_inline_ish_true_for_inline_container_with_only_text() {
+        let em = container(inline_style(), vec![text_node("hello")]);
+        assert!(is_inline_ish(&em));
+    }
+
+    /// D14 regression guard: `<em><img></em>` (an inline container wrapping
+    /// a non-block `Replaced` atom) must still fold into one inline run.
+    #[test]
+    fn is_inline_ish_true_for_inline_container_wrapping_a_replaced_atom() {
+        let em = container(inline_style(), vec![replaced(inline_style())]);
+        assert!(is_inline_ish(&em), "em wrapping an img must stay inline-ish (D14)");
+    }
+
+    #[test]
+    fn is_inline_ish_false_for_a_block_container() {
+        let div = container(block_style(), vec![text_node("hello")]);
+        assert!(!is_inline_ish(&div));
     }
 }
