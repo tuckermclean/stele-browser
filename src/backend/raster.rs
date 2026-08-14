@@ -18,11 +18,14 @@
 //!   `backend::tty`'s own module docs describe for this field, just consumed
 //!   here as real pixels rather than a text-mode row) and hands it to
 //!   `Surface::draw_text`.
-//! - `FragmentKind::Image { .. }`: skipped. No M4 fixture emits a real
-//!   `Image` fragment yet (today's block-flow pipeline paints a `Replaced`
-//!   box as a plain `Box`, per `layout::block`'s own doc comment), and
-//!   `MemSurface::blit` is still `todo!()` — wiring real image pixels is the
-//!   NEXT packet's job. `// TODO(images packet): blit`.
+//! - `FragmentKind::Image { image }`: `blit`s `image` into the fragment's
+//!   own rect (images packet, M4): `layout::block::emit` only produces this
+//!   fragment kind for a `Replaced` box whose `image` field is `Some` (a
+//!   successfully fetched+decoded `<img>`) — a `Replaced` with no decoded
+//!   image still paints as a plain `Box` placeholder, unchanged. `blit`
+//!   itself (`MemSurface::blit`) handles the scaling (nearest-neighbor, to
+//!   the fragment's laid-out size) and alpha-blending; this arm is a
+//!   one-line hand-off.
 //!
 //! ## Totality
 //!
@@ -47,9 +50,8 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment]) {
         match &fragment.kind {
             FragmentKind::Box { style } => paint_box(surface, &fragment.rect, style),
             FragmentKind::Text { text, baseline, style } => paint_text(surface, &fragment.rect, text, *baseline, style),
-            FragmentKind::Image { .. } => {
-                // TODO(images packet): blit `image` into `fragment.rect`
-                // once MemSurface::blit is real (see this module's docs).
+            FragmentKind::Image { image } => {
+                surface.blit(to_pixel_rect(&fragment.rect), image);
             }
         }
     }
