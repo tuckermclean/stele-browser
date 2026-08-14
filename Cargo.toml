@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Stele — a finished document-web browser for the 486. No JavaScript, by construction (charter C3)."
 repository = "https://github.com/tuckermclean/stele-browser"
+license = "GPL-3.0-or-later"
 publish = false
 
 [lib]

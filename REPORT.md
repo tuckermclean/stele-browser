@@ -152,6 +152,15 @@ CLI: `stele [--headless] [--dump-text <src> [--cols N]] [--dump-png <src>
 <out.png>] [--render-fb <src>] [--stats]`. `<src>` is a path, `file://`, or
 `http://`. No args → the M0 hello.
 
+## License
+
+Stele is free software under **GPL-3.0-or-later** — Copyright (C) 2026 Tucker
+McLean (see `LICENSE`). Use, study, share, and modify it freely; but incorporate
+it into a distributed product and that product must also be GPL-licensed with
+its source available — no closed-source pilfering. Bundled `font8x8` is public
+domain; `taffy`/`png`/`jpeg-decoder`/`gif` are MIT/Apache-2.0 (both compatible
+with GPLv3), so the combined work is validly GPL-3.0.
+
 ---
 *Fonts: font8x8_basic (Public Domain). Bespoke soul (in-house): the parser, the
 CSS engine, the inline/table/float/frame layout, the tty & fb backends. The
