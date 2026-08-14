@@ -13,6 +13,7 @@
 //! program that runs code shipped by the wire (charter C3).
 
 use std::collections::HashMap;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use stele::backend::fb;
@@ -631,6 +632,90 @@ fn terminal_size() -> (usize, usize) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// packet/shell-mouse (c2): mouse input, the thin/manual half. `stele::browser`
+// owns every actual DECISION (SGR-sequence bytes, the gpm wire layout,
+// apply_mouse's click/wheel semantics) -- pure and unit-tested there (see
+// that module's "Mouse input"/"gpm client protocol" section doc comments).
+// What lives here is the genuinely un-CI-testable glue this packet's brief
+// calls out: connecting to the real `/dev/gpmctl` socket, writing/erasing
+// the xterm SGR mouse-reporting escape sequences, and poll()ing stdin +
+// (when connected) the gpm fd together in the shell's read/draw loop.
+// ---------------------------------------------------------------------------
+
+/// The gpm daemon's control socket -- present only on a bare Linux VT with
+/// `gpm` actually running (never in CI, and never over ssh/tmux/a plain
+/// xterm). Connecting here, or failing to, IS the auto-detect switch this
+/// packet's brief asks for: success -> use gpm, and skip xterm mouse
+/// reporting entirely ("do NOT also enable xterm mouse"); any failure
+/// (socket absent, connection refused, gpm not running) -> fall back to
+/// xterm SGR mouse reporting (see [`run_browser`]).
+const GPM_SOCKET_PATH: &str = "/dev/gpmctl";
+
+/// `\e[?1000h` enables X10/normal mouse button-event reporting; `\e[?1006h`
+/// switches the coordinate ENCODING to SGR (unambiguous past column/row
+/// 223 -- the legacy encoding alone packs `Cx+32`/`Cy+32` into a single
+/// byte each, which a wide terminal or a tall document easily exceeds).
+/// Both are xterm-standard private modes, supported by xterm itself, most
+/// VTE-based terminals, and tmux/screen passthrough -- exactly the
+/// "terminal emulators (so it also works over SSH)" path the packet brief
+/// asks for as the non-gpm fallback.
+const XTERM_MOUSE_ENABLE: &str = "\x1b[?1000h\x1b[?1006h";
+/// The exact inverse of [`XTERM_MOUSE_ENABLE`], written on exit so a plain
+/// keyboard-only terminal session behaves normally after the shell quits --
+/// an un-disabled mouse mode otherwise leaks raw click/drag escape
+/// sequences into whatever runs next in that terminal (most obviously: the
+/// shell prompt underneath).
+const XTERM_MOUSE_DISABLE: &str = "\x1b[?1000l\x1b[?1006l";
+
+/// Best-effort virtual-console number for `Gpm_Connect.vc`. gpm's own
+/// clients derive this from the controlling tty (`ttyname()` + parsing the
+/// trailing digits off `/dev/ttyN`) -- this build has no `libc`/`unsafe`
+/// FFI to call `ttyname_r` with (charter: no `unsafe` in this packet's own
+/// code), so it reads the SAME information a different, safe way: the
+/// `/proc/self/fd/0` symlink, which the kernel itself resolves to stdin's
+/// underlying device path. `/dev/ttyN` (a bare VT device) -> `N`; anything
+/// else (`/dev/pts/N` over ssh/tmux/a GUI terminal, or an unreadable
+/// `/proc`, e.g. a `/proc` not mounted) has no VC number at all -- `0`,
+/// which the packet brief names as a plausible "the console this
+/// connection is on" sentinel some gpm builds accept, is returned instead
+/// of failing the whole connect outright.
+///
+/// DOCUMENTED best-effort, per the packet brief's own call for this: if a
+/// real system's `gpmd` rejects `vc: 0` (some configurations require the
+/// exact real VC number), this is the one function to adjust -- e.g. by
+/// reading `/sys/class/tty/tty0/active` (`"ttyN\n"`) as a second fallback,
+/// which wasn't added here to keep the sysfs-parsing surface (and its own
+/// failure modes) no bigger than this packet strictly needs.
+fn derive_vc() -> i32 {
+    match std::fs::read_link("/proc/self/fd/0") {
+        Ok(path) => path.to_str().and_then(|s| s.strip_prefix("/dev/tty")).and_then(|digits| digits.parse::<i32>().ok()).unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// Connect to the gpm daemon and complete its handshake: open
+/// [`GPM_SOCKET_PATH`] as a `UnixStream`, then write a `Gpm_Connect` record
+/// (`browser::GpmConnect::to_bytes` -- see that struct's doc comment for
+/// the exact wire layout) with `event_mask: GPM_EVENT_MASK_ALL` (every
+/// event type), `default_mask: 0` / `min_mod: 0` (nothing passed through to
+/// a default handler, no modifier floor), `max_mod: 0xFFFF` (accept any
+/// modifier combination), our own `pid`, and [`derive_vc`]'s best-effort VC.
+///
+/// `None` for anything short of a fully successful connect+handshake: no
+/// `/dev/gpmctl` (not on a VT, or gpm isn't running), a connection error,
+/// or a failed write -- every one of these is exactly the auto-detect
+/// signal [`run_browser`] uses to fall back to xterm mouse reporting
+/// instead, never a panic or a hard failure of the whole shell.
+fn connect_gpm() -> Option<UnixStream> {
+    use std::io::Write;
+    let mut stream = UnixStream::connect(GPM_SOCKET_PATH).ok()?;
+    let connect =
+        browser::GpmConnect { event_mask: browser::GPM_EVENT_MASK_ALL, default_mask: 0, min_mod: 0, max_mod: 0xFFFF, pid: std::process::id() as i32, vc: derive_vc() };
+    stream.write_all(&connect.to_bytes()).ok()?;
+    Some(stream)
+}
+
 /// The interactive shell's raw-mode read/draw loop -- see this module's own
 /// section doc comment for the pure/thin split. NOT unit-tested (brief:
 /// "this is NOT end-to-end CI-testable — no terminal in CI"); manually
@@ -657,6 +742,7 @@ fn terminal_size() -> (usize, usize) {
 /// `panic = "abort"`, no safety net for a genuine bug that panics anyway.
 fn run_browser(source: &str) {
     use std::io::{Read, Write};
+    use rustix::event::{poll, PollFd, PollFlags};
     use rustix::termios::{LocalModes, OptionalActions};
 
     let orig_termios = match rustix::termios::tcgetattr(std::io::stdin()) {
@@ -681,23 +767,93 @@ fn run_browser(source: &str) {
     let mut view = browser::ViewState::initial(&page, cols, content_rows);
     let mut parser = browser::KeyParser::new();
 
+    // packet/shell-mouse: auto-detect, gpm first. `connect_gpm` is a total
+    // best-effort attempt (see its own doc comment) -- when it succeeds we
+    // ONLY use gpm (never also turn on xterm mouse reporting, per the
+    // packet brief); when it fails (no /dev/gpmctl, not on a VT, gpm not
+    // running) we fall back to xterm SGR mouse reporting instead. Neither
+    // present is still a fully working shell -- exactly c1's keyboard-only
+    // behavior, untouched.
+    let mut gpm = connect_gpm();
+    let use_xterm_mouse = gpm.is_none();
+    if use_xterm_mouse {
+        print!("{XTERM_MOUSE_ENABLE}");
+    }
+
     print!("\x1b[?25l"); // hide cursor
     let _ = std::io::stdout().flush();
 
     let mut buf = [0u8; 256];
+    let mut gpm_buf: Vec<u8> = Vec::new();
+    let mut gpm_read_buf = [0u8; 256];
+
     'outer: loop {
         let frame = browser::render_frame(&page, &view);
         print!("\x1b[H\x1b[2J{frame}");
         let _ = std::io::stdout().flush();
 
-        // Blocking read is fine for keyboard-only c1 (brief: "no poll
-        // needed yet") -- the loop simply waits for the next keypress.
-        let n = match std::io::stdin().read(&mut buf) {
-            Ok(0) | Err(_) => break, // EOF or a read error: exit cleanly, restore below still runs
-            Ok(n) => n,
+        // Watch stdin AND (when connected) the gpm socket at once -- a
+        // single blocking stdin read (c1's own loop) can't see gpm events
+        // arriving on a SEPARATE fd, hence `poll` (this packet's own reason
+        // for the new rustix "event" feature). `None` timeout: block until
+        // one of them has something, exactly like the old blocking read.
+        let stdin = std::io::stdin();
+        let (stdin_ready, gpm_ready) = {
+            let mut poll_fds = vec![PollFd::new(&stdin, PollFlags::IN)];
+            if let Some(g) = gpm.as_ref() {
+                poll_fds.push(PollFd::new(g, PollFlags::IN));
+            }
+            if poll(&mut poll_fds, None).is_err() {
+                break; // a poll error -- exit cleanly, restore below still runs
+            }
+            let stdin_ready = poll_fds[0].revents().contains(PollFlags::IN);
+            // HUP/ERR too: a dead gpm socket must be noticed even though it
+            // will never again report POLLIN (see the read arm below, which
+            // drops `gpm` on any read failure).
+            let gpm_ready = poll_fds.get(1).is_some_and(|p| p.revents().intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR));
+            (stdin_ready, gpm_ready)
         };
 
-        for event in parser.feed(&buf[..n]) {
+        let mut events: Vec<browser::InputEvent> = Vec::new();
+
+        if stdin_ready {
+            let n = match stdin.lock().read(&mut buf) {
+                Ok(0) | Err(_) => break, // EOF or a read error: exit cleanly, restore below still runs
+                Ok(n) => n,
+            };
+            events.extend(parser.feed(&buf[..n]));
+        }
+
+        if gpm_ready {
+            if let Some(g) = gpm.as_mut() {
+                match g.read(&mut gpm_read_buf) {
+                    Ok(0) | Err(_) => {
+                        // gpm went away mid-session (daemon restarted/
+                        // killed) -- fall back to keyboard-only for the
+                        // rest of it rather than spin-poll a dead fd
+                        // forever. Switching to xterm mouse reporting this
+                        // late isn't attempted: we can't tell from here
+                        // whether the terminal underneath even supports
+                        // it, and gpm dying under a live shell is rare
+                        // enough not to be worth that extra complexity.
+                        gpm = None;
+                    }
+                    Ok(n) => {
+                        gpm_buf.extend_from_slice(&gpm_read_buf[..n]);
+                        while gpm_buf.len() >= browser::GPM_EVENT_SIZE {
+                            if let Some(gpm_event) = browser::parse_gpm_event(&gpm_buf[..browser::GPM_EVENT_SIZE]) {
+                                if let Some(mouse) = browser::gpm_event_to_mouse(&gpm_event) {
+                                    events.push(browser::InputEvent::Mouse(mouse));
+                                }
+                            }
+                            gpm_buf.drain(0..browser::GPM_EVENT_SIZE);
+                        }
+                    }
+                }
+            }
+        }
+
+        for event in events {
             let (next_view, cmd) = match event {
                 browser::InputEvent::Key(key) => browser::apply_key(key, view, &page),
                 browser::InputEvent::Mouse(mouse) => browser::apply_mouse(mouse, view, &page),
@@ -738,6 +894,9 @@ fn run_browser(source: &str) {
         }
     }
 
+    if use_xterm_mouse {
+        print!("{XTERM_MOUSE_DISABLE}");
+    }
     let _ = rustix::termios::tcsetattr(std::io::stdin(), OptionalActions::Now, &orig_termios);
     print!("\x1b[?25h\x1b[0m\n");
     let _ = std::io::stdout().flush();
