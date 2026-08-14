@@ -1,0 +1,8 @@
+
+
+ Visible: styled only by the UA sheet.
+
+
+ Visible again: this paragraph also matches the linked .overridden rule, but
+ the LATER inline <style> block re-enables display:block for it, overriding the
+ earlier <link> (source order: link before style, style wins the tie).

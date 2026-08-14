@@ -4,14 +4,19 @@
 //! raw text, per `dom::parser`'s `RAWTEXT_ELEMENTS` treatment) but nothing
 //! ever read it back out and parsed it. This module is that missing step.
 //!
-//! Scope: inline `<style>` elements only. `<link rel="stylesheet" href=...>`
-//! needs a fetch pre-pass (like `images::collect_images`) that this packet
-//! does not add — deferred to a follow-up (see the M5 report/DECISIONS
-//! entry). A `<link>` with no matching fetch pass just sits inert in the
-//! DOM, exactly as before this packet.
+//! Scope: inline `<style>` elements only — `<link rel="stylesheet" href=...>`
+//! needs a fetch pre-pass (like `images::collect_images`) that has no
+//! business happening against a pure `&Dom` (no I/O, no base `Url` in this
+//! signature). That fetch pre-pass now lives in the driver-level
+//! `crate::stylesheets` module (packet `m5-link-css`) — see its own doc
+//! comment for the design. This module exposes two small pub wrappers below
+//! ([`parse_and_flatten`], [`media_attr_matches`]) specifically so that
+//! driver-level module can reuse this module's `parser`/`media` machinery
+//! (both private submodules of `style`, invisible outside it) without this
+//! packet having to loosen their privacy or duplicate their logic.
 
 use crate::dom::{Dom, Node, NodeId};
-use crate::style::{media, parser, Stylesheet};
+use crate::style::{media, parser, tokenizer, Stylesheet};
 
 /// Walk `dom` in document order, parse every `<style>` element's raw-text
 /// content into a [`Stylesheet`], and return them in document order — later
@@ -76,6 +81,38 @@ pub fn collect_author_sheets(dom: &Dom) -> Vec<Stylesheet> {
 /// sheet's own size — see that function's doc comment); no new failure mode.
 pub fn collect_author_sheets_for_viewport(dom: &Dom, viewport_width_px: f32) -> Vec<Stylesheet> {
     collect_author_sheets(dom).into_iter().map(|s| media::flatten_media(&s, viewport_width_px)).collect()
+}
+
+/// Parse `css` and immediately flatten any `@media` blocks it contains
+/// against `viewport_width_px` — `parser::parse` + `media::flatten_media`
+/// composed into one call. `crate::stylesheets` (the `<link>` fetch
+/// pre-pass) needs exactly this: a fetched stylesheet's TEXT (not a DOM
+/// `<style>` element) parsed and viewport-flattened the same way
+/// [`collect_author_sheets_for_viewport`] already does for inline `<style>`
+/// blocks, so a `<link>`-sourced sheet and a `<style>`-sourced sheet reach
+/// `cascade` through identical treatment. Total: delegates entirely to
+/// `parser::parse` (total over any `&str`, per its own doc comment) and
+/// `media::flatten_media` (total, see its own doc comment) — no new failure
+/// mode.
+pub fn parse_and_flatten(css: &str, viewport_width_px: f32) -> Stylesheet {
+    media::flatten_media(&parser::parse(css), viewport_width_px)
+}
+
+/// Does a `media="..."` attribute VALUE (as found on a `<link>` or `<style>`
+/// element) match a screen render at `viewport_width_px`? Thin wrapper over
+/// `media::MediaQuery::parse`/`matches` for driver-level code (`crate::
+/// stylesheets`) that needs to gate a WHOLE stylesheet by its `media`
+/// attribute — distinct from an in-CSS `@media { }` block (which
+/// [`parse_and_flatten`]/[`collect_author_sheets_for_viewport`] already
+/// handle) because an HTML attribute is bare condition tokens, never wrapped
+/// in a rule body. Total: `tokenizer::tokenize` and `MediaQuery::parse`/
+/// `matches` are each total over any input (including empty/garbage —- see
+/// their own doc comments), so this is too; an empty or unparseable
+/// `media_attr` fails closed (never matches — same C2 fail-closed treatment
+/// `media`'s own module doc describes), matching plain CSS `@media`'s
+/// behavior for the same malformed input.
+pub fn media_attr_matches(media_attr: &str, viewport_width_px: f32) -> bool {
+    media::MediaQuery::parse(&tokenizer::tokenize(media_attr)).matches(viewport_width_px)
 }
 
 fn style_text(dom: &Dom, style_id: NodeId) -> String {
@@ -252,5 +289,50 @@ mod tests {
         assert_eq!(sheets[0].rules.len(), 5000);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles.len(), d.len());
+    }
+
+    // ---- parse_and_flatten / media_attr_matches (m5-link-css) -------------
+
+    #[test]
+    fn parse_and_flatten_parses_plain_rules_with_no_media() {
+        let sheet = parse_and_flatten("p { color: red }", 320.0);
+        assert_eq!(sheet.rules.len(), 1);
+    }
+
+    #[test]
+    fn parse_and_flatten_folds_a_matching_media_block_into_rules() {
+        let sheet = parse_and_flatten("@media (max-width: 500px) { p { color: red } }", 320.0);
+        assert!(sheet.media_rules.is_empty());
+        assert_eq!(sheet.rules.len(), 1);
+    }
+
+    #[test]
+    fn parse_and_flatten_drops_a_non_matching_media_block() {
+        let sheet = parse_and_flatten("@media (max-width: 500px) { p { color: red } }", 640.0);
+        assert!(sheet.rules.is_empty());
+    }
+
+    #[test]
+    fn parse_and_flatten_is_total_over_garbage_css() {
+        let sheet = parse_and_flatten("!!!not css!!!", 320.0);
+        assert!(sheet.rules.is_empty());
+    }
+
+    #[test]
+    fn media_attr_matches_narrow_query_at_narrow_viewport_only() {
+        assert!(media_attr_matches("(max-width: 500px)", 320.0));
+        assert!(!media_attr_matches("(max-width: 500px)", 640.0));
+    }
+
+    #[test]
+    fn media_attr_matches_screen_and_feature() {
+        assert!(media_attr_matches("screen and (min-width: 800px)", 1024.0));
+        assert!(!media_attr_matches("screen and (min-width: 800px)", 320.0));
+    }
+
+    #[test]
+    fn media_attr_matches_fails_closed_on_garbage_or_empty() {
+        assert!(!media_attr_matches("!!!garbage!!!", 320.0));
+        assert!(!media_attr_matches("!!!garbage!!!", 1_000_000.0));
     }
 }

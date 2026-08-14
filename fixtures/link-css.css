@@ -1,0 +1,7 @@
+/* fixtures/link-css.css — external stylesheet fetched via
+   <link rel="stylesheet" href="link-css.css"> by fixtures/link-css.html
+   (packet m5-link-css). Uses display:none (like fixtures/author-css.html's
+   inline <style> does) rather than color, since color has no tty-visible
+   effect — display presence/absence is what the tty golden can show. */
+p.hidden { display: none; }
+p.overridden { display: none; }

@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><title>Link CSS Fixture</title>
+<link rel="stylesheet" href="link-css.css">
+<style>
+  p.overridden { display: block; }
+</style>
+<link rel="icon" href="does-not-exist-favicon.ico">
+</head>
+<body>
+<p>Visible: styled only by the UA sheet.</p>
+<p class="hidden">Hidden: the external &lt;link rel=stylesheet&gt; sheet (link-css.css) sets display:none on this paragraph.</p>
+<p class="overridden">Visible again: this paragraph also matches the linked .overridden rule, but the LATER inline &lt;style&gt; block re-enables display:block for it, overriding the earlier &lt;link&gt; (source order: link before style, style wins the tie).</p>
+</body>
+</html>

@@ -13,6 +13,6 @@ mod tokenizer;
 mod ua;
 mod value;
 
-pub use author::{collect_author_sheets, collect_author_sheets_for_viewport};
+pub use author::{collect_author_sheets, collect_author_sheets_for_viewport, media_attr_matches, parse_and_flatten};
 pub use computed::ComputedStyle;
 pub use parser::Stylesheet;
