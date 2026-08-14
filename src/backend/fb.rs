@@ -91,9 +91,11 @@ impl std::fmt::Display for FbError {
 /// each a single decimal integer (sysfs's `bits_per_pixel`/`stride` files).
 /// Total over any input: empty/garbage/wrong-field-count text is a clean
 /// `Err(FbError::Parse(_))`, never a panic.
-pub fn parse_fb_info(_virtual_size: &str, _bpp_str: &str, _stride_str: &str) -> Result<FbInfo, FbError> {
-    // RED stub: not yet implemented.
-    Err(FbError::Parse("not yet implemented".to_string()))
+pub fn parse_fb_info(virtual_size: &str, bpp_str: &str, stride_str: &str) -> Result<FbInfo, FbError> {
+    let (width, height) = parse_virtual_size(virtual_size)?;
+    let bpp = parse_u32_field(bpp_str, "bits_per_pixel")?;
+    let stride = parse_u32_field(stride_str, "stride")?;
+    Ok(FbInfo { width, height, bpp, stride })
 }
 
 fn parse_virtual_size(s: &str) -> Result<(u32, u32), FbError> {
@@ -159,10 +161,55 @@ fn bytes_per_pixel(bpp: u32) -> Option<u32> {
 /// Total: unsupported `bpp` is `Err(FbError::UnsupportedBpp)`; a
 /// `height * stride` that doesn't fit `usize` is `Err(FbError::GeometryTooLarge)`
 /// rather than an overflowing/panicking allocation.
-pub fn convert_to_fb_bytes(_surface_rgba: &[u8], _surf_w: u32, _surf_h: u32, info: FbInfo) -> Result<Vec<u8>, FbError> {
-    // RED stub: not yet implemented.
-    let _ = bytes_per_pixel(info.bpp);
-    Err(FbError::UnsupportedBpp(info.bpp))
+pub fn convert_to_fb_bytes(surface_rgba: &[u8], surf_w: u32, surf_h: u32, info: FbInfo) -> Result<Vec<u8>, FbError> {
+    let bpp_bytes = bytes_per_pixel(info.bpp).ok_or(FbError::UnsupportedBpp(info.bpp))?;
+
+    let total: u64 = (info.height as u64) * (info.stride as u64);
+    let cap = usize::try_from(total).map_err(|_| FbError::GeometryTooLarge)?;
+    let mut out = vec![0u8; cap];
+
+    // How many whole pixels of a row actually fit within `stride`.
+    let max_cols_by_stride = info.stride / bpp_bytes;
+    let copy_w = surf_w.min(info.width).min(max_cols_by_stride);
+    let copy_h = surf_h.min(info.height);
+
+    let stride = info.stride as usize;
+    let src_row_bytes = (surf_w as usize) * 4;
+
+    for y in 0..copy_h as usize {
+        let src_row_off = y * src_row_bytes;
+        let dst_row_off = y * stride;
+        for x in 0..copy_w as usize {
+            let src_i = src_row_off + x * 4;
+            if src_i + 3 >= surface_rgba.len() {
+                break; // defensive: a caller-supplied surf slice shorter than claimed
+            }
+            let r = surface_rgba[src_i];
+            let g = surface_rgba[src_i + 1];
+            let b = surface_rgba[src_i + 2];
+
+            let dst_i = dst_row_off + x * (bpp_bytes as usize);
+            match info.bpp {
+                32 => {
+                    out[dst_i] = b;
+                    out[dst_i + 1] = g;
+                    out[dst_i + 2] = r;
+                    out[dst_i + 3] = 0;
+                }
+                16 => {
+                    let r5 = (r >> 3) as u16;
+                    let g6 = (g >> 2) as u16;
+                    let b5 = (b >> 3) as u16;
+                    let px = (r5 << 11) | (g6 << 5) | b5;
+                    out[dst_i] = (px & 0xFF) as u8;
+                    out[dst_i + 1] = (px >> 8) as u8;
+                }
+                _ => unreachable!("bpp already validated by bytes_per_pixel above"),
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// Write `bytes` (already device-formatted, e.g. by [`convert_to_fb_bytes`])
