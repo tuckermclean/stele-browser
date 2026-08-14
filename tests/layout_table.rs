@@ -275,3 +275,64 @@ fn bare_row_and_row_group_sibling_both_place() {
     assert!(texts.iter().any(|f| text_of(f) == "bare"));
     assert!(texts.iter().any(|f| text_of(f) == "grouped"));
 }
+
+// ---- Stress: wide tables (thousands of cells) must not hang (Critical C1) ----
+//
+// Mirrors `layout::table::solve_table`'s own
+// `huge_cell_count_places_promptly_and_stays_1to1` test, but through the
+// REAL pipeline (`layout::layout`, not just `place_grid`): each cell's
+// min/max-content width and content-at-solved-width are measured via a
+// fresh taffy sub-layout (`cell_min_max_width`/`cell_content_layout` in
+// `layout::block`), which is orders of magnitude more expensive per cell
+// than `place_grid`'s own pure-arithmetic placement. A table with
+// thousands of plain `<td>`s (a large spreadsheet export -- not exotic,
+// not adversarial) must still return promptly: either because it's small
+// enough to measure for real, or because it's large enough to trip
+// `block::MAX_TABLE_MEASURED_CELLS` and degrade to plain stacked blocks
+// (still total, still bounded, just not "real" table geometry).
+fn wide_table(cols: usize, rows_n: usize) -> LayoutNode {
+    let rows: Vec<LayoutNode> =
+        (0..rows_n).map(|_| row((0..cols).map(|_| cell(1, 1, "x")).collect())).collect();
+    root_with(table(rows))
+}
+
+/// A table just past `block::MAX_TABLE_MEASURED_CELLS` (2_000): comfortably
+/// larger than any real 1996-era data table (hundreds of cells), but still
+/// modest by "hostile input" standards -- exactly the shape the coordinator
+/// flagged (tens of thousands of `<td>`s is even worse; this is the
+/// smallest case that must already degrade). Must return in well under the
+/// minutes-long hang this used to take, with every fragment still finite.
+#[test]
+fn wide_table_past_measurement_cap_degrades_promptly() {
+    let t = wide_table(50, 60); // 3_000 cells
+    let start = std::time::Instant::now();
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    let elapsed = start.elapsed();
+    assert_all_finite_nonneg(&fragments);
+    assert!(elapsed.as_secs() < 10, "3_000-cell table took {elapsed:?} -- expected a prompt block-fallback degrade");
+    // Degraded to block fallback: every cell's text still renders (nothing
+    // silently dropped), just not through real table-grid geometry -- a
+    // block-fallback cell's own box collapses to near-zero width (an
+    // over-cap table is never given `item_is_table`/measured sizing), so
+    // cross-checking even a handful of x/y positions against real solved
+    // column math isn't meaningful here; presence + promptness is the bar.
+    let texts = text_fragments(&fragments);
+    assert_eq!(texts.len(), 3_000, "every cell's text fragment still renders under the block fallback");
+}
+
+/// A realistic large-but-real data table (hundreds of cells, comfortably
+/// under the cap): still measured for real (real column solve, real
+/// per-cell taffy sub-layouts), and must still complete promptly -- this is
+/// the case the per-cell measurement CACHING fix (reusing one solve between
+/// `measure_node` and `emit` rather than recomputing it) is aimed at.
+#[test]
+fn large_real_table_under_cap_still_completes_promptly() {
+    let t = wide_table(20, 40); // 800 cells, under the 2_000 cap
+    let start = std::time::Instant::now();
+    let fragments = layout(&t, Size { w: 2000.0, h: 4000.0 });
+    let elapsed = start.elapsed();
+    assert_all_finite_nonneg(&fragments);
+    assert!(elapsed.as_secs() < 10, "800-cell table took {elapsed:?} -- expected the caching fix to keep this fast");
+    let texts = text_fragments(&fragments);
+    assert_eq!(texts.len(), 800);
+}

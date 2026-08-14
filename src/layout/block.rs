@@ -35,6 +35,8 @@
 //! M2 — only block-level boxes get a `Box` fragment; only the text color and
 //! font carried per `InlineRun` differs per inline element.
 
+use std::cell::RefCell;
+
 use taffy::prelude::{
     auto, length, percent, AlignItems as TAlignItems, AvailableSpace, Dimension as TDimension,
     Display as TDisplay, FlexDirection as TFlexDirection, FlexWrap as TFlexWrap,
@@ -45,7 +47,7 @@ use taffy::prelude::{
 
 use crate::layout::inline::{self, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
-use crate::layout::table_layout::{self, Grid};
+use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
     AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto,
@@ -85,23 +87,24 @@ const MAX_CONTENT_WIDTH: f32 = 1.0e7;
 const DEPTH_CAP: usize = 100;
 
 /// The maximum number of *tables nested inside table cells* `translate_any`
-/// will treat as a real table (build a leaf for + run [`solve_table_for_node`]
-/// on). Distinct from [`DEPTH_CAP`]: `DEPTH_CAP` bounds one `LayoutNode`
-/// parent/child chain's recursion within a single `translate_any` walk, but
-/// each table's cell content is measured/laid out via its OWN fresh
-/// `translate_any` walk (see `cell_min_max_width`/`cell_content_layout`) —
-/// walks that are themselves invoked recursively (from inside the OUTER
-/// table's own measure/emit) whenever a cell contains another table. A
-/// pathological "table in a cell in a table in a cell in ..." bomb would
-/// otherwise nest these walks (and the real native call stack frames that
-/// come with each: `compute_layout_with_measure`, `emit`, `translate_any`)
-/// without limit — a guard-page fault (SIGABRT), same failure class
-/// `DEPTH_CAP` exists to prevent, just via a different recursion path. Once
-/// the budget hits `0`, `translate_any` stops treating a `Display::Table`
-/// node as a table at all: it falls back to the pre-existing plain-block
-/// translation (see `map_display`'s `Display::Table => TDisplay::Block`
-/// arm) — an over-deep nested table degrades to its rows/cells rendering as
-/// stacked blocks, not a crash.
+/// will treat as a real table (build a leaf for + run
+/// [`compute_table_cache_entry`] on). Distinct from [`DEPTH_CAP`]:
+/// `DEPTH_CAP` bounds one `LayoutNode` parent/child chain's recursion within
+/// a single `translate_any` walk, but each table's cell content is
+/// measured/laid out via its OWN fresh `translate_any` walk (see
+/// `cell_min_max_width`/`cell_content_layout`) — walks that are themselves
+/// invoked recursively (from inside the OUTER table's own measure/emit)
+/// whenever a cell contains another table. A pathological "table in a cell
+/// in a table in a cell in ..." bomb would otherwise nest these walks (and
+/// the real native call stack frames that come with each:
+/// `compute_layout_with_measure`, `emit`, `translate_any`) without limit —
+/// a guard-page fault (SIGABRT), same failure class `DEPTH_CAP` exists to
+/// prevent, just via a different recursion path. Once the budget hits `0`,
+/// `translate_any` stops treating a `Display::Table` node as a table at
+/// all: it falls back to the pre-existing plain-block translation (see
+/// `map_display`'s `Display::Table => TDisplay::Block` arm) — an over-deep
+/// nested table degrades to its rows/cells rendering as stacked blocks, not
+/// a crash.
 ///
 /// Deliberately small (2, not e.g. 8): the guard isn't just against native
 /// *stack* depth — solving one table leaf calls `cell_min_max_width` (two
@@ -116,11 +119,41 @@ const DEPTH_CAP: usize = 100;
 /// rendering the common "one table nested inside another" case for real
 /// (a doubly/triply-nested table is rare even in gnarly 1996 markup, and
 /// degrading it to stacked blocks is a documented, acceptable M3
-/// simplification — see the packet report).
+/// simplification — see the packet report). This bounds the NESTING axis;
+/// [`MAX_TABLE_MEASURED_CELLS`] bounds the WIDTH axis (one table with many
+/// cells, no nesting at all) — a distinct cost, capped separately below.
 const TABLE_DEPTH_CAP: usize = 2;
 
+/// The maximum number of grid cells (`columns * rows`, effectively — really
+/// "however many cells `table_layout::place_grid` actually places")
+/// `translate_any` will run the EXPENSIVE per-cell taffy measurement
+/// pipeline on. Distinct from `table_layout::place_grid`'s own
+/// `MAX_GRID_CELLS` (262_144): that cap only bounds place_grid's own cheap
+/// pure-arithmetic bookkeeping (an occupied-slot bitset), sized for that
+/// cost. THIS cap bounds a completely different, far more expensive cost:
+/// `cell_min_max_width` (two fresh `TaffyTree` + `compute_layout_with_measure`
+/// sub-layouts) and `cell_content_layout` (one more) PER CELL — each a real
+/// (if individually small) allocation + layout pass, not arithmetic.
+/// Empirically (a throwaway stress harness, not committed): a flat
+/// (non-nested) table scales roughly linearly at this cost, but the
+/// constant factor is large enough that 20_000 cells already took ~4
+/// seconds; a "large spreadsheet export" table with tens of thousands of
+/// plain `<td>`s (not exotic, not adversarial — just large) would run well
+/// past any reasonable time budget, and place_grid's own 262_144-cell cap
+/// does nothing to stop it (that cap exists for a DIFFERENT, much cheaper
+/// operation). Past this cap, `translate_any` doesn't build a table leaf at
+/// all — same graceful degrade as an exhausted `TABLE_DEPTH_CAP`: the
+/// table's rows/cells fall through to plain stacked blocks (see
+/// `map_display`'s `Display::Table => TDisplay::Block` arm), total and
+/// bounded rather than fast-only-until-the-input-is-big-enough. 2_000 is
+/// comfortably past any real 1996-era hand-authored data table (these run
+/// to hundreds of cells, not thousands) while keeping the worst case (this
+/// many cells, each paying the full ~3x-per-cell measurement cost even
+/// after the caching fix below) a small, fast, fixed constant.
+const MAX_TABLE_MEASURED_CELLS: usize = 2_000;
+
 /// Horizontal gap inserted between adjacent columns — see
-/// `solve_table_for_node`'s "Border-spacing" doc note. `8.0` (one full
+/// `compute_table_cache_entry`'s "Border-spacing" doc note. `8.0` (one full
 /// `text::BitmapFont::vga_8x16` cell), not CSS's real `2px` initial value:
 /// `backend::tty::render` maps continuous layout-pixel x-coordinates to
 /// discrete character columns by *rounding* to the nearest cell (`col =
@@ -136,18 +169,47 @@ const TABLE_DEPTH_CAP: usize = 2;
 const BORDER_SPACING_X: f32 = 8.0;
 const BORDER_SPACING_Y: f32 = 0.0;
 
+/// A table leaf's fully-solved layout: column/row geometry plus each cell's
+/// own content (size + paint-ordered fragments, relative to its own `(0,
+/// 0)` border-box origin — see `cell_content_layout`). `cell_content[i]`
+/// corresponds to `table_layout.cell_rects[i]`, both indexed in the same
+/// order `table_layout::place_grid` produces (place_grid is a pure,
+/// deterministic function of the table's `LayoutNode`, so recomputing it —
+/// cheap, no taffy involved — always reproduces the same order; this cache
+/// doesn't need to also store the `Grid` itself).
+///
+/// This is the fix for the Critical (per-cell measurement cost is
+/// unbounded/redundant) flagged in review: computed ONCE by
+/// `compute_table_cache_entry` and reused by both `measure_node` (peeks the
+/// sizes) and `emit` (consumes the fragments) for a given `avail_w`, rather
+/// than each re-running the full per-cell taffy sub-layout pipeline from
+/// scratch — see `ensure_table_cache`.
+struct TableCacheEntry {
+    /// The `available_width` this entry was solved at (see `ensure_table_cache`
+    /// — a cached entry is only reused when a new query's `avail_w` matches
+    /// this one; `solve_table`'s column resolution genuinely depends on it).
+    avail_w: f32,
+    columns: usize,
+    rows: usize,
+    table_layout: TableLayout,
+    cell_content: Vec<(Size, Vec<Fragment>)>,
+}
+
 /// The taffy node-context type: either a folded inline-formatting-context
-/// leaf's runs (pre-existing, P6), or a table leaf's source `LayoutNode` +
-/// remaining nested-table budget (see [`TABLE_DEPTH_CAP`]). A table's cell
+/// leaf's runs (pre-existing, P6), or a table leaf's source `LayoutNode`,
+/// remaining nested-table budget (see [`TABLE_DEPTH_CAP`]), and its lazily-
+/// computed, cached solve (see [`TableCacheEntry`]). A table's cell
 /// content, min/max-content widths, and row heights are NOT computed eagerly
 /// at translate time (the table's own final width depends on parent-supplied
 /// available space, only known once taffy visits this leaf during layout) —
 /// so, exactly like the pre-existing text/inline leaves, a table leaf defers
 /// its real sizing work to the measure function (`measure_node`), which
-/// pattern-matches this enum.
+/// pattern-matches this enum. The `RefCell` gives `emit` (which only holds a
+/// shared `&TaffyTree`) the same interior-mutable access to the cache slot
+/// that `measure_node` (which taffy calls with `&mut NodeCtx`) has.
 enum NodeCtx<'a> {
     Inline(Vec<InlineRun>),
-    Table(&'a LayoutNode, usize),
+    Table(&'a LayoutNode, usize, RefCell<Option<TableCacheEntry>>),
 }
 
 /// A translated node: enough provenance back to the source [`LayoutNode`]
@@ -158,12 +220,11 @@ enum Built<'a> {
     Inline { taffy_id: TNodeId, runs: Vec<InlineRun> },
     Replaced { style: &'a ComputedStyle, taffy_id: TNodeId, intrinsic: Size },
     /// A `display: table` box, translated as a single bespoke leaf (module
-    /// docs): `node` is the table's own `LayoutNode` (re-walked by `emit` to
-    /// paint cells — the grid/solve isn't cached between measure and emit,
-    /// see the DECISIONS note on this documented perf simplification), and
-    /// `table_budget` is the remaining nested-table budget cell content may
-    /// use (see [`TABLE_DEPTH_CAP`]).
-    Table { style: &'a ComputedStyle, taffy_id: TNodeId, node: &'a LayoutNode, table_budget: usize },
+    /// docs). `emit` fetches the table's `LayoutNode`, nested-table budget,
+    /// and cached solve back out of the taffy tree's own node context for
+    /// this leaf (`taffy.get_node_context(taffy_id)`) rather than
+    /// duplicating them here — see `NodeCtx::Table`/[`TableCacheEntry`].
+    Table { style: &'a ComputedStyle, taffy_id: TNodeId },
 }
 
 impl Built<'_> {
@@ -258,10 +319,20 @@ fn translate_any<'a>(
         // A `display: table` box (real HTML `<table>`, or any element styled
         // `display: table`) becomes a single bespoke leaf — see the module
         // docs' "table" bullet and `measure_node`'s `NodeCtx::Table` arm —
-        // UNLESS the nested-table budget is exhausted, in which case it
-        // falls through to the plain-block translation below exactly like
-        // it did before this packet (see [`TABLE_DEPTH_CAP`]).
-        BoxContent::Container if node.style.display == Display::Table && table_budget > 0 => {
+        // UNLESS the nested-table budget is exhausted (`TABLE_DEPTH_CAP`) OR
+        // the table has more cells than `MAX_TABLE_MEASURED_CELLS` (a
+        // pathologically wide table — the expensive per-cell taffy
+        // measurement pipeline isn't safe to run unboundedly-many times; see
+        // that constant's doc comment), in which case it falls through to
+        // the plain-block translation below exactly like it did before this
+        // packet. `place_grid` here is cheap (pure arithmetic, itself capped
+        // — see `table_layout::MAX_GRID_CELLS`) — only a cell COUNT, not the
+        // per-cell measurement, needs computing to decide.
+        BoxContent::Container
+            if node.style.display == Display::Table
+                && table_budget > 0
+                && table_layout::place_grid(node).cells.len() <= MAX_TABLE_MEASURED_CELLS =>
+        {
             let mut style = base_style(&node.style);
             // Tables are shrink-to-fit, not stretch-sized, for an auto
             // width (CSS 2.1 §17.4/§10.3.3 — a table is one of the classic
@@ -278,14 +349,16 @@ fn translate_any<'a>(
             // of its ~88px solved content width until this flag was set.
             style.item_is_table = true;
             let id = taffy
-                .new_leaf_with_context(style, NodeCtx::Table(node, table_budget - 1))
+                .new_leaf_with_context(style, NodeCtx::Table(node, table_budget - 1, RefCell::new(None)))
                 .expect("taffy leaf alloc is infallible for a fresh tree");
-            Built::Table { style: &node.style, taffy_id: id, node, table_budget: table_budget - 1 }
+            Built::Table { style: &node.style, taffy_id: id }
         }
         // TableCell reached here means it's outside a table-leaf's own cell
-        // walk (an orphan `<td>` with no table ancestor, or one under a
-        // budget-exhausted table) — translates exactly like a Container, a
-        // plain stacked block, matching pre-table-layout-packet behavior.
+        // walk (an orphan `<td>` with no table ancestor, one under a
+        // budget-exhausted table, or one belonging to an over-
+        // `MAX_TABLE_MEASURED_CELLS` table) — translates exactly like a
+        // Container, a plain stacked block, matching pre-table-layout-packet
+        // behavior.
         BoxContent::Container | BoxContent::TableCell { .. } => {
             let mut style = base_style(&node.style);
             style.display = map_display(node.style.display);
@@ -409,11 +482,12 @@ fn translate_container_children<'a>(
 /// The measure function threaded through every `compute_layout_with_measure`
 /// call in this module — the top-level `layout_tree`, and every nested
 /// per-cell/per-table sub-tree built while solving a table (see
-/// `cell_query_width`/`cell_content_layout`/`solve_table_for_node`).
+/// `cell_query_width`/`cell_content_layout`/`ensure_table_cache`).
 /// Dispatches on the leaf's [`NodeCtx`]: `Inline` runs go through the
-/// bespoke inline engine (pre-existing, P6, unchanged); `Table` leaves run
-/// the whole grid-placement + column/row solve pipeline
-/// (`solve_table_for_node`) and report its total content size.
+/// bespoke inline engine (pre-existing, P6, unchanged); `Table` leaves
+/// ensure the whole grid-placement + column/row solve pipeline has been run
+/// (reusing the cached result if one already covers this `avail_w` — see
+/// [`ensure_table_cache`]) and report its total content size.
 fn measure_node<M: Metrics>(
     known_dimensions: TSize<Option<f32>>,
     available_space: TSize<AvailableSpace>,
@@ -442,8 +516,13 @@ fn measure_node<M: Metrics>(
                 height: known_dimensions.height.unwrap_or(out.size.h),
             }
         }
-        Some(NodeCtx::Table(table_node, table_budget)) => {
-            let (grid, solved) = solve_table_for_node(table_node, finite_nonneg(avail_w), metrics, *table_budget);
+        Some(NodeCtx::Table(table_node, table_budget, cache)) => {
+            ensure_table_cache(table_node, finite_nonneg(avail_w), metrics, *table_budget, cache);
+            let borrowed = cache.borrow();
+            // `ensure_table_cache` always leaves `Some` behind; a missing
+            // entry here would be a bug in that function, not reachable
+            // input — degrade to zero rather than unwrap/panic regardless.
+            let Some(entry) = borrowed.as_ref() else { return TSize::ZERO };
             // Total size must include the border-spacing gaps *between*
             // columns/rows too (`(columns - 1)` gaps of `BORDER_SPACING_X`,
             // `(rows - 1)` of `BORDER_SPACING_Y`) — matching exactly how
@@ -455,10 +534,12 @@ fn measure_node<M: Metrics>(
             // columns/rows, making the table's own reported box narrower/
             // shorter than a colspan/rowspan cell that spans (and thus
             // already includes the gaps for) the whole grid.
-            let col_gaps = grid.columns.saturating_sub(1) as f32;
-            let row_gaps = grid.rows.saturating_sub(1) as f32;
-            let total_w = finite_nonneg(solved.col_widths.iter().sum::<f32>() + col_gaps * BORDER_SPACING_X);
-            let total_h = finite_nonneg(solved.row_heights.iter().sum::<f32>() + row_gaps * BORDER_SPACING_Y);
+            let col_gaps = entry.columns.saturating_sub(1) as f32;
+            let row_gaps = entry.rows.saturating_sub(1) as f32;
+            let total_w =
+                finite_nonneg(entry.table_layout.col_widths.iter().sum::<f32>() + col_gaps * BORDER_SPACING_X);
+            let total_h =
+                finite_nonneg(entry.table_layout.row_heights.iter().sum::<f32>() + row_gaps * BORDER_SPACING_Y);
             TSize {
                 width: known_dimensions.width.unwrap_or(total_w),
                 height: known_dimensions.height.unwrap_or(total_h),
@@ -467,18 +548,56 @@ fn measure_node<M: Metrics>(
     }
 }
 
+/// Ensure `cache` holds a [`TableCacheEntry`] solved at `available_width`
+/// (within a small float epsilon), (re)computing it via
+/// [`compute_table_cache_entry`] only if the cached entry is missing or was
+/// solved at a different width. This is the Critical-C1 fix (review): the
+/// full per-cell measurement pipeline is expensive (see
+/// [`MAX_TABLE_MEASURED_CELLS`]'s doc comment) and was previously re-run
+/// from scratch by both `measure_node` (possibly several times — taffy's
+/// own layout algorithm may query a leaf's intrinsic size more than once)
+/// AND `emit` (once more, unconditionally) — up to ~7 full per-cell taffy
+/// sub-layouts. Caching collapses this to ~3 per cell in the common case
+/// (one `avail_w` throughout: computed once during measure, reused for free
+/// by `emit`), and at most ~3 per DISTINCT `avail_w` a real taffy layout
+/// pass ends up probing — never re-paying the cost for a width already
+/// solved.
+///
+/// The cache is keyed on `avail_w` (not "computed once, ever") because
+/// `solve_table`'s column resolution genuinely depends on it (the
+/// under-constrained/over-constrained/interpolated branches) — reusing a
+/// stale entry solved at a different width would silently produce the
+/// wrong geometry, not just suboptimal caching.
+fn ensure_table_cache<M: Metrics>(
+    table_node: &LayoutNode,
+    available_width: f32,
+    metrics: &M,
+    table_budget: usize,
+    cache: &RefCell<Option<TableCacheEntry>>,
+) {
+    let stale = match &*cache.borrow() {
+        Some(entry) => (entry.avail_w - available_width).abs() > 0.01,
+        None => true,
+    };
+    if stale {
+        let fresh = compute_table_cache_entry(table_node, available_width, metrics, table_budget);
+        *cache.borrow_mut() = Some(fresh);
+    }
+}
+
 /// Run the full table pipeline for `table_node`'s own subtree at
 /// `available_width` (the CSS auto-table-layout "available width" the
 /// packet brief's step 3 asks for, sourced from taffy/its parent — see
 /// `measure_node`'s `NodeCtx::Table` arm and `emit`'s `Built::Table` arm,
-/// the two callers): place the grid
+/// the two callers via [`ensure_table_cache`]): place the grid
 /// ([`table_layout::place_grid`]), measure each cell's min/max content
 /// width ([`cell_min_max_width`]), solve column widths (pass 1), re-measure
-/// each cell's real content height at its solved width
-/// ([`cell_content_layout`]), then solve again with real heights to get
-/// final row heights + cell rects (pass 2) — the two-stage phasing
-/// documented in the packet report. `table_budget` is the nested-table
-/// budget cell content may spend (see [`TABLE_DEPTH_CAP`]).
+/// each cell's real content (size AND, this time, its paint-ordered
+/// fragments too — see [`cell_content_layout`]) at its solved width, then
+/// solve again with real heights to get final row heights + cell rects
+/// (pass 2) — the two-stage phasing documented in the packet report.
+/// `table_budget` is the nested-table budget cell content may spend (see
+/// [`TABLE_DEPTH_CAP`]).
 ///
 /// Border-spacing (documented M3 simplification, see the packet report):
 /// `style::ComputedStyle` has no `border-spacing` property to read (a
@@ -493,13 +612,16 @@ fn measure_node<M: Metrics>(
 ///
 /// Total: every step this calls (`place_grid`, `solve_table`,
 /// `cell_min_max_width`, `cell_content_layout`) is itself total; this
-/// function adds no new panic surface.
-fn solve_table_for_node<'a, M: Metrics>(
-    table_node: &'a LayoutNode,
+/// function adds no new panic surface. Never called with more cells than
+/// [`MAX_TABLE_MEASURED_CELLS`] — `translate_any` only ever builds a
+/// `NodeCtx::Table` leaf (the only way this function gets invoked, via
+/// `ensure_table_cache`) for a table within that cap.
+fn compute_table_cache_entry<M: Metrics>(
+    table_node: &LayoutNode,
     available_width: f32,
     metrics: &M,
     table_budget: usize,
-) -> (Grid<'a>, TableLayout) {
+) -> TableCacheEntry {
     let grid = table_layout::place_grid(table_node);
     let spacing_x = BORDER_SPACING_X;
     let spacing_y = BORDER_SPACING_Y;
@@ -530,15 +652,20 @@ fn solve_table_for_node<'a, M: Metrics>(
         border_spacing_y: spacing_y,
     });
 
+    // One sub-layout per cell here (not two — see the module report):
+    // `cell_content_layout`'s fragments are KEPT (not discarded) so `emit`
+    // never needs to re-lay this cell's content out again.
+    let mut cell_content: Vec<(Size, Vec<Fragment>)> = Vec::with_capacity(grid.cells.len());
     for (i, gc) in grid.cells.iter().enumerate() {
         let assigned_w = pass1.cell_rects.get(i).map(|r| r.size.w).unwrap_or(0.0);
-        let (size, _fragments) = cell_content_layout(gc.node, assigned_w, metrics, table_budget);
+        let (size, fragments) = cell_content_layout(gc.node, assigned_w, metrics, table_budget);
         if let Some(cell) = cells.get_mut(i) {
             cell.intrinsic_height = size.h;
         }
+        cell_content.push((size, fragments));
     }
 
-    let layout = table::solve_table(&TableSpec {
+    let table_layout = table::solve_table(&TableSpec {
         columns: grid.columns,
         rows: grid.rows,
         cells,
@@ -547,7 +674,7 @@ fn solve_table_for_node<'a, M: Metrics>(
         border_spacing_y: spacing_y,
     });
 
-    (grid, layout)
+    TableCacheEntry { avail_w: available_width, columns: grid.columns, rows: grid.rows, table_layout, cell_content }
 }
 
 /// A cell's min-content width (every soft-wrap opportunity taken) and
@@ -583,12 +710,21 @@ fn cell_query_width<M: Metrics>(node: &LayoutNode, metrics: &M, table_budget: us
 /// just another (small) box tree; a cell's own margin is not honored here
 /// (matching real CSS, which ignores margin on table cells entirely) so
 /// `(0, 0)` really is the cell's painted origin, no root-margin caveat to
-/// track. Called twice per cell during a full table solve (once for
-/// `intrinsic_height` during the measure phase via `solve_table_for_node`,
-/// once more during `emit` for the real fragments) — a documented perf
-/// simplification (see the packet report): nothing is cached across the
-/// split. Fine at this scope (small documents, not a hot path); the first
-/// thing to fix in a follow-up perf pass.
+/// track.
+///
+/// Called exactly ONCE per cell per solved `avail_w`, from
+/// [`compute_table_cache_entry`] (which keeps this call's fragments in the
+/// resulting [`TableCacheEntry`] rather than discarding them) — NOT twice,
+/// and not separately at `emit` time. Before the Critical-C1 fix (review),
+/// this was called here once for `intrinsic_height` (fragments discarded)
+/// AND again, unconditionally, from `emit` for the real fragments; combined
+/// with `cell_min_max_width`'s own two sub-layouts and `emit` re-running
+/// the WHOLE per-cell pipeline a second time, one cell could pay for up to
+/// ~7 full taffy sub-layouts. Reusing this call's fragments via the cache
+/// (see [`ensure_table_cache`]) collapses that to the ~3 sub-layouts
+/// (`cell_min_max_width` ×2 + this ×1) that are genuinely unavoidable per
+/// distinct `avail_w` — see [`MAX_TABLE_MEASURED_CELLS`] for the hard cap
+/// that bounds the remaining (still real, still per-cell) cost.
 fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, table_budget: usize) -> (Size, Vec<Fragment>) {
     let mut taffy: TaffyTree<NodeCtx> = TaffyTree::new();
     let built = translate_any(node, &mut taffy, 0, table_budget);
@@ -794,29 +930,36 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 }
             }
         }
-        Built::Table { style, node, table_budget, .. } => {
+        Built::Table { style, .. } => {
             // The table's own box first (paint order: table, then cells).
             out.push(Fragment { rect: Rect { origin, size }, kind: FragmentKind::Box { style: (*style).clone() } });
 
-            // Re-solve (grid placement + column/row solve) at the table's
-            // now-final content-box width/geometry — not cached from
-            // measure time; see `cell_content_layout`'s doc comment on this
-            // documented perf simplification.
+            // Fetch this leaf's `node`/`table_budget`/cache straight out of
+            // the taffy tree's own node-context storage (see `Built::Table`'s
+            // doc comment) rather than duplicating them on `Built`.
+            let Some(NodeCtx::Table(node, table_budget, cache)) = taffy.get_node_context(built.taffy_id()) else {
+                return; // not reachable given how `built` is constructed; degrade rather than panic regardless.
+            };
+            let node: &LayoutNode = *node;
+            let budget = *table_budget;
+
             let content_origin =
                 Point { x: parent_origin.x + layout.content_box_x(), y: parent_origin.y + layout.content_box_y() };
             let avail_w = finite_nonneg(layout.content_box_width());
-            let node: &LayoutNode = *node;
-            let budget = *table_budget;
-            let (grid, solved) = solve_table_for_node(node, avail_w, metrics, budget);
+            // Critical-C1 fix (review): reuse the cached solve from measure
+            // time (same `avail_w` in the overwhelmingly common case — see
+            // `ensure_table_cache`) instead of re-running the whole per-cell
+            // measurement pipeline here. `.take()` moves the (non-`Clone`)
+            // `Fragment`s out rather than cloning them; `emit` is the
+            // terminal consumer of this leaf's cache (a table is only ever
+            // emitted once per `layout()` call), so nothing needs it back.
+            ensure_table_cache(node, avail_w, metrics, budget, cache);
+            let Some(entry) = cache.borrow_mut().take() else { return };
 
-            for (i, gc) in grid.cells.iter().enumerate() {
-                let Some(rect) = solved.cell_rects.get(i) else { continue };
+            let cell_rects = entry.table_layout.cell_rects;
+            for (i, (_, cell_fragments)) in entry.cell_content.into_iter().enumerate() {
+                let Some(rect) = cell_rects.get(i).copied() else { continue };
                 let cell_origin = Point { x: content_origin.x + rect.origin.x, y: content_origin.y + rect.origin.y };
-                // Each cell's own box + content, translated into place —
-                // `cell_content_layout` already produced this exactly as
-                // `layout_tree` would for a standalone document, relative to
-                // the cell's own (0, 0) border-box origin.
-                let (_, cell_fragments) = cell_content_layout(gc.node, rect.size.w, metrics, budget);
                 for (fi, f) in cell_fragments.into_iter().enumerate() {
                     // `cell_content_layout`'s FIRST fragment is always the
                     // cell's own root `Box` (see `emit`'s `Container` arm:
