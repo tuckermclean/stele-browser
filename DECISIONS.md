@@ -19,6 +19,22 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — Colored tty render
+
+### D36 — TextGrid carries fg/bg; to_ansi() for color, to_text() unchanged
+The interactive shell needs a colored terminal render, and `<body>`/region
+backgrounds should show in tty (previously D17: `Box` painted nothing there).
+**Choice:** `TextGrid`'s cell became `Cell { ch, fg, bg }` (pub(crate); default
+fg black, bg transparent). `Box` fills `background_color` into its cells; text
+sets `fg` from `style.color` and inherits the box `bg` (paint order draws Box
+before its Text). A NEW `to_ansi()` emits 24-bit SGR, run-length-optimized (one
+escape per color change, reset per line); the EXISTING `to_text()` is unchanged
+(chars only) so every blessed tty golden stays byte-identical — color is purely
+additive. Borders still unrendered in tty (deferred). Also: the CSS
+`background` shorthand now yields `background_color` (first color-shaped token,
+url()-contents skipped; no-color → unapplied per C2). Revisit: ASCII box-drawing
+borders; the shell consumes `to_ansi`.
+
 ## UI — Interactive provenance
 
 ### D34 — Fragment/LayoutNode carry interactive provenance (link href, controls)
