@@ -404,6 +404,38 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M6 · hardening core (kitchen-sink + fuzz)
+
+- Release hardening, part 1. `fixtures/kitchen-sink.html` — the everything-page
+  (headings/inline markup/links/lists/blockquote/pre/br/table w. rowspan+colspan/
+  form/inline+floated images/flexbox/details/noscript/entities, styled via
+  `<style>`+inline). `goldens/kitchen-sink.png` (800×1504) + `.tty.txt`
+  (orchestrator-VIEWED + blessed): every feature renders correctly IN
+  COMBINATION — float wraps and returns, flex grows beside a fixed box, table
+  borders + spans, details open/closed, noscript shown. The A5 coverage proof.
+- **Hand-rolled mutation FUZZ** (`tests/fuzz_totality.rs`, ~4400 deterministic
+  iterations across 4 categories — HTML byte-mutation, random blobs, random
+  CSS, image-decode — seeded xorshift64*, ~0.6s): drives the WHOLE pipeline
+  (parse→collect_author_sheets→flatten_media→cascade→box_tree→layout→tty/raster)
+  asserting no panic/abort. `panic=abort` makes any find a hard, visible
+  failure. Found exactly ONE bug; none other in 4400 iters — strong totality
+  signal for the whole engine.
+    - **Bug found + fixed:** `<br>` was a total NO-OP (void element that
+      contributed nothing to layout — `a<br>b` ran together on one line). Fix:
+      `box_tree` emits a `LINE_BREAK_SENTINEL` (U+E000, a PUA char) inside the
+      frozen `BoxContent::Text`, which `inline` recognizes as a forced break —
+      no freeze amendment (documented tradeoff: literal U+E000 in real content
+      would misrender as a break, cosmetic-only, never a panic; a proper
+      `BoxContent::LineBreak` amendment is the clean path if wanted later).
+- A2 (size ≤2MB) flipped from informational to a HARD accept gate — comfortably
+  met (i486 binary ~542KB). Frozen types zero-diff (only `box_tree`/`inline`
+  impl changed); no deps; no unsafe. 653 tests green. See D32.
+- Gaps surfaced (pre-existing, documented, NOT regressions): list markers
+  (`<ul>/<ol>/<li>` render without bullets/numbers — never implemented) and
+  `<pre>` whitespace-collapse. NEXT M6: list markers (quick follow-up), then the
+  A7 attestation ceremony (`cargo vendor` + `cargo-auditable`/`audit`), the A5
+  instruction-speed budget, and REPORT.md finalized.
+
 ## 2026-08-14 — M5 · dialect completeness (details/noscript/entities/--stats)
 
 - Finishes the curated dialect's remaining items (all in `box_tree`/`ua`/`main`
