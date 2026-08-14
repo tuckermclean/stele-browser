@@ -319,6 +319,27 @@ Append-only running log. Newest at the bottom.
   cascade test confirms `<table>`→`Display::Table`); 199 lib + 13 bin + 88
   integration tests green, no regressions, no deps, no unsafe.
 
+## 2026-08-14 — M3 · freeze amendment: table cell spans
+
+- Second (and last) table gateway: `box_tree` drops HTML attributes, but the
+  column solver needs `<td>`/`<th>` `colspan`/`rowspan`. Added
+  `BoxContent::TableCell { colspan: u16, rowspan: u16 }` to the frozen enum —
+  a cell is otherwise exactly a `Container` (children in `LayoutNode.children`)
+  but carries the two spans. `box_tree` populates it when
+  `display == Display::TableCell`, reading + defaulting (missing/unparseable/
+  zero → 1) + clamping (colspan ≤ 1000, rowspan ≤ 65534, HTML's own limits),
+  mirroring the existing `<img>` intrinsic-attr path.
+- Green-keeping: the three exhaustive `BoxContent` matches in `layout::block`
+  (`translate_any`/`is_inline_ish`/`flatten_inline`) share the `Container` arm
+  via `Container | TableCell { .. }`, each tagged
+  `TODO(table-layout packet)` — so a cell still renders as a stacked block
+  until the real layout lands, and the next packet gets compiler-guided sites.
+- Orchestrator reviewed directly (only `BoxContent` changed; box_tree/block
+  only). 201 lib tests + all integration suites green, no deps, no unsafe.
+  See D20. NEXT: the table-layout feature — a `Display::Table` measure-leaf in
+  the engine that grids the cells (via the spans), measures min/max content,
+  runs `solve_table`, and paints the solved rects; + `tables.html` + golden.
+
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a
