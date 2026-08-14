@@ -118,6 +118,26 @@ use crate::fetch::{Method, Request, Url};
 /// Total on any `dom`/`form_id`/`activator` combination — see the module
 /// docs' Totality section.
 pub fn serialize_submit(dom: &Dom, form_id: NodeId, base: &Url, activator: Option<NodeId>) -> Request {
+    serialize_submit_with_overrides(dom, form_id, base, activator, &[])
+}
+
+/// Same as [`serialize_submit`], but for a plain-value `<input>` control
+/// (text/password/hidden/email/url/tel/number/search/unrecognized — the
+/// same catch-all arm [`successful_input`] already reads `value` from for
+/// every OTHER caller) whose `NodeId` appears in `overrides`, use the
+/// paired `String` instead of reading the DOM `value` attribute. This is
+/// the seam the interactive shell (`browser::apply_key`'s edit-mode
+/// handling) uses to submit what the user actually TYPED into a text
+/// field, without this module needing to know anything about `ViewState`s,
+/// edit buffers, or key handling — it only ever sees a plain `NodeId ->
+/// String` association. An override for a `NodeId` this walk never visits
+/// (wrong form, or a control kind that doesn't read `value` at all —
+/// checkbox/radio/submit/image/file all keep their own dedicated rules) is
+/// simply never consulted, not an error. `overrides` is a slice (not a
+/// map): callers only ever have a handful of edited fields, so a linear
+/// scan per plain-value control is simpler than threading a `HashMap`
+/// through for no measurable benefit.
+pub fn serialize_submit_with_overrides(dom: &Dom, form_id: NodeId, base: &Url, activator: Option<NodeId>, overrides: &[(NodeId, String)]) -> Request {
     let (action_attr, method) = form_attrs(dom, form_id);
 
     let action_url = match action_attr {
@@ -128,7 +148,7 @@ pub fn serialize_submit(dom: &Dom, form_id: NodeId, base: &Url, activator: Optio
     let mut pairs: Vec<(String, String)> = Vec::new();
     if let Some(Node::Element(form_el)) = dom_util::node_checked(dom, form_id) {
         for &child in &form_el.children {
-            walk_controls(dom, child, 0, activator, &mut pairs);
+            walk_controls(dom, child, 0, activator, overrides, &mut pairs);
         }
     }
     let query = build_query(&pairs);
@@ -172,14 +192,14 @@ fn form_attrs(dom: &Dom, form_id: NodeId) -> (Option<String>, Method) {
 /// degrades to just the outer control being considered, a documented v0
 /// simplification). Every other element (`div`, `fieldset`, `label`, `p`,
 /// `table`, ...) is transparent: its children are walked in turn.
-fn walk_controls(dom: &Dom, id: NodeId, depth: usize, activator: Option<NodeId>, out: &mut Vec<(String, String)>) {
+fn walk_controls(dom: &Dom, id: NodeId, depth: usize, activator: Option<NodeId>, overrides: &[(NodeId, String)], out: &mut Vec<(String, String)>) {
     if depth >= dom_util::DEPTH_CAP {
         return;
     }
     let Some(Node::Element(el)) = dom_util::node_checked(dom, id) else { return };
     match el.name.as_str() {
         "input" => {
-            if let Some(pair) = successful_input(el, id, activator) {
+            if let Some(pair) = successful_input(el, id, activator, overrides) {
                 out.push(pair);
             }
         }
@@ -196,15 +216,21 @@ fn walk_controls(dom: &Dom, id: NodeId, depth: usize, activator: Option<NodeId>,
         }
         _ => {
             for &child in &el.children {
-                walk_controls(dom, child, depth + 1, activator, out);
+                walk_controls(dom, child, depth + 1, activator, overrides, out);
             }
         }
     }
 }
 
+/// Linear-scan `overrides` for `id` — see [`serialize_submit_with_overrides`]'s
+/// own doc comment for why a slice, not a map.
+fn find_override(overrides: &[(NodeId, String)], id: NodeId) -> Option<&str> {
+    overrides.iter().find(|(nid, _)| *nid == id).map(|(_, v)| v.as_str())
+}
+
 /// `<input>` is a void element (`dom::parser::VOID_ELEMENTS`) — it never has
 /// children, so this is a pure attribute read, no subtree walk needed.
-fn successful_input(el: &Element, id: NodeId, activator: Option<NodeId>) -> Option<(String, String)> {
+fn successful_input(el: &Element, id: NodeId, activator: Option<NodeId>, overrides: &[(NodeId, String)]) -> Option<(String, String)> {
     if dom_util::is_disabled(el) {
         return None;
     }
@@ -239,8 +265,13 @@ fn successful_input(el: &Element, id: NodeId, activator: Option<NodeId>) -> Opti
         "file" => Some((name.to_string(), el.attrs.get("value").unwrap_or("").to_string())),
         // text, password, hidden, email, url, tel, number, search, and any
         // unrecognized/future type all behave the same for submission
-        // purposes: the raw `value` attribute, defaulting to empty.
-        _ => Some((name.to_string(), el.attrs.get("value").unwrap_or("").to_string())),
+        // purposes: the raw `value` attribute, defaulting to empty -- UNLESS
+        // an override (a user-typed edit buffer, from the interactive
+        // shell) names this exact control, in which case that wins.
+        _ => {
+            let value = find_override(overrides, id).map(|v| v.to_string()).unwrap_or_else(|| el.attrs.get("value").unwrap_or("").to_string());
+            Some((name.to_string(), value))
+        }
     }
 }
 

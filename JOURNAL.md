@@ -426,6 +426,36 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-7 · editable forms + submit, responsive resize — the browser you can actually use
+
+- **Editable text inputs.** Focusing a plain `<input>` puts the shell in an
+  implicit edit mode (`editing_focus` → `apply_key_editing`): printable keys
+  insert at a cursor, Backspace deletes in-field (NOT Back), Left/Right move the
+  cursor, Enter submits the owning form. While a text field is focused `q`/`r`
+  TYPE (they no longer Quit/Reload); when focus is a link/button/checkbox every
+  key behaves as before (no regression). Buffers live in `ViewState.fields`
+  (BTreeMap focusable-idx → String, cursor is a char offset with UTF-8-correct
+  byte mapping), seeded lazily from the DOM default `value`, persisted across
+  Tab between fields, capped at `MAX_FIELD_LEN=4096` against unbounded growth.
+- **Submit.** Enter builds the request through the unchanged
+  `Command::Submit(Request)` path: `form::serialize_submit_with_overrides`
+  reuses the existing successful-controls walk + `encode_www_form` percent
+  encoder, but any edited `<input>` (matched by `NodeId` via `control_node`)
+  contributes the TYPED buffer instead of its DOM default. A multi-field form
+  submits everything typed, from whichever field pressed Enter. GET wired;
+  POST/`select`/`textarea` and Enter-activating a named submit button are
+  documented v0 follow-ups. **http://google.com is now usable: focus box, type,
+  Enter → `/search?q=...`.**
+- **Responsive terminal resize.** The raw-mode `poll` grew a 250ms timeout
+  (`POLL_TIMEOUT`, rustix `Timespec`); the loop re-queries `tcgetwinsize` at the
+  top each tick and rebuilds the page + `clamp_scroll` only on an actual size
+  change — so a resize reflows within ~250ms with NO keypress (measured 202ms),
+  no `SIGWINCH` handler, no `unsafe`. A `dirty` flag gates the clear+redraw so
+  idle timeout ticks neither flicker nor busy-spin (verified 0 bytes / 0 CPU
+  ticks over 2s idle). See D41 (forms), D42 (resize).
+- 831 workspace tests green; `accept.sh --tty-only` unaffected (headless path
+  untouched); the interactive loop is the manually-pty-verified thin half.
+
 ## 2026-08-14 — UI-6 · tty readability (contrast guarantee) — the black-on-black fix
 
 - **Bug:** `TextGrid::to_ansi` emitted the literal CSS foreground (default

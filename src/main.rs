@@ -809,8 +809,16 @@ fn connect_gpm() -> Option<UnixStream> {
 /// `panic = "abort"`, no safety net for a genuine bug that panics anyway.
 fn run_browser(source: &str) {
     use std::io::{Read, Write};
-    use rustix::event::{poll, PollFd, PollFlags};
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
     use rustix::termios::{LocalModes, OptionalActions};
+
+    // packet/shell-forms (responsive-resize follow-up): `poll` blocks for AT
+    // MOST this long, so a terminal resize with no keypress still gets
+    // picked up promptly (see the `'outer` loop's own resize-handling
+    // comment) instead of only on the user's next keystroke. 250ms is
+    // frequent enough to feel responsive, infrequent enough that 4
+    // `tcgetwinsize` ioctls/sec while idle is noise, not a busy-spin.
+    const POLL_TIMEOUT: Timespec = Timespec { tv_sec: 0, tv_nsec: 250_000_000 };
 
     let orig_termios = match rustix::termios::tcgetattr(std::io::stdin()) {
         Ok(t) => t,
@@ -826,8 +834,13 @@ fn run_browser(source: &str) {
         return;
     }
 
-    let (cols, rows) = terminal_size();
-    let content_rows = rows.saturating_sub(1).max(1);
+    // packet/shell-forms: `cols`/`rows`/`content_rows` are now `mut` --
+    // re-queried on every trip around the `'outer` loop below (see that
+    // loop's own resize-handling comment) so the shell re-flows when the
+    // terminal is resized, instead of staying pinned to whatever size it
+    // happened to be at launch.
+    let (mut cols, mut rows) = terminal_size();
+    let mut content_rows = rows.saturating_sub(1).max(1);
 
     let mut history = browser::History::new(resolve_url(source));
     let mut page = load_page(history.current(), cols);
@@ -854,23 +867,70 @@ fn run_browser(source: &str) {
     let mut gpm_buf: Vec<u8> = Vec::new();
     let mut gpm_read_buf = [0u8; 256];
 
+    // packet/shell-forms (responsive-resize follow-up): redraw ONLY when
+    // something actually changed -- a resize, or real input having been
+    // handled -- never on a bare timeout tick. Without this, a 250ms
+    // `poll` timeout (needed so a resize gets noticed without a keypress --
+    // see below) would turn into a full clear+redraw 4x/sec even while the
+    // terminal sits idle, which reads as visible flicker. `true` here so
+    // the very first frame still draws before the first `poll`.
+    let mut dirty = true;
+
     'outer: loop {
-        let frame = browser::render_frame(&page, &view);
-        print!("\x1b[H\x1b[2J{frame}");
-        let _ = std::io::stdout().flush();
+        // Honor a terminal resize. Re-queried every iteration (cheap: one
+        // `ioctl`) rather than once at startup; rebuilding is skipped
+        // entirely unless the size actually changed (`!=` below), so an
+        // unchanged terminal costs nothing extra here beyond the ioctl
+        // itself. There's still no `SIGWINCH` handler (the packet brief's
+        // own constraint -- no signal handler, no `unsafe`), so this can't
+        // be woken by the resize itself; instead `poll` below is given a
+        // short timeout (`POLL_TIMEOUT`) specifically so this check re-runs
+        // on its own within a fraction of a second, not only when the next
+        // keystroke/mouse event happens to arrive. Manually verified (this
+        // whole loop is the un-CI-testable thin half of the packet split --
+        // see the module's own section doc comment); the pure clamp this
+        // triggers, `browser::clamp_scroll`, IS unit-tested in
+        // `browser.rs`.
+        let (new_cols, new_rows) = terminal_size();
+        if (new_cols, new_rows) != (cols, rows) {
+            cols = new_cols;
+            rows = new_rows;
+            content_rows = rows.saturating_sub(1).max(1);
+            page = load_page(history.current(), cols);
+            let mut next_view = browser::ViewState { cols, rows: content_rows, ..view };
+            if next_view.focus.is_some_and(|idx| idx >= page.focusables.len()) {
+                next_view.focus = None;
+            }
+            view = browser::clamp_scroll(next_view, &page);
+            dirty = true;
+        }
+
+        if dirty {
+            let frame = browser::render_frame(&page, &view);
+            print!("\x1b[H\x1b[2J{frame}");
+            let _ = std::io::stdout().flush();
+            dirty = false;
+        }
 
         // Watch stdin AND (when connected) the gpm socket at once -- a
         // single blocking stdin read (c1's own loop) can't see gpm events
         // arriving on a SEPARATE fd, hence `poll` (this packet's own reason
-        // for the new rustix "event" feature). `None` timeout: block until
-        // one of them has something, exactly like the old blocking read.
+        // for the new rustix "event" feature). A bounded timeout (rather
+        // than c1's original `None`/block-forever) is what makes the
+        // resize check above actually responsive -- see its own comment;
+        // `Ok(0)` (nothing ready before the deadline) falls through to the
+        // `stdin_ready`/`gpm_ready` checks below exactly like a real but
+        // empty result, both `false`, so this loop just goes around again
+        // (re-checking the terminal size) without reading or drawing
+        // anything -- an idle terminal costs one `ioctl` + one `poll` per
+        // tick, never a redraw.
         let stdin = std::io::stdin();
         let (stdin_ready, gpm_ready) = {
             let mut poll_fds = vec![PollFd::new(&stdin, PollFlags::IN)];
             if let Some(g) = gpm.as_ref() {
                 poll_fds.push(PollFd::new(g, PollFlags::IN));
             }
-            if poll(&mut poll_fds, None).is_err() {
+            if poll(&mut poll_fds, Some(&POLL_TIMEOUT)).is_err() {
                 break; // a poll error -- exit cleanly, restore below still runs
             }
             let stdin_ready = poll_fds[0].revents().contains(PollFlags::IN);
@@ -880,6 +940,11 @@ fn run_browser(source: &str) {
             let gpm_ready = poll_fds.get(1).is_some_and(|p| p.revents().intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR));
             (stdin_ready, gpm_ready)
         };
+
+        if !stdin_ready && !gpm_ready {
+            continue; // a bare timeout tick -- nothing ready, nothing to redraw
+        }
+        dirty = true; // real input is about to be handled -- redraw once it is
 
         let mut events: Vec<browser::InputEvent> = Vec::new();
 
