@@ -204,6 +204,101 @@ fn select_option_with_no_value_attr_falls_back_to_its_text() {
     assert_eq!(req.url.as_str(), "http://example.com/submit?fruit=Apple");
 }
 
+// -- 6b. <select multiple>: one pair PER selected option (review fix) --------
+//
+// HTML 4.01 §17.13.2: a multi-select control contributes one name=value
+// pair for EVERY selected option, not just one. The original
+// `successful_select` only ever emitted a single pair (`.find(selected).or
+// (first)`), silently dropping data for any `<select multiple>` with more
+// than one option checked. Single-select behavior (covered above) must stay
+// exactly as before.
+
+#[test]
+fn multi_select_contributes_one_pair_per_selected_option() {
+    let d = dom::parser::parse(
+        r#"<form action="/submit" method="get">
+            <select name="toppings" multiple>
+                <option value="olives" selected>Olives</option>
+                <option value="cheese">Cheese</option>
+                <option value="mushrooms" selected>Mushrooms</option>
+            </select>
+        </form>"#,
+    );
+    let form = find_first(&d, "form").expect("form");
+    let base = Url::new("http://example.com/page");
+    let req = serialize_submit(&d, form, &base, None);
+
+    assert_eq!(req.url.as_str(), "http://example.com/submit?toppings=olives&toppings=mushrooms");
+}
+
+#[test]
+fn multi_select_with_nothing_selected_contributes_nothing() {
+    let d = dom::parser::parse(
+        r#"<form action="/submit" method="get">
+            <select name="toppings" multiple>
+                <option value="olives">Olives</option>
+                <option value="cheese">Cheese</option>
+            </select>
+        </form>"#,
+    );
+    let form = find_first(&d, "form").expect("form");
+    let base = Url::new("http://example.com/page");
+    let req = serialize_submit(&d, form, &base, None);
+
+    assert_eq!(req.url.as_str(), "http://example.com/submit");
+}
+
+#[test]
+fn single_select_still_contributes_at_most_one_pair_after_multi_select_fix() {
+    // Regression guard alongside the multi-select fix: a plain (non-
+    // `multiple`) select must still contribute exactly one pair (the
+    // selected option, or the first if none is marked selected) even
+    // though multiple of its options could technically carry `selected`
+    // in hostile markup.
+    let d = dom::parser::parse(
+        r#"<form action="/submit" method="get">
+            <select name="color">
+                <option value="r" selected>Red</option>
+                <option value="g" selected>Green</option>
+            </select>
+        </form>"#,
+    );
+    let form = find_first(&d, "form").expect("form");
+    let base = Url::new("http://example.com/page");
+    let req = serialize_submit(&d, form, &base, None);
+
+    // Not `multiple`: only the FIRST matching (`selected`) option counts.
+    assert_eq!(req.url.as_str(), "http://example.com/submit?color=r");
+}
+
+// -- 6c. type=image: documented v0 simplification (review fix) ---------------
+//
+// HTML4 §17.13.2 says an image-button submit contributes click coordinates
+// (`name.x`/`name.y`), meaningful only for a mouse-driven, JS-capable
+// browser. This is a no-mouse, no-JavaScript, static-document browser: there
+// is no click point to report. Per the packet review, `type=image` is
+// treated exactly like `type=submit` -- a plain `name=value` pair via the
+// activator -- rather than synthesizing fake `.x`/`.y` coordinates.
+
+#[test]
+fn image_submit_contributes_plain_name_value_not_fake_coordinates() {
+    let d = dom::parser::parse(
+        r#"<form action="/submit" method="get"><input type="image" name="go" value="Go" src="go.png"></form>"#,
+    );
+    let form = find_first(&d, "form").expect("form");
+    let img_input = find_by_attr(&d, "input", "name", "go").expect("image input");
+    let base = Url::new("http://example.com/page");
+
+    let req = serialize_submit(&d, form, &base, Some(img_input));
+    assert_eq!(req.url.as_str(), "http://example.com/submit?go=Go");
+    assert!(!req.url.as_str().contains(".x="), "must not synthesize fake click coordinates");
+    assert!(!req.url.as_str().contains(".y="), "must not synthesize fake click coordinates");
+
+    // Not the activator: contributes nothing, exactly like type=submit.
+    let req_none = serialize_submit(&d, form, &base, None);
+    assert_eq!(req_none.url.as_str(), "http://example.com/submit");
+}
+
 // -- 7. textarea content --------------------------------------------------------
 
 #[test]
@@ -315,6 +410,24 @@ fn form_with_no_controls_at_all_but_existing_action_query_strips_it_on_get() {
     let base = Url::new("http://example.com/page");
     let req = serialize_submit(&d, form, &base, None);
     assert_eq!(req.url.as_str(), "http://example.com/submit");
+}
+
+#[test]
+fn get_with_existing_action_query_and_named_controls_replaces_not_appends() {
+    // Same "replacing any existing query" rule as the zero-controls case
+    // above, but with real successful controls this time -- the stale
+    // `?existing=1` from the `action` attribute must be fully replaced by
+    // the submitted pairs, not left dangling ahead of/behind them.
+    let d = dom::parser::parse(
+        r#"<form action="/s?existing=1" method="get">
+            <input type="text" name="a" value="1">
+            <input type="text" name="b" value="2">
+        </form>"#,
+    );
+    let form = find_first(&d, "form").expect("form");
+    let base = Url::new("http://example.com/page");
+    let req = serialize_submit(&d, form, &base, None);
+    assert_eq!(req.url.as_str(), "http://example.com/s?a=1&b=2");
 }
 
 // -- totality / defaults ----------------------------------------------------
