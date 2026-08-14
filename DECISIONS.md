@@ -3,6 +3,34 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## P8 — Table column solver (Wave 2)
+
+### D18 — standalone pre-placed table solver; bounded on hostile specs
+`layout::table::solve_table` is the CSS 2.1 §17.5.2.2 auto-layout column/row
+solver, built standalone (integration deferred to M3 + a freeze amendment).
+Forks taken:
+- **Pre-placed, not auto-flowing.** Cells arrive with explicit
+  `col`/`row`/`colspan`/`rowspan` and already-measured `min_content`/
+  `max_content`/`intrinsic_height`; the solver does NOT measure text or
+  auto-flow cells into free slots (that's the box-tree caller's job at
+  integration). Overlapping/out-of-range cells are skipped (→ `Rect::default()`,
+  preserving 1:1 output correspondence with `spec.cells`), never a panic.
+- **Bounded on hostile input.** Per-dimension `MAX_GRID_DIM=4096` AND a grid-
+  area cap `MAX_GRID_CELLS=262_144`; placement uses an occupied-slot bitset
+  (not an O(n²) scan) plus a `placement_budget` capping total slot-reads, so
+  total work is O(grid area) regardless of `cells.len()` — a huge hostile
+  `<table>` can't hang the process (not just can't panic). All float inputs
+  sanitized (NaN/±inf/negative → 0); all float OUTPUTS scrubbed to finite too,
+  so extreme magnitudes can't leak inf/NaN.
+- **v1 algorithm choices (documented):** over-constrained (`available >=
+  sum_max`) → columns at max, leftover NOT stretched/distributed; colspan
+  spanning-excess distributed proportional to each column's `max_i` (even
+  split if the max weights are zero), with a final `max_i >= min_i` clamp;
+  rowspan excess split evenly across spanned rows (no row "max" analog);
+  border-spacing between adjacent cells only (`n-1` gaps), no outer edge.
+  Revisit at M3 integration if a fixture needs table-width stretch or the
+  fixed-layout algorithm (`table-layout: fixed`).
+
 ## P7 — tty render pipeline (Wave 2 / M2)
 
 ### D17 — tty grid bounds + cell-mapping scope calls

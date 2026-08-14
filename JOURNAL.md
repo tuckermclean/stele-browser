@@ -266,6 +266,39 @@ Append-only running log. Newest at the bottom.
   input end to end. NEXT: P7b interactive tty shell (raw-mode scroll/back; link
   nav pending a small Fragment freeze amendment for href provenance), then
   Wave 2's P8 (table column solver) toward M3.
+
+## 2026-08-13 — Wave 2 · P8 (table column solver) — standalone pure function
+
+- The charter's "genuinely hard part, written in-house": `layout::table`'s
+  `solve_table(&TableSpec) -> TableLayout` — the two-pass min/max-content
+  automatic table-layout algorithm (CSS 2.1 §17.5.2.2): per-column min/max
+  from cells, colspan/rowspan spanning-excess distribution, width resolution
+  across the three regimes (≤min / ≥max / proportional slack between), row
+  heights, and cell-rect geometry with border-spacing. STANDALONE — cells
+  arrive pre-measured and pre-placed (`col`/`row`/`colspan`/`rowspan`);
+  integration into `layout()` is deferred to M3 + a freeze amendment (the
+  frozen `Display` enum has no Table/Row/Cell variants yet).
+- Loop: implementer (test-first `742eb84` red → `61da7d0` green, 15 tests) →
+  reviewer (Spec ✅ vs CSS 2.1; **no correctness bugs, no reachable panic** —
+  hand-traced the colspan-excess + proportional cases, proved widths sum back
+  to `available_width`; found hardening + coverage gaps) → fix round 1
+  (`09fce6c`, 20 tests) → scoped re-review (orchestrator: bounds correct,
+  frozen `mod.rs` only `+pub mod table;`).
+    - **Important (fixed):** the overlap check was O(n²) over an uncapped
+      `cells.len()` — a huge hostile `<table>` couldn't panic but could hang
+      (DoS). Replaced with an occupied-slot bitset + `MAX_GRID_CELLS=262_144`
+      area cap + a shared `placement_budget` capping total slot-reads, so
+      placement is O(grid area) regardless of cell count or adversarial spans.
+    - **Important (fixed):** the `max_i >= min_i` clamp (the hardest path) had
+      zero test coverage — added a dedicated case (the reviewer's numbers).
+    - **Minor (fixed):** finite-output scrub (extreme `f32` magnitudes could
+      overflow to inf/NaN in output despite input sanitization) + rowspan-
+      degenerate and combined colspan+rowspan coverage tests.
+  See DECISIONS D18.
+- **Wave 2 COMPLETE** (P6 layout · P7 tty pipeline · P8 tables). Toward M3:
+  table INTEGRATION (freeze amendment adding `Display::Table/Row/Cell`, box-tree
+  wiring feeding `solve_table` output to taffy as fixed bases), frames, forms;
+  plus the P7b interactive shell to close M2's "follow links" clause.
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a
