@@ -242,6 +242,28 @@ pub(crate) fn parse_color(tokens: &[Token]) -> Option<Color> {
     }
 }
 
+/// Extract just the color component of a `background` shorthand value
+/// (image/position/repeat/size are curated-out for now — image is a later
+/// packet's scope, brief §4). Scans left to right for the first token that
+/// resolves to a color, skipping anything that doesn't: a `url(...)`
+/// function's contents (consumed to its matching `RParen` so a stray color-
+/// looking token inside a URL, e.g. `url(red.png)`, can never be
+/// misidentified as `background-color`), an `rgb()`/`rgba()` function
+/// (consumed as one unit and handed to `parse_color`), a bare `Hash`, or a
+/// color-named `Ident` — every other token (keywords like `no-repeat`,
+/// `none`, `left`/`center`, or plain lengths for `background-position`) is
+/// simply skipped. Total: the scan index only ever advances, so this always
+/// terminates; `None` (not just "ignored image/position") is the correct
+/// result for `background: none` or any value with no color component at
+/// all — `apply_property` then counts the whole declaration against
+/// `ignored_declarations`, matching charter C2 (unknown/unhandled parts are
+/// ignored, never guessed at).
+fn parse_background_color_component(_tokens: &[Token]) -> Option<Color> {
+    // P7 tty-color RED: `background` shorthand color extraction not yet
+    // implemented — every value is currently ignored.
+    None
+}
+
 fn classify_font_family(tokens: &[Token]) -> Option<FontFamily> {
     let names: Vec<String> = tokens
         .iter()
@@ -367,6 +389,9 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
     match name {
         "color" => parse_color(tokens).map(|c| d.color = Some(c)).is_some(),
         "background-color" => parse_color(tokens).map(|c| d.background_color = Some(c)).is_some(),
+        // Curated subset of the `background` shorthand: color only (brief
+        // §4's image scope is later). See `parse_background_color_component`.
+        "background" => parse_background_color_component(tokens).map(|c| d.background_color = Some(c)).is_some(),
         "font-family" => classify_font_family(tokens).map(|f| d.font_family = Some(f)).is_some(),
         "font-size" => tokens.first().and_then(token_to_raw_length).map(|l| d.font_size = Some(l)).is_some(),
         "font-weight" => match tokens.first() {
@@ -896,6 +921,65 @@ mod tests {
     fn unparseable_color_is_not_applied() {
         let mut d = Declarations::default();
         assert!(!apply_property("color", &toks("bogus"), &mut d));
+    }
+
+    // ------------------------------------- background shorthand (P7 tty-color)
+
+    #[test]
+    fn background_shorthand_extracts_a_bare_color() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("navy"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0, 0, 128)));
+    }
+
+    #[test]
+    fn background_shorthand_extracts_hex_color() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("#fff"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 255, 255)));
+    }
+
+    #[test]
+    fn background_shorthand_extracts_color_from_amid_image_and_repeat() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("red url(x.png) no-repeat"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn background_shorthand_extracts_color_regardless_of_token_order() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("url(x.png) no-repeat red"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn background_shorthand_rgb_function_color() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("rgb(1, 2, 3) no-repeat"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn background_shorthand_with_no_color_is_not_applied() {
+        // `background: none` and pure image/position/repeat values (no
+        // color component) are total (never panic) but don't set
+        // `background_color` — charter C2: unrecognized/uncovered parts of
+        // a value are ignored, not guessed at.
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("none"), &mut d));
+        assert_eq!(d.background_color, None);
+
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("url(x.png) no-repeat"), &mut d));
+        assert_eq!(d.background_color, None);
+    }
+
+    #[test]
+    fn background_shorthand_garbage_is_not_applied() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("bogus"), &mut d));
+        assert_eq!(d.background_color, None);
     }
 
     #[test]
