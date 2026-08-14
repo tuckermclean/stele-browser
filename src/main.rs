@@ -77,6 +77,19 @@ struct Args {
     /// [`print_stats`]'s doc comment. Only consulted alongside `--dump-text`/
     /// `--dump-png`, per the packet brief.
     stats: bool,
+    /// `--no-bg-images` (packet bg-image): the kill switch — when set, the
+    /// pixel paths (`--dump-png`/`--render-fb`) skip the `background-image`
+    /// fetch+decode pre-pass entirely (an empty map, see
+    /// [`dump_png_opts`]/[`render_fb_surface_opts`]) rather than fetching
+    /// and painting any of them; every box still shows its
+    /// `background_color`. Default `false` (bg-images ON) — a hostile page
+    /// stuffing huge/numerous images into `background-image` is exactly the
+    /// worst-case this flag exists to let a user nuke in one shot, but
+    /// that's an opt-IN degradation, not the default. `--dump-text`/the
+    /// interactive shell never consult this at all (see `bg_images` module
+    /// docs: pixel-only, the tty backend has no use for decoded image
+    /// pixels).
+    no_bg_images: bool,
     /// packet/shell-keyboard: the first bare (non-`--flag`) argument, e.g.
     /// `stele fixtures/basic.html` or `stele http://example.com/` — when
     /// `headless` is `false` and this is `Some`, `main` launches the
@@ -88,7 +101,7 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS, stats: false, source: None }
+        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS, stats: false, no_bg_images: false, source: None }
     }
 }
 
@@ -134,6 +147,7 @@ fn parse_args(argv: &[String]) -> Args {
                 }
             }
             "--stats" => out.stats = true,
+            "--no-bg-images" => out.no_bg_images = true,
             other => {
                 // packet/shell-keyboard: the first bare token (doesn't start
                 // with `--`) is the interactive-mode source. Only the FIRST
@@ -366,7 +380,17 @@ fn blank_png() -> Vec<u8> {
 /// single `layout::layout` call to drive (see `dump_text`'s own frames
 /// carve-out), and wiring the frames compositor to pixels is a follow-up,
 /// not this packet's job.
+#[cfg(test)]
 fn dump_png(source: &str) -> Vec<u8> {
+    dump_png_opts(source, false)
+}
+
+/// [`dump_png`]'s real implementation, parameterized over `no_bg_images`
+/// (packet bg-image's `--no-bg-images` kill switch) — `dump_png` itself is a
+/// thin wrapper always passing `false` (bg-images ON), keeping every
+/// existing `dump_png` call site/test unchanged; `main`'s `--dump-png`
+/// branch calls this directly with `args.no_bg_images`.
+fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
     let url = resolve_url(source);
     let response = match fetch_response(&url) {
         Ok(r) => r,
@@ -425,8 +449,15 @@ fn dump_png(source: &str) -> Vec<u8> {
         1
     };
 
+    // Packet bg-image: the `background-image` fetch+decode pre-pass, same
+    // "resolve against `response.final_url`" rationale as the `<img src>`
+    // pre-pass right above. `--no-bg-images` skips it entirely (an empty
+    // map — `raster::paint` then paints every box's `background_color`
+    // alone, exactly as if no box declared a `background-image` at all).
+    let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
+
     let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments);
+    raster::paint(&mut surface, &fragments, &bg_images);
     raster::encode_png(&surface)
 }
 
@@ -435,8 +466,16 @@ fn dump_png(source: &str) -> Vec<u8> {
 /// total (never fails); the only failure mode here is the filesystem write,
 /// reported as a clean `Err` rather than a panic (e.g. an unwritable
 /// directory, a hostile/invalid `out_path`).
+#[cfg(test)]
 fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
-    let bytes = dump_png(source);
+    write_dump_png_opts(source, out_path, false)
+}
+
+/// [`write_dump_png`]'s real implementation, parameterized over
+/// `no_bg_images` — see [`dump_png_opts`]'s doc comment for the same
+/// wrapper-over-parameterized-impl rationale.
+fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool) -> Result<(), String> {
+    let bytes = dump_png_opts(source, no_bg_images);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
@@ -451,7 +490,15 @@ fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
 /// the way there's a trivial 1x1 blank PNG to encode, and the CLI layer
 /// ([`render_fb`]) reports whichever of these `Err`s comes back rather than
 /// silently painting nothing.
+#[cfg(test)]
 fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
+    render_fb_surface_opts(source, width, false)
+}
+
+/// [`render_fb_surface`]'s real implementation, parameterized over
+/// `no_bg_images` — see [`dump_png_opts`]'s doc comment for the same
+/// wrapper-over-parameterized-impl rationale.
+fn render_fb_surface_opts(source: &str, width: u32, no_bg_images: bool) -> Result<MemSurface, String> {
     let url = resolve_url(source);
     let response = fetch_response(&url)?;
     let html = String::from_utf8_lossy(&response.body);
@@ -495,8 +542,12 @@ fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
         1
     };
 
+    // Packet bg-image: see `dump_png_opts`'s own doc comment for the exact
+    // same rationale (this is `--render-fb`'s copy of that same pre-pass).
+    let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
+
     let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments);
+    raster::paint(&mut surface, &fragments, &bg_images);
     Ok(surface)
 }
 
@@ -518,7 +569,15 @@ fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
 /// change a test's pass/fail (some CI/build containers do have a real or
 /// passed-through fb0, some don't). [`render_fb`] is this closed over the
 /// real defaults, for [`main`] to call.
+#[cfg(test)]
 fn render_fb_to(source: &str, sysfs_dir: &Path, device_path: &Path) -> Result<(), String> {
+    render_fb_to_opts(source, sysfs_dir, device_path, false)
+}
+
+/// [`render_fb_to`]'s real implementation, parameterized over `no_bg_images`
+/// — see [`dump_png_opts`]'s doc comment for the same wrapper-over-
+/// parameterized-impl rationale.
+fn render_fb_to_opts(source: &str, sysfs_dir: &Path, device_path: &Path, no_bg_images: bool) -> Result<(), String> {
     let fb_info = fb::read_fb_info_from(sysfs_dir);
     let width = match &fb_info {
         Ok(info) => info.width,
@@ -528,7 +587,7 @@ fn render_fb_to(source: &str, sysfs_dir: &Path, device_path: &Path) -> Result<()
         }
     };
 
-    let surface = render_fb_surface(source, width)?;
+    let surface = render_fb_surface_opts(source, width, no_bg_images)?;
     let info = fb_info.map_err(|e| e.to_string())?;
     let (surf_w, surf_h) = stele::surface::Surface::size(&surface);
     let bytes = fb::convert_to_fb_bytes(surface.bytes(), surf_w, surf_h, info).map_err(|e| e.to_string())?;
@@ -544,8 +603,16 @@ fn render_fb_to(source: &str, sysfs_dir: &Path, device_path: &Path) -> Result<()
 /// [`render_fb_to`] carries the real test coverage. This is the path the
 /// brief calls out as un-integration-testable in CI (no `/dev/fb0`
 /// guaranteed on any given runner).
+#[cfg(test)]
 fn render_fb(source: &str) -> Result<(), String> {
-    render_fb_to(source, Path::new(fb::DEFAULT_SYSFS_DIR), Path::new(fb::DEFAULT_DEVICE_PATH))
+    render_fb_opts(source, false)
+}
+
+/// [`render_fb`]'s real implementation, parameterized over `no_bg_images` —
+/// `main`'s `--render-fb` branch calls this directly with
+/// `args.no_bg_images`.
+fn render_fb_opts(source: &str, no_bg_images: bool) -> Result<(), String> {
+    render_fb_to_opts(source, Path::new(fb::DEFAULT_SYSFS_DIR), Path::new(fb::DEFAULT_DEVICE_PATH), no_bg_images)
 }
 
 // ---------------------------------------------------------------------------
@@ -926,13 +993,13 @@ fn main() {
             if args.stats {
                 print_stats(&source, DEFAULT_PNG_WIDTH as f32);
             }
-            if let Err(e) = write_dump_png(&source, &out_path) {
+            if let Err(e) = write_dump_png_opts(&source, &out_path, args.no_bg_images) {
                 eprintln!("stele: --dump-png failed: {e}");
             }
             return;
         }
         if let Some(source) = args.render_fb {
-            if let Err(e) = render_fb(&source) {
+            if let Err(e) = render_fb_opts(&source, args.no_bg_images) {
                 eprintln!("stele: no framebuffer (/dev/fb0): {e}");
                 std::process::exit(1);
             }
@@ -1213,6 +1280,53 @@ mod tests {
         let (w, h) = decode_png_dims(&bytes);
         assert_eq!(w, DEFAULT_PNG_WIDTH);
         assert!(h > 0, "content-driven height should be nonzero for a real document");
+    }
+
+    // -------------------------------------------------------- bg-image (--no-bg-images)
+
+    #[test]
+    fn parse_args_recognizes_no_bg_images_flag() {
+        let a = parse_args(&args(&["--headless", "--dump-png", "fixtures/basic.html", "/tmp/out.png", "--no-bg-images"]));
+        assert!(a.no_bg_images);
+    }
+
+    #[test]
+    fn parse_args_no_bg_images_defaults_to_false() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "fixtures/basic.html"]));
+        assert!(!a.no_bg_images);
+    }
+
+    /// `dump_png` (the default, no-flag entry point every existing test
+    /// above already calls) must render WITH background-images — a fixture
+    /// whose only visible pixels come from a `background-image` (not a
+    /// `background-color`) should show that image's colors.
+    #[test]
+    fn dump_png_default_paints_background_images() {
+        let bytes = dump_png("fixtures/bg-image.html");
+        let pixels = decode_png_pixels(&bytes);
+        assert!(
+            pixels.chunks(4).any(|p| p == [220, 30, 30, 255]),
+            "expected the tiled red background-image to show by default"
+        );
+    }
+
+    /// The kill switch: `dump_png_opts(.., true)` (what `--no-bg-images`
+    /// wires to) must render a DIFFERENT, image-free result for the exact
+    /// same fixture — the `.tile` box shows only its `background_color`
+    /// (unset here, so transparent -> the page's white canvas), never the
+    /// red tile pixels.
+    #[test]
+    fn no_bg_images_flag_produces_a_distinct_image_free_render() {
+        let with_images = dump_png_opts("fixtures/bg-image.html", false);
+        let without_images = dump_png_opts("fixtures/bg-image.html", true);
+
+        assert_ne!(with_images, without_images, "--no-bg-images must change the render");
+
+        let without_pixels = decode_png_pixels(&without_images);
+        assert!(
+            without_pixels.chunks(4).all(|p| p != [220, 30, 30, 255]),
+            "--no-bg-images: no red background-image pixels should appear anywhere"
+        );
     }
 
     /// m5-link-css: the pixel path (`dump_png`) fetches `<link>` sheets too
