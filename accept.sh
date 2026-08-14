@@ -308,6 +308,35 @@ else
     bad "A3f: PNG dump of $FIXTURE_IMAGES differs from $GOLDEN_PNG_IMAGES"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_IMAGES") actual=$(wc -c < /tmp/stele_a3f.png)"
   fi
+
+  # A3g -- the flex-polite packet's own PNG golden (M5): a modern no-JS blog
+  # layout styled entirely via author CSS (`<style>` block: `display: flex`,
+  # `justify-content`, `align-items`, `flex-grow`, `gap`, a fixed-width
+  # sidebar), exercising author-CSS-driven flexbox end to end for the first
+  # time (previous PNG goldens, A3e/A3f, have no flex in them at all). Same
+  # blessing discipline, same byte-equality rationale as A3e/A3f
+  # (encode_png is deterministic; tests/flex_polite_golden.rs does the real
+  # decode-and-compare-pixels check, plus geometry assertions proving the
+  # flex actually took effect -- nav right of title, article wider than the
+  # fixed-width aside).
+  GOLDEN_PNG_FLEX="goldens/flex-polite.png"
+  FIXTURE_FLEX="fixtures/flex-polite.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3g: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_FLEX" /tmp/stele_a3g.png 2>/tmp/stele_a3g.err; then
+    bad "A3g: stele --headless --dump-png crashed on $FIXTURE_FLEX"
+    sed 's/^/    /' /tmp/stele_a3g.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3g.png "$GOLDEN_PNG_FLEX"
+    pass "A3g: blessed PNG golden -> $GOLDEN_PNG_FLEX (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_FLEX" ]; then
+    bad "A3g: no golden at $GOLDEN_PNG_FLEX to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_FLEX" /tmp/stele_a3g.png; then
+    pass "A3g: PNG dump of $FIXTURE_FLEX matches golden"
+  else
+    bad "A3g: PNG dump of $FIXTURE_FLEX differs from $GOLDEN_PNG_FLEX"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_FLEX") actual=$(wc -c < /tmp/stele_a3g.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

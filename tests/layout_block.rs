@@ -7,12 +7,38 @@ use std::rc::Rc;
 
 use stele::img::RgbaImage;
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
-use stele::style::computed::{BorderSide, BorderStyle, Dimension, Edges, LengthPercentage, LengthPercentageAuto};
+use stele::style::computed::{
+    BorderSide, BorderStyle, Dimension, Edges, FlexDirection, LengthPercentage, LengthPercentageAuto,
+};
 use stele::style::ComputedStyle;
 
 /// A `display: block` style with everything else at CSS initial values.
 fn block_style() -> ComputedStyle {
     ComputedStyle { display: stele::style::computed::Display::Block, ..ComputedStyle::default() }
+}
+
+/// A `display: flex; flex-direction: row` style (the CSS default direction)
+/// with the given `gap`, everything else at CSS initial values.
+fn flex_row_style(gap: f32) -> ComputedStyle {
+    ComputedStyle {
+        display: stele::style::computed::Display::Flex,
+        flex_direction: FlexDirection::Row,
+        gap,
+        ..ComputedStyle::default()
+    }
+}
+
+fn flex_item_style(width: Option<f32>, flex_grow: f32) -> ComputedStyle {
+    let mut style = block_style();
+    if let Some(w) = width {
+        style.width = Dimension::Px(w);
+    }
+    style.flex_grow = flex_grow;
+    style
+}
+
+fn text_node(s: &str) -> LayoutNode {
+    LayoutNode { style: ComputedStyle::default(), content: BoxContent::Text(s.to_string()), children: Vec::new() }
 }
 
 fn px_margin(top: f32, right: f32, bottom: f32, left: f32) -> Edges<LengthPercentageAuto> {
@@ -258,4 +284,116 @@ fn replaced_with_non_finite_intrinsic_does_not_panic() {
         assert!(f.rect.size.w.is_finite());
         assert!(f.rect.size.h.is_finite());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Flex geometry (M5 flex-polite): `display: flex` was already wired onto
+// taffy (P6), but no packet before this one ever styled + rendered + pixel-
+// verified a real flex layout. These are hand-built `LayoutNode` trees (no
+// parsing/cascade involved, matching this file's own convention) proving the
+// taffy translation produces the right RECT geometry for the CSS this
+// packet's `fixtures/flex-polite.html` actually uses: row direction (the
+// default), `flex-grow`, a fixed-width sibling, and `gap`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flex_row_lays_items_out_left_to_right_with_gap() {
+    let root = container(flex_row_style(16.0), vec![leaf_container(flex_item_style(Some(50.0), 0.0)), leaf_container(flex_item_style(Some(50.0), 0.0))]);
+    let fragments = layout(&root, Size { w: 400.0, h: 100.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3, "container + 2 items");
+    assert_eq!(boxes[1].rect.origin.x, 0.0);
+    assert_eq!(boxes[1].rect.size.w, 50.0);
+    // second item starts after the first item's width plus the gap.
+    assert_eq!(boxes[2].rect.origin.x, 50.0 + 16.0);
+    assert_eq!(boxes[2].rect.size.w, 50.0);
+}
+
+/// Mirrors `fixtures/flex-polite.html`'s two-column `main`/`aside` layout: a
+/// `flex-grow: 1` item must take all the width its fixed-width sibling
+/// doesn't use (minus the gap between them), and the two items must sit
+/// side by side (same y, different x) -- geometry a block layout could never
+/// produce.
+#[test]
+fn flex_grow_item_takes_remaining_width_beside_a_fixed_width_sibling() {
+    let article = flex_item_style(None, 1.0); // width: auto, flex-grow: 1
+    let aside = flex_item_style(Some(200.0), 0.0); // fixed width, no grow
+    let root = container(flex_row_style(24.0), vec![leaf_container(article), leaf_container(aside)]);
+    let fragments = layout(&root, Size { w: 800.0, h: 100.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3, "container + article + aside");
+
+    let article_box = boxes[1];
+    let aside_box = boxes[2];
+
+    // side by side: same y, article strictly to the left of aside.
+    assert_eq!(article_box.rect.origin.y, aside_box.rect.origin.y);
+    assert!(article_box.rect.origin.x < aside_box.rect.origin.x);
+
+    // aside keeps its fixed width...
+    assert_eq!(aside_box.rect.size.w, 200.0);
+    // ...and article grows to fill everything else: 800 - 200(aside) - 24(gap).
+    assert_eq!(article_box.rect.size.w, 800.0 - 200.0 - 24.0);
+    assert!(article_box.rect.size.w > aside_box.rect.size.w, "flex-grow item should end up wider than the fixed sidebar");
+}
+
+#[test]
+fn justify_content_space_between_pushes_items_to_opposite_edges() {
+    let mut style = flex_row_style(0.0);
+    style.justify_content = stele::style::computed::JustifyContent::SpaceBetween;
+    let title = flex_item_style(Some(100.0), 0.0);
+    let nav = flex_item_style(Some(150.0), 0.0);
+    let root = container(style, vec![leaf_container(title), leaf_container(nav)]);
+    let fragments = layout(&root, Size { w: 800.0, h: 60.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3);
+    let title_box = boxes[1];
+    let nav_box = boxes[2];
+    assert_eq!(title_box.rect.origin.x, 0.0, "title (left item) stays flush left");
+    assert_eq!(nav_box.rect.origin.x, 800.0 - 150.0, "nav (right item) is pushed flush right");
+    assert!(title_box.rect.origin.x < nav_box.rect.origin.x, "nav must render to the right of the title");
+}
+
+/// Regression test: a whitespace-only `Text` node between two real flex
+/// children (exactly what document-formatted HTML like
+/// `<nav>\n  <a>Home</a>\n  <a>About</a>\n</nav>` produces -- see
+/// `dom::parser`'s doc comment: any non-empty run of raw source text becomes
+/// a `Text` node, whitespace-only or not) must NOT become its own flex item.
+/// Per the CSS Flexbox spec (§4 "Flex Items"): "a child text node consisting
+/// entirely of collapsible white space is not rendered, i.e. it does not
+/// generate an anonymous flex item" -- so it must not consume a `gap` on
+/// either side of it. Before the fix, `translate_container_children`'s flex
+/// branch translated EVERY child (including whitespace-only text) into its
+/// own taffy flex item, so a formatted `<nav>` rendered its links twice as
+/// far apart as an unformatted one -- a real, silent layout bug any
+/// indented/pretty-printed flex markup would trip over.
+#[test]
+fn whitespace_only_text_between_flex_items_does_not_consume_gap_space() {
+    let unformatted = container(
+        flex_row_style(16.0),
+        vec![leaf_container(flex_item_style(Some(50.0), 0.0)), leaf_container(flex_item_style(Some(50.0), 0.0))],
+    );
+    let formatted = container(
+        flex_row_style(16.0),
+        vec![
+            leaf_container(flex_item_style(Some(50.0), 0.0)),
+            text_node("\n  "),
+            leaf_container(flex_item_style(Some(50.0), 0.0)),
+        ],
+    );
+
+    let unformatted_boxes_owned = layout(&unformatted, Size { w: 400.0, h: 100.0 });
+    let formatted_fragments = layout(&formatted, Size { w: 400.0, h: 100.0 });
+
+    let unformatted_boxes = box_fragments(&unformatted_boxes_owned);
+    let formatted_boxes = box_fragments(&formatted_fragments);
+
+    assert_eq!(unformatted_boxes.len(), 3);
+    assert_eq!(formatted_boxes.len(), 3, "the whitespace-only text node must not emit its own Box fragment as a flex item");
+
+    // The two real items must land at the exact same x in both trees -- the
+    // whitespace-only text node in between must be invisible to flex geometry.
+    assert_eq!(formatted_boxes[1].rect.origin.x, unformatted_boxes[1].rect.origin.x);
+    assert_eq!(formatted_boxes[2].rect.origin.x, unformatted_boxes[2].rect.origin.x);
+    assert_eq!(formatted_boxes[2].rect.origin.x, 50.0 + 16.0, "exactly one gap between the two real items, not two");
 }

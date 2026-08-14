@@ -3,6 +3,23 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M5 — flex-polite (flexbox pixel-green)
+
+### D29 — flexbox renders to pixels; whitespace-only text is not a flex item
+Flexbox already laid out (taffy `apply_flex`) but had never been styled +
+rendered; `flex-polite.html` (a modern no-JS blog layout via an author
+`<style>` block) proves it pixel-green. One real bug fixed: per CSS Flexbox §4,
+a flex container child that is a `Text` node of only collapsible whitespace
+(ubiquitous from source newlines/indentation between flex children) must NOT
+generate an anonymous flex item — `translate_container_children`'s flex branch
+was making one, doubling `gap`. Fixed with an `is_whitespace_only_text` skip
+(only in the flex branch; block flow is unaffected). The golden test renders
+through the REAL author-CSS pipeline (`collect_author_sheets` + `cascade(dom,
+&sheets)`, matching `main::dump_png`), not the legacy hardcoded
+`cascade(dom, &[])` helper — so flex CSS actually applies; a companion test
+asserts flex is load-bearing. Revisit: meaningful (non-whitespace) text in a
+flex container still correctly becomes an anonymous flex item.
+
 ## M5 — Author CSS
 
 ### D28 — author `<style>` + inline `style=` wired into the cascade

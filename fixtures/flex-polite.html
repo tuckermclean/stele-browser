@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head><title>Stele Weekly &mdash; a flexbox blog layout</title>
+<style>
+  body { margin: 0; }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #24344d;
+    color: white;
+    padding: 16px 24px;
+  }
+  header h1 { margin: 0; font-size: 1.5em; }
+
+  nav { display: flex; gap: 20px; }
+  nav a { color: white; text-decoration: none; }
+
+  .layout { display: flex; gap: 24px; padding: 24px; }
+
+  main {
+    flex-grow: 1;
+    background-color: #f4f1ea;
+    padding: 20px;
+    border: 2px solid #cbbfa3;
+  }
+  main h2 { margin-top: 0; }
+
+  aside {
+    width: 220px;
+    background-color: #e4ecf7;
+    padding: 20px;
+    border: 2px solid #9db6dd;
+  }
+  aside h3 { margin-top: 0; }
+
+  footer {
+    background-color: #24344d;
+    color: white;
+    padding: 16px 24px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stele Weekly</h1>
+  <nav>
+    <a href="#">Home</a>
+    <a href="#">Articles</a>
+    <a href="#">About</a>
+  </nav>
+</header>
+<div class="layout">
+  <main>
+    <article>
+      <h2>Flexbox, Rendered in Pixels</h2>
+      <p>This two-column layout is real CSS flexbox: the article grows to fill the remaining width while the sidebar keeps a fixed 220px column. No JavaScript, no grid -- just flex-grow and a gap.</p>
+      <p>The header above uses justify-content: space-between to push the site title left and the navigation links right, with align-items: center keeping them aligned on one row despite their different font sizes.</p>
+    </article>
+  </main>
+  <aside>
+    <h3>About This Page</h3>
+    <p>A modern no-JS blog layout, styled entirely with an inline &lt;style&gt; block and rendered through Stele's real author-CSS pipeline.</p>
+  </aside>
+</div>
+<footer>
+  <p>Stele Browser Project</p>
+</footer>
+</body>
+</html>
