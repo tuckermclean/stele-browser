@@ -200,6 +200,26 @@ else
     bad "A3b: tty dump of $FIXTURE_TABLES differs from $GOLDEN_TTY_TABLES"
     sed 's/^/    /' /tmp/stele_a3b.diff
   fi
+
+  # A3c — the form-rendering packet's own tty golden (fixtures/forms.html):
+  # same host binary, same blessing discipline, same independent block so a
+  # failure/bless of one fixture doesn't short-circuit the others.
+  GOLDEN_TTY_FORMS="goldens/forms.tty.txt"
+  FIXTURE_FORMS="fixtures/forms.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3c: host binary still not found at $HOST_BIN"
+  elif ! out_forms="$("$HOST_BIN" --headless --dump-text "$FIXTURE_FORMS" 2>/tmp/stele_a3c.err)"; then
+    bad "A3c: stele --headless --dump-text crashed on $FIXTURE_FORMS"
+    sed 's/^/    /' /tmp/stele_a3c.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_forms" > "$GOLDEN_TTY_FORMS"
+    pass "A3c: blessed forms tty golden -> $GOLDEN_TTY_FORMS (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_FORMS" <(printf '%s\n' "$out_forms") >/tmp/stele_a3c.diff 2>&1; then
+    pass "A3c: tty dump of $FIXTURE_FORMS matches golden"
+  else
+    bad "A3c: tty dump of $FIXTURE_FORMS differs from $GOLDEN_TTY_FORMS"
+    sed 's/^/    /' /tmp/stele_a3c.diff
+  fi
 fi
 pend "A3: mem-Surface PNG goldens — P9/M4"
 

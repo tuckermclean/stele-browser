@@ -138,10 +138,21 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
 // packet report):
 //   - text-like `<input>` (`text`/`password`/`search`/`email`/`url`/`tel`/
 //     `number`, or no `type` at all): `[<value>]`, tight brackets; with no
-//     `value`, `[<spaces sized to the `size` attr, default 10>]`.
+//     `value`, `[<underscores sized to the `size` attr, default 10>]` --
+//     UNDERSCORES, not literal spaces: `layout::inline`'s bespoke
+//     whitespace-collapsing is unconditional in v1 ("v1 always collapses; a
+//     Pre fast-path is a follow-up", per that module's own docs) -- it
+//     collapses ANY run of whitespace to a single space regardless of a
+//     node's `white-space` style, so a run of literal spaces here would
+//     silently collapse down to one space by the time it reaches the tty
+//     grid, defeating the whole point of a size-sized placeholder. `_` is
+//     never whitespace, so it survives that collapsing untouched, and reads
+//     just as clearly as a blank field (`[____________]`) in a text-mode
+//     dump -- arguably more so, since bare spaces between `[`/`]` are
+//     visually indistinguishable from the surrounding background anyway.
 //     `password` masks its value with one `*` per character instead of the
-//     literal text (no `value` still falls back to blank spaces -- nothing
-//     to mask).
+//     literal text (no `value` still falls back to the same underscore
+//     blank -- nothing to mask).
 //   - `<input type=checkbox>`: `[x]` checked, `[ ]` unchecked.
 //   - `<input type=radio>`: `(*)` checked, `( )` unchecked.
 //   - `<input type=submit|image>`, `<input type=reset>`, `<input
@@ -280,17 +291,21 @@ fn control_size(el: &Element) -> usize {
         .unwrap_or(DEFAULT_CONTROL_SIZE)
 }
 
+/// Blank-field filler character -- see the module doc comment's "Placeholder
+/// convention" section for why this is `_` rather than a literal space.
+const BLANK_FILL: &str = "_";
+
 fn text_field_value(el: &Element) -> String {
     match el.attrs.get("value") {
         Some(v) if !v.is_empty() => v.to_string(),
-        _ => " ".repeat(control_size(el)),
+        _ => BLANK_FILL.repeat(control_size(el)),
     }
 }
 
 fn password_mask(el: &Element) -> String {
     match el.attrs.get("value") {
         Some(v) if !v.is_empty() => "*".repeat(v.chars().count()),
-        _ => " ".repeat(control_size(el)),
+        _ => BLANK_FILL.repeat(control_size(el)),
     }
 }
 
@@ -726,19 +741,25 @@ mod tests {
     }
 
     #[test]
-    fn text_input_without_value_renders_spaces_sized_to_size_attr() {
+    fn text_input_without_value_renders_underscores_sized_to_size_attr() {
+        // Underscores, not literal spaces: `layout::inline` unconditionally
+        // collapses whitespace runs in v1 (see that module's own docs), so
+        // a run of plain spaces here would collapse down to one space by
+        // the time it reaches the tty grid -- `_` is never whitespace, so
+        // it survives untouched. See `build_form_control`'s module doc
+        // comment ("Placeholder convention") for the full rationale.
         let d = dom::parser::parse(r#"<input type="text" name="a" size="4">"#);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles).expect("root present");
-        assert!(find_text(&root, "[    ]").is_some(), "expected 4 spaces inside brackets");
+        assert!(find_text(&root, "[____]").is_some(), "expected 4 underscores inside brackets");
     }
 
     #[test]
-    fn text_input_without_value_or_size_defaults_to_ten_spaces() {
+    fn text_input_without_value_or_size_defaults_to_ten_underscores() {
         let d = dom::parser::parse(r#"<input type="text" name="a">"#);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles).expect("root present");
-        let expected = format!("[{}]", " ".repeat(10));
+        let expected = format!("[{}]", "_".repeat(10));
         assert!(find_text(&root, &expected).is_some());
     }
 
