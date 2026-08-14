@@ -140,7 +140,11 @@ fi
 # packet (A3e, below): `stele --headless --dump-png` over fixtures/basic.html
 # must match goldens/basic.png byte-for-byte (the PNG encoder is
 # deterministic — see backend::raster's own doc comments). That PNG golden
-# is PROPOSED (brief §10 blessing discipline), same as the tty goldens.
+# is PROPOSED (brief §10 blessing discipline), same as the tty goldens. The
+# M4 images packet adds A3f: the same PNG-golden check over
+# fixtures/images.html (goldens/images.png) — THE SCREENSHOT, real decoded
+# image pixels blitted via the images fetch+decode pre-pass, not just
+# layout/paint of boxes and text.
 #
 # Host binary: built via a plain `cargo build --release` (the default host
 # target, NOT the i486 cross target `$BIN` used by A1/A4) since this check
@@ -274,6 +278,33 @@ else
   else
     bad "A3e: PNG dump of $FIXTURE_BASIC differs from $GOLDEN_PNG"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG") actual=$(wc -c < /tmp/stele_a3e.png)"
+  fi
+
+  # A3f — the images packet's own PNG golden (M4): THE SCREENSHOT.
+  # fixtures/images.html has real <img src> elements resolved against sibling
+  # files on disk (a PNG, a JPEG, a GIF, an animated GIF), so — unlike A3e's
+  # fixtures/basic.html, which has none — this exercises the real image
+  # fetch+decode pre-pass (images::collect_images) end to end, not just
+  # layout/paint. Same blessing discipline, same byte-equality rationale as
+  # A3e (encode_png is deterministic; tests/images_golden.rs does the real
+  # decode-and-compare-pixels check).
+  GOLDEN_PNG_IMAGES="goldens/images.png"
+  FIXTURE_IMAGES="fixtures/images.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3f: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_IMAGES" /tmp/stele_a3f.png 2>/tmp/stele_a3f.err; then
+    bad "A3f: stele --headless --dump-png crashed on $FIXTURE_IMAGES"
+    sed 's/^/    /' /tmp/stele_a3f.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3f.png "$GOLDEN_PNG_IMAGES"
+    pass "A3f: blessed PNG golden -> $GOLDEN_PNG_IMAGES (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_IMAGES" ]; then
+    bad "A3f: no golden at $GOLDEN_PNG_IMAGES to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_IMAGES" /tmp/stele_a3f.png; then
+    pass "A3f: PNG dump of $FIXTURE_IMAGES matches golden"
+  else
+    bad "A3f: PNG dump of $FIXTURE_IMAGES differs from $GOLDEN_PNG_IMAGES"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_IMAGES") actual=$(wc -c < /tmp/stele_a3f.png)"
   fi
 fi
 

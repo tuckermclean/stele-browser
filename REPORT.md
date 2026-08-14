@@ -1,140 +1,181 @@
-# REPORT — M4 pixel foundation (packet/fb-pixel-foundation)
+# REPORT — M4 images (packet/m4-images)
 
 Implementer report for the orchestrator. Not merged into `JOURNAL.md`/
 `DECISIONS.md` by this packet — rationale below is for the orchestrator to
 fold in (or not) at review time.
 
-## Fonts / licenses
-
-- **Font**: `font8x8_basic` — 128 glyphs (ASCII `U+0000..=U+007F`), 8 bytes
-  per glyph (one byte per pixel row).
-- **Source**: <https://raw.githubusercontent.com/dhepper/font8x8/master/font8x8_basic.h>
-  (repository <https://github.com/dhepper/font8x8>, by Daniel Hepper).
-- **License**: **Public Domain**, per that file's own header comment. It in
-  turn credits Marcel Sondaar / International Business Machines' original
-  public-domain VGA fonts as its basis. Public Domain has no attribution or
-  copyleft obligation, so nothing further needs to ship in the binary or
-  this repo beyond the citation itself.
-- Embedded as a compiled-in Rust `const` table in `src/text/glyphs.rs` (not
-  fetched at runtime — no network/file dependency in the shipped binary).
-  The same citation is duplicated in that module's doc comment, the source
-  of truth going forward.
-
 ## What landed
 
-1. **Font atlas** (`src/text/glyphs.rs`, new): the `font8x8_basic` table
-   plus `pub(crate) fn lookup(ch: char) -> [u8; 8]`, total over all of
-   `char` — any scalar outside `0x00..=0x7F` renders a small hollow
-   "tofu box" fallback rather than vanishing or panicking. Bit order: bit 0
-   (LSB) of each row byte is the **leftmost** pixel — confirmed empirically
-   by decoding the 'A' glyph into a recognizable capital-A silhouette (see
-   the module's doc comment and its `capital_a_decodes_to_a_recognizable_
-   silhouette` test).
-2. **`BitmapFont` inherent methods** (`src/text/bitmap.rs`): `glyph(ch) ->
-   [u8; 8]` (delegates to `glyphs::lookup`) and `glyph_scale(size_px) -> f32`
-   (a `pub` wrapper over the existing private `scale()`, so the rasterizer
-   reuses the exact same size_px -> scale mapping the `Metrics` trait
-   methods already use — no duplicated/drifting math). Both are additive;
-   no frozen signature touched.
-3. **`MemSurface::draw_text`** (`src/surface/mem.rs`): fills in the frozen
-   method's body. Placement rule: each glyph's 8px-tall source box has its
-   **bottom row sit exactly on `run.baseline`** — at the font's native size
-   (16px, scale 1.0) that lands the glyph at design rows `[4, 12)` of
-   `vga_8x16`'s 16-row/12-ascent cell, i.e. centered in the cell AND
-   baseline-bottom-aligned at once (8 is exactly half of 16, and 12 - 8 = 4),
-   so there was no top-vs-centered tradeoff to make — see the doc comment on
-   `MemSurface::draw_glyph`. Scaling is nearest-neighbor, computed by
-   inverse-mapping each *output* pixel back to a source pixel (rather than
-   forward-filling source rows into variable-width bands), so it handles any
-   positive `scale` — including non-integer ones (e.g. a 24px heading, scale
-   1.5) — with no gaps or overlaps. A `MAX_GLYPH_PX` cap (1024px per glyph
-   edge) bounds the per-glyph pixel loop against a hostile/huge `size_px`.
-4. **Raster painter** (`src/backend/raster.rs`, new): `paint(surface,
-   fragments)`, the pixel analog of `backend::tty::render`. `Box` fragments
-   fill `background_color` (skipped when fully transparent) then each
-   `solid`, nonzero-width border edge as its own filled rect in that edge's
-   own color. `Text` fragments build a `TextRun` from the fragment's own
-   `rect.origin.x`/`rect.origin.y + baseline` (mirroring `backend::tty`'s
-   documented "top of line box + offset" contract for that field) and call
-   `Surface::draw_text`. `Image` fragments are skipped — `// TODO(images
-   packet): blit`; `MemSurface::blit` is untouched (still `todo!()`).
-   `encode_png(surface: &MemSurface) -> Vec<u8>` lives in the same module:
-   deterministic RGBA8 PNG encoding via the `png` crate (no timestamp/text
-   chunks), with a zero-dimension surface degrading to a blank 1x1 white PNG
-   instead of handing the encoder an invalid `IHDR`.
-5. **`--dump-png <src> <out.png>` CLI** (`src/main.rs`): parallel to
-   `--dump-text`, gated the same way behind `--headless`. Fixed 800px
-   viewport width (`DEFAULT_PNG_WIDTH`, no `--width` flag yet — a documented
-   v0 simplification), content-driven height (max fragment bottom edge,
-   bounded by `MAX_PNG_HEIGHT` = 20,000px the same way `backend::tty`
-   bounds `MAX_GRID_ROWS`). A fetch error, unsupported scheme, empty/
-   `display:none` document, or `<frameset>` document (pixel rendering of
-   frames is explicitly out of scope here — a follow-up's job) all degrade
-   to a clean blank 1x1 PNG (`blank_png()`), never a panic — mirroring
-   `dump_text`'s own totality contract.
-6. **First pixel golden**: `goldens/basic.png` (800x247), rendered from
-   `fixtures/basic.html` via the real `--dump-png` path. **PROPOSED, NOT
-   self-blessed** — per the brief's blessing discipline, this implementer
-   is not the one who countersigns it; the orchestrator should open the PNG
-   and confirm it looks right (headings, a paragraph with a blue link,
-   correct line spacing) before trusting it. `tests/png_golden.rs` asserts
-   an exact match by **decoding both PNGs and comparing RGBA pixel arrays**
-   (not raw bytes), per the brief. `accept.sh`'s new **A3e** check
-   round-trips the same fixture through the *compiled* binary (a real
-   `file://` fetch, not `include_str!`) and compares raw PNG bytes — valid
-   here specifically because `encode_png` is proven deterministic (see
-   `encode_png_is_deterministic`), so a byte compare and a pixel compare
-   agree; the Rust test remains the actual pixel-level check.
+`<img>` now renders real pixels. The pipeline, end to end:
+
+`decode` (`img::decode_bytes`, already existed, P4) → `pre-pass`
+(`images::collect_images`, new) → `box tree` (`layout::box_tree::
+build_box_tree`, now threads decoded images into `Replaced` boxes) →
+`layout` (`layout::block::emit`, now emits `FragmentKind::Image` for a
+decoded `Replaced`) → `paint` (`backend::raster::paint`, now calls
+`surface.blit`) → `blit` (`MemSurface::blit`, the frozen `todo!()` stub,
+now real).
+
+1. **Commit 1 — freeze amendment** (`src/layout/mod.rs`): `BoxContent::
+   Replaced` gains one field, `image: Option<Rc<RgbaImage>>`. `Rc` (not an
+   owned `RgbaImage`) so cloning a `LayoutNode` during layout translation
+   never copies a pixel buffer — everything here is single-threaded, so
+   `Rc` is the right primitive, not `Arc`. Every construction/match site
+   updated with `image` always `None` at this commit — confirmed
+   byte-identical `goldens/basic.png` and a fully green suite before any
+   feature code landed.
+
+2. **`MemSurface::blit`** (`src/surface/mem.rs`): nearest-neighbor-scales
+   the source image into the target rect and alpha-blends each sampled
+   pixel over the destination via the same `put_pixel` blend `fill_rect`/
+   `draw_glyph` already use. All coordinates are widened to `i64` before any
+   arithmetic (a `u32::MAX`-wide target rect can't overflow computing its
+   far edge), and the destination is clipped to the surface bounds up front
+   — the pixel loop itself never runs more iterations than the *clipped*
+   rect needs, unlike relying on `put_pixel`'s own per-pixel clip alone.
+   No-ops on a zero-sized image or zero-sized target rect (guards the
+   division in the scale math too).
+
+3. **`images::collect_images`** (`src/images.rs`, new module): walks a
+   parsed `Dom` for `<img src>` elements (bounded by its own `DEPTH_CAP`,
+   matching the pattern already established by `box_tree`/`block`/
+   `dom_util`), resolves each `src` against the document's base `Url`,
+   fetches it (`file://`/`http://`, a small duplicated fetch helper
+   mirroring `frames.rs`'s own documented "small, total, driver-level,
+   duplicated rather than shared with the bin" convention — this copy keeps
+   the `Content-Type` header as a decode hint), and decodes via
+   `img::decode_bytes`, taking **frame 0** for the static render. A fetch
+   error, unsupported scheme, or malformed/unrecognized image simply leaves
+   that `NodeId` out of the returned map — never a panic, never aborts the
+   page. Capped at `MAX_IMAGES = 256` fetch+decode attempts per document.
+   Only ever called on the `--dump-png` path; `--dump-text` always passes an
+   empty map (a tty dump paints no pixels, so there's nothing to decode
+   for).
+
+4. **Threading** (`src/layout/box_tree.rs`, `src/layout/block.rs`,
+   `src/backend/raster.rs`): `build_box_tree`/`build_node` gained an
+   `images: &HashMap<NodeId, Rc<RgbaImage>>` parameter (implementation
+   detail, not frozen) — an `<img>`'s `Replaced` box gets
+   `images.get(&id).cloned()`. `layout::block::emit`'s `Replaced` arm
+   branches on that field: `Some(image)` emits exactly one `Image`
+   fragment at the box's laid-out rect (one real pixel-buffer clone here,
+   out of the `Rc`, at emit time — the brief's one sanctioned clone);
+   `None` keeps the pre-existing placeholder `Box`. `raster::paint`'s
+   `Image` arm is now a one-line hand-off to `surface.blit`.
+
+## Screenshot
+
+`goldens/images.png` — **PROPOSED**, not self-blessed (brief §10: an
+implementer never blesses its own render blind). Rendered from
+`fixtures/images.html` via the real `stele --headless --dump-png` pipeline
+(`accept.sh`'s new **A3f** check, `--tty-only` locally PASSing alongside
+A3/A3b/A3c/A3d/A3e). Dimensions: **800×347** px.
+
+What it should show, top to bottom, at the default 800px viewport width:
+
+- An "Images" `<h1>` heading.
+- "A PNG:" followed by a solid **red** 16×16 square (`fixtures/images-red.png`,
+  generated — see below).
+- "A JPEG:" followed by a 16×16 **photographic** square (`fixtures/
+  p4-baseline.jpg`, reused as-is from the P4 image-decoder packet — NOT a
+  flat color, since it's real JPEG content, unlike the other three).
+- "A GIF:" followed by a solid **blue** 16×16 square (`fixtures/
+  images-blue.gif`, generated).
+- "An animated GIF:" followed by a solid **yellow** 16×16 square
+  (`fixtures/images-anim.gif`, generated as a 2-frame animation — yellow
+  then green — confirming this packet's documented "frame 0 only for the
+  static render" rule: the *first* frame's color is what should appear,
+  never the second/green frame).
+
+I sampled the golden's decoded RGBA pixels directly (a small script, not
+committed) to confirm placement before proposing it: red `(220,30,30)`
+first appears around row 116, mixed JPEG colors (including a purple/blue
+region, consistent with real photographic content) around row 180, blue
+`(30,60,220)` around row 244, and yellow `(220,200,30)` — the animated
+GIF's frame 0, not its frame 1 green — around row 308. `tests/
+images_golden.rs::all_four_images_actually_decode_not_fallen_back_to_placeholders`
+independently pins that all four `<img>`s decoded (not silently fell back
+to placeholder boxes) as a check distinct from the pixel-exact golden
+comparison.
 
 ## Test summary (scoped to this packet's new/touched code)
 
-All green, `cargo +nightly test` (full suite): all lib unit tests plus every
-integration test binary, **0 failures**. Packet-scoped highlights:
+All green, `cargo +nightly test` (full suite): 302 lib unit tests + every
+integration test binary, **0 failures**, 1 explicitly `#[ignore]`d
+(`tests/gen_images_fixtures.rs`'s generator — intentionally not part of the
+normal suite, see its own doc comment). Packet-scoped highlights:
 
-- `src/text/glyphs.rs`: 6 tests (bit order, printable-ASCII coverage,
-  non-ASCII fallback, totality).
-- `src/text/bitmap.rs`: +4 tests for `glyph`/`glyph_scale`.
-- `src/surface/mem.rs`: +9 tests for `draw_text` (native-size placement,
-  advance, nearest-neighbor 2x scaling, empty/degenerate/huge `size_px`,
-  off-surface totality, color/alpha).
-- `src/backend/raster.rs`: 13 tests (background fill, all four border
-  edges, `None`-style border no-op, text painting, empty text, `Image`
-  skip/no-blit, paint-order-wins-ties, degenerate-rect totality, PNG
-  round-trip/zero-dim-fallback/determinism).
-- `src/main.rs`: +8 tests for `--dump-png` (arg parsing, valid PNG at
-  default width, blank-PNG fallback on fetch-error/bad-scheme/frameset,
-  filesystem write round-trip, unwritable-path `Err`).
-- `tests/png_golden.rs`: 3 tests (exact pixel match vs. the PROPOSED
-  golden, golden well-formedness/non-blankness, empty-document canvas
-  shape).
-- `accept.sh --tty-only`: A3/A3b/A3c/A3d/**A3e** all PASS locally.
+- `src/surface/mem.rs`: +8 tests for `blit` (nearest-neighbor scaling,
+  alpha-blending over background, zero-size image/target no-ops,
+  off-surface/overhanging-rect clipping, huge-rect totality).
+- `src/images.rs`: +8 tests for `collect_images` (resolves + fetches +
+  decodes a real `<img src>`, resolves a relative `src` against the
+  document base, missing-file and malformed-bytes totality, non-`<img>`/
+  missing-`src` no-op, empty document, `MAX_IMAGES` cap, deep-nesting
+  totality).
+- `src/layout/box_tree.rs`: +2 tests (`images` map threads a decoded image
+  into the matching `<img>`'s `Replaced` box by exact `Rc`; an `<img>` with
+  no map entry stays `image: None`).
+- `tests/layout_block.rs`: +1 test (`Replaced` with `Some(image)` emits
+  exactly one `Image` fragment at its rect, not a placeholder `Box`).
+- `src/backend/raster.rs`: `image_fragment_is_skipped_not_blitted` (M2-era,
+  premise now false) replaced with 2 tests: an opaque image's pixels
+  actually land in the fragment's rect via `blit`; a fully transparent
+  image still paints nothing, via `blit`'s own alpha blend (not a
+  paint-level skip).
+- `tests/images_golden.rs`: 3 tests — THE SCREENSHOT's exact pixel match
+  vs. the PROPOSED golden (real `file://` fetch, not `include_str!` —
+  needed since the images pre-pass does real I/O), golden well-formedness/
+  non-blankness, all-four-images-decoded sanity check.
+- `accept.sh --tty-only`: A3/A3b/A3c/A3d/A3e/**A3f** all PASS locally.
 
-## `git diff main..HEAD` on frozen files
+## `git diff main..HEAD` on frozen surfaces
 
-`src/surface/mod.rs`, `src/layout/mod.rs`, `src/style/*`, `src/text/mod.rs`
-(doc-comment-only change, see below), `src/dom/*`, `src/fetch/*`,
-`src/img/*`, `Cargo.toml`, `Cargo.lock` — **no type or signature changed**.
-`Cargo.toml`/`Cargo.lock` are byte-for-byte unchanged (`png` was already a
-dependency). `src/text/mod.rs`'s only change is its module-level doc
-comment (mentions `glyphs` now existing) plus a new `pub(crate) mod
-glyphs;` line — no existing item touched. `MemSurface::draw_text`'s body
-was filled in (signature frozen, unchanged); `MemSurface::blit` is
-untouched, still `todo!()`.
+- `src/layout/mod.rs`: **only** the `Replaced` variant's new `image` field
+  (plus its doc comment) — no other type/signature in this file changed.
+- `src/surface/mod.rs` (the `Surface` trait itself), `src/style/*`,
+  `src/fetch/*`, `src/img/*`: **untouched** (`git diff main..HEAD --
+  <path>` is empty for each).
+- `Cargo.toml`/`Cargo.lock`: **untouched** — no new dependency (the `gif`
+  crate, already a dependency for decoding, is also used to *encode* the
+  two generated GIF fixture assets; no new crate was added for that).
+- `grep -rn unsafe` over this packet's diff: no matches.
+- `box_tree::build_box_tree`'s signature changed (gains an `images`
+  parameter) — this is implementation, not a frozen type, per the packet
+  brief's explicit sanction.
 
 ## Decisions for the ledger (orchestrator's call on what to keep)
 
-- **Font**: `font8x8_basic` (Public Domain), embedded compiled-in. Bit
-  order: bit 0 (LSB) = leftmost pixel.
-- **Glyph placement**: bottom-of-glyph sits on the baseline (not top- or
-  center-of-cell placement) — the only choice that's simultaneously
-  "centered in the 16-unit cell" and "sits on the baseline" for an 8-tall
-  glyph in a 16-tall/12-ascent cell, so no real tradeoff was made.
-- **Scaling**: nearest-neighbor, inverse-mapped per output pixel — supports
-  any positive `size_px`/scale, not just integer multiples of 16.
-- **`--dump-png` default viewport width**: 800px, fixed, no CLI override
-  yet (`DEFAULT_PNG_WIDTH` in `main.rs`).
-- **v0 simplifications / explicitly out of scope this packet**: images
-  (`FragmentKind::Image`, `MemSurface::blit`) — next packet's job, per the
-  task brief. Floats — also explicitly out of scope. Frameset documents
-  render to a blank placeholder PNG via `--dump-png`, not real pixels —
-  flagged as a follow-up, not fixed here.
+- **`Rc<RgbaImage>` in `Replaced`**, not an owned `RgbaImage` or `Arc`:
+  single-threaded throughout (charter), so `Rc` avoids pixel-buffer copies
+  on every `LayoutNode` clone during layout translation at zero real cost.
+- **`MAX_IMAGES = 256`**: bounds total fetch+decode work per document
+  independent of the P4 decoders' own per-image `MAX_DECODE_PIXELS` cap —
+  a page with tens of thousands of `<img>`s can't drive unbounded
+  network/decode work. Images past the cap render as their ordinary
+  intrinsic-size placeholder, same as a fetch/decode failure.
+- **Animated GIF → frame 0 only** for the static `--dump-png` render (the
+  brief's own call) — `images::collect_images` takes `frames[0].image` and
+  discards the rest. The ticking/interactive loop is out of scope here.
+- **`blit` scaling: nearest-neighbor**, inverse-mapped per output pixel
+  (same technique `MemSurface::draw_glyph` already uses for text) — handles
+  any target rect size, not just integer multiples of the source image.
+- **PNG-only decode gating**: the images fetch+decode pre-pass only runs on
+  the `--dump-png` path; `--dump-text` always passes an empty map, so a
+  tty-only run never pays fetch/decode cost for images it can't paint
+  anyway (they stay `[alt]`-style placeholders, unchanged from before this
+  packet).
+- **Generated fixture assets**: `fixtures/images-red.png` (16×16 solid red,
+  via `backend::raster::encode_png` — the same encoder the existing PNG
+  goldens already trust), `fixtures/images-blue.gif` (16×16 solid blue,
+  one frame), `fixtures/images-anim.gif` (16×16, 2 frames — yellow then
+  green, 500ms apart, looping) — all produced by a **committed generator**,
+  `tests/gen_images_fixtures.rs` (`#[ignore]`d; run explicitly via `cargo
+  test --test gen_images_fixtures -- --ignored` to reproduce them
+  byte-for-byte, since every generated image is a flat solid color with no
+  timestamp/randomness involved). The JPEG asset is not generated —
+  `fixtures/p4-baseline.jpg` (already committed, from the P4 packet) is
+  reused as-is.
+- **`fixtures/images.html`**: all four `<img>`s sit in normal flow (no
+  `align=left`) — floats are explicitly the next packet's job, not this
+  one's.
