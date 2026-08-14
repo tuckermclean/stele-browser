@@ -3,6 +3,7 @@
 //! or X. P7 blesses renders produced through this; P9 shares its pixel ops.
 
 use super::{Color, Rect, Surface, TextRun};
+use crate::text::Metrics;
 
 /// A flat RGBA8 framebuffer in memory.
 #[derive(Debug, Clone)]
@@ -87,8 +88,109 @@ impl Surface for MemSurface {
         todo!("P9: image blit into the mem surface")
     }
 
-    fn draw_text(&mut self, _run: &TextRun) {
-        todo!("P5/P7: rasterize a text run via font metrics")
+    /// Rasterize `run` glyph-by-glyph via the embedded `text::glyphs` atlas
+    /// (M4, pixel foundation Part 2). See module docs above `draw_glyph` for
+    /// the placement/scaling rules pinned by the `draw_text_*` tests below.
+    fn draw_text(&mut self, run: &TextRun) {
+        if run.text.is_empty() || run.color.a == 0 {
+            return;
+        }
+        let font = crate::text::BitmapFont::vga_8x16();
+        let scale = font.glyph_scale(run.size_px);
+        if scale <= 0.0 {
+            // Degenerate/non-finite size_px: BitmapFont::glyph_scale is
+            // total and returns 0.0 here rather than propagating NaN/inf —
+            // nothing legible to paint at zero-or-negative effective size.
+            return;
+        }
+        // Monospace: every char advances by the same cell width (any char
+        // works as the probe; `advance` ignores it — see BitmapFont's docs).
+        let advance = font.advance(' ', run.size_px);
+        if !advance.is_finite() {
+            return;
+        }
+
+        let mut cursor_x = run.x as f32;
+        let baseline = run.baseline as f32;
+        for ch in run.text.chars() {
+            self.draw_glyph(font.glyph(ch), cursor_x, baseline, scale, run.color);
+            cursor_x += advance;
+            if !cursor_x.is_finite() {
+                break; // pathologically long run at a pathological advance: stop rather than loop on inf/NaN math.
+            }
+        }
+    }
+}
+
+/// Native pixel dimensions of one `text::glyphs` glyph — see that module's
+/// doc comment. Fixed regardless of the `BitmapFont` cell geometry in play;
+/// only `BitmapFont::vga_8x16` (an 8-wide cell) is ever used to rasterize a
+/// real document, so this lines up with `MemSurface::draw_text`'s only
+/// caller by construction.
+const GLYPH_W: usize = 8;
+const GLYPH_H: usize = 8;
+
+/// Hard cap on one glyph's rasterized pixel footprint (width or height),
+/// independent of the requested `size_px`. `size_px` is ultimately
+/// document-controlled (an author stylesheet's `font-size`), so an
+/// unbounded/hostile value must not blow `draw_glyph`'s per-pixel scan up
+/// into an effectively-unbounded `O(w * h)` loop. `1024` is already far
+/// larger than any real heading (`fixtures/basic.html`'s largest is a 32px
+/// `h1`, a 16x16 glyph box) while keeping the worst case (`1024 * 1024` ==
+/// ~1M pixel writes, each already bounds-checked/clipped by `put_pixel`) a
+/// bounded, fast constant.
+const MAX_GLYPH_PX: f32 = 1024.0;
+
+impl MemSurface {
+    /// Paint one glyph's lit pixels in `color`, nearest-neighbor-scaled by
+    /// `scale`, with its bottom row sitting exactly on `baseline` — i.e. the
+    /// glyph's `GLYPH_H`-pixel-tall bounding box spans
+    /// `[baseline - GLYPH_H * scale, baseline)` vertically and
+    /// `[x0, x0 + GLYPH_W * scale)` horizontally. This is the documented
+    /// placement choice for embedding an 8-tall source glyph inside
+    /// `BitmapFont::vga_8x16`'s taller 16-design-unit cell (12 ascent / 4
+    /// descent, see `text::bitmap`'s docs): rather than pinning the glyph to
+    /// the cell's top or geometric center, sitting its bottom edge on the
+    /// baseline is what every real font rasterizer does for a
+    /// non-descending glyph, and — as a bonus here — 8 is exactly half of
+    /// vga_8x16's 16-unit cell_height, so at the font's native size_px
+    /// (16.0, scale 1.0) the glyph occupies design rows `[4, 12)`: centered
+    /// in the cell AND baseline-bottom-aligned at once, no tradeoff to make.
+    ///
+    /// `scale` is guaranteed `> 0.0` and finite by the only caller
+    /// (`draw_text`, via `BitmapFont::glyph_scale`'s totality contract).
+    /// Nearest-neighbor sampling: for each OUTPUT pixel in the glyph's
+    /// scaled bounding box, the matching SOURCE pixel is `floor(offset /
+    /// scale)`, clamped into `0..GLYPH_W`/`0..GLYPH_H` — this (rather than
+    /// iterating source pixels and filling a variable-sized band) handles
+    /// non-integer `scale` (e.g. a 24px heading, scale 1.5) with no gaps or
+    /// overlaps in the output, for upscale AND downscale alike.
+    fn draw_glyph(&mut self, bitmap: [u8; GLYPH_H], x0: f32, baseline: f32, scale: f32, color: Color) {
+        let w_px = ((GLYPH_W as f32 * scale).round().clamp(0.0, MAX_GLYPH_PX)) as i32;
+        let h_px = ((GLYPH_H as f32 * scale).round().clamp(0.0, MAX_GLYPH_PX)) as i32;
+        if w_px <= 0 || h_px <= 0 {
+            return;
+        }
+        let y0 = baseline - h_px as f32;
+        if !x0.is_finite() || !y0.is_finite() {
+            return;
+        }
+
+        for py in 0..h_px {
+            let src_row = ((py as f32 / scale) as usize).min(GLYPH_H - 1);
+            let row_bits = bitmap[src_row];
+            for px in 0..w_px {
+                let src_col = ((px as f32 / scale) as usize).min(GLYPH_W - 1);
+                if row_bits & (1u8 << src_col) != 0 {
+                    let x = x0 + px as f32;
+                    let y = y0 + py as f32;
+                    // `put_pixel` is itself the clip/OOB guard (frozen
+                    // Surface contract) — no separate bounds check needed
+                    // here for totality on off-surface glyph placement.
+                    self.put_pixel(x.floor() as i32, y.floor() as i32, color);
+                }
+            }
+        }
     }
 }
 
