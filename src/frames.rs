@@ -390,7 +390,10 @@ fn render_frame(
 /// `dom`, producing that frame's own [`TextGrid`] at `cols` cells wide.
 fn render_single_document(dom: &Dom, cols: usize) -> TextGrid {
     let styles = cascade::cascade(dom, &[]);
-    let Some(root) = build_box_tree(dom, &styles) else {
+    // Frames render to a tty text grid, never pixels — no fetch/decode work
+    // for images here (mirrors main.rs's own `dump_text` scope), so an
+    // empty images map is always correct.
+    let Some(root) = build_box_tree(dom, &styles, &std::collections::HashMap::new()) else {
         return TextGrid::blank(cols, 0);
     };
     let viewport = Size { w: cols as f32 * CELL_W, h: SUBDOC_VIEWPORT_HEIGHT };

@@ -11,6 +11,8 @@
 //! instead of `file://`, matching `tests/tty_golden.rs`'s own convention) —
 //! and the same default 800px viewport width `main.rs`'s `--dump-png` uses.
 
+use std::collections::HashMap;
+
 use stele::backend::raster;
 use stele::dom;
 use stele::layout::{self, box_tree::build_box_tree, Size};
@@ -26,7 +28,7 @@ const VIEWPORT_WIDTH: u32 = 800;
 fn render_png(html: &str) -> Vec<u8> {
     let dom_tree = dom::parser::parse(html);
     let styles = cascade::cascade(&dom_tree, &[]);
-    let Some(root) = build_box_tree(&dom_tree, &styles) else {
+    let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return raster::encode_png(&MemSurface::new(1, 1, Color::WHITE));
     };
     let viewport = Size { w: VIEWPORT_WIDTH as f32, h: 100_000.0 };

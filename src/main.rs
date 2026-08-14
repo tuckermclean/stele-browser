@@ -12,6 +12,8 @@
 //! There is, and by construction will be, no engine anywhere in this
 //! program that runs code shipped by the wire (charter C3).
 
+use std::collections::HashMap;
+
 use stele::backend::raster;
 use stele::backend::tty;
 use stele::dom;
@@ -172,7 +174,10 @@ fn dump_text(source: &str, cols: usize) -> String {
     }
 
     let styles = cascade::cascade(&dom_tree, &[]);
-    let Some(root) = build_box_tree(&dom_tree, &styles) else {
+    // A tty dump never paints pixels, so skip the image fetch+decode
+    // pre-pass entirely (an empty map — every <img> stays its `[alt]`-style
+    // placeholder) rather than paying needless network/decode cost.
+    let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return String::new();
     };
     let viewport = Size { w: cols as f32 * 8.0, h: HEADLESS_VIEWPORT_HEIGHT };
@@ -216,7 +221,11 @@ fn dump_png(source: &str) -> Vec<u8> {
     }
 
     let styles = cascade::cascade(&dom_tree, &[]);
-    let Some(root) = build_box_tree(&dom_tree, &styles) else {
+    // Pixels matter on this path: fetch+decode every <img src> up front
+    // (bounded by images::MAX_IMAGES) so build_box_tree can thread real
+    // pixel data into each Replaced box.
+    let images = stele::images::collect_images(&dom_tree, &url);
+    let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
         return blank_png();
     };
 

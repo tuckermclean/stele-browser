@@ -23,8 +23,12 @@
 //!     over-depth fallback), so pathological nesting degrades gracefully
 //!     instead of aborting the process.
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
+use crate::img::RgbaImage;
 use crate::layout::{BoxContent, LayoutNode, Size};
 use crate::style::computed::Display;
 use crate::style::ComputedStyle;
@@ -41,20 +45,37 @@ const DEPTH_CAP: usize = 100;
 const DEFAULT_IMG_INTRINSIC: Size = Size { w: 0.0, h: 0.0 };
 
 /// Build the frozen `LayoutNode` box tree from a parsed + cascaded DOM.
-/// Returns `None` if the document is empty or its root is `display: none`.
+/// `images` is the already fetch+decoded `NodeId -> RgbaImage` map (see
+/// `crate::images::collect_images`) — an `<img>` whose `NodeId` has an entry
+/// gets that image threaded into its `Replaced` box; one with no entry (not
+/// looked up at all — e.g. the `--dump-text` path, which passes an empty map
+/// to skip needless fetch/decode work — or looked up but not decoded, e.g. a
+/// 404 or malformed image) still gets its `Replaced` box, just with `image:
+/// None`, falling back to the intrinsic-size placeholder. Returns `None` if
+/// the document is empty or its root is `display: none`.
 ///
 /// Total: never panics on any `dom`/`styles` pairing produced by
 /// `dom::parser::parse` + `style::cascade::cascade` (the styles slice is
 /// always exactly `dom.len()` long from that pipeline; this function is
 /// still defensive against a shorter slice via `styles.get`).
-pub fn build_box_tree(dom: &Dom, styles: &[ComputedStyle]) -> Option<LayoutNode> {
+pub fn build_box_tree(
+    dom: &Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+) -> Option<LayoutNode> {
     if dom.is_empty() {
         return None;
     }
-    build_node(dom, styles, dom.root(), 0)
+    build_node(dom, styles, images, dom.root(), 0)
 }
 
-fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> Option<LayoutNode> {
+fn build_node(
+    dom: &Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+    id: NodeId,
+    depth: usize,
+) -> Option<LayoutNode> {
     let style = styles.get(id)?.clone();
     if style.display == Display::None {
         return None;
@@ -69,7 +90,7 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
             if is_replaced(el) {
                 return Some(LayoutNode {
                     style,
-                    content: BoxContent::Replaced { intrinsic: img_intrinsic(el), image: None },
+                    content: BoxContent::Replaced { intrinsic: img_intrinsic(el), image: images.get(&id).cloned() },
                     children: Vec::new(),
                 });
             }
@@ -81,7 +102,7 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
             } else {
                 el.children
                     .iter()
-                    .filter_map(|&child| build_node(dom, styles, child, depth + 1))
+                    .filter_map(|&child| build_node(dom, styles, images, child, depth + 1))
                     .collect()
             };
             let content = if style.display == Display::TableCell {
@@ -443,7 +464,7 @@ mod tests {
         let d = dom::parser::parse("<div>keep</div><div id=\"gone\">drop <b>me</b></div>");
         let sheet = parser::parse("#gone { display: none; }");
         let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
-        let root = build_box_tree(&d, &styles).expect("root not display:none");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root not display:none");
         assert!(find_text(&root, "keep").is_some());
         assert!(find_text(&root, "drop").is_none());
         assert!(find_text(&root, "me").is_none());
@@ -453,7 +474,7 @@ mod tests {
     fn text_node_maps_to_box_content_text() {
         let d = dom::parser::parse("<p>hello</p>");
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let text_node = find_text(&root, "hello").expect("text fragment present");
         assert!(matches!(&text_node.content, BoxContent::Text(t) if t == "hello"));
     }
@@ -463,7 +484,7 @@ mod tests {
         let d = dom::parser::parse("<div><span>a</span><span>b</span></div>");
         let styles = cascade::cascade(&d, &[]);
         assert!(find(&d, "div").is_some());
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         // Walk down to the div's box by structural shape: it has exactly two
         // Container children, each containing one Text("a"/"b").
         let div_box = {
@@ -491,7 +512,7 @@ mod tests {
     fn img_element_maps_to_replaced_with_attribute_intrinsic_size() {
         let d = dom::parser::parse(r#"<img src="x.png" width="120" height="80">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
 
         fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
             if matches!(node.content, BoxContent::Replaced { .. }) {
@@ -510,10 +531,59 @@ mod tests {
     }
 
     #[test]
+    fn img_element_with_a_decoded_entry_in_the_images_map_carries_that_image() {
+        let d = dom::parser::parse(r#"<img src="x.png" width="2" height="2">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let img_id = find(&d, "img").expect("img node present");
+
+        let decoded = Rc::new(RgbaImage { width: 2, height: 2, pixels: vec![9, 9, 9, 255].repeat(4) });
+        let mut images = HashMap::new();
+        images.insert(img_id, decoded.clone());
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match &img.content {
+            BoxContent::Replaced { image, .. } => {
+                let got = image.as_ref().expect("decoded image should be threaded through");
+                assert!(Rc::ptr_eq(got, &decoded), "should carry the exact Rc from the images map, not a copy");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn img_element_with_no_images_map_entry_has_no_image() {
+        // No entry for this <img>'s NodeId (e.g. the --dump-text path, which
+        // always passes an empty map) -> `image` stays `None`, falling back
+        // to the intrinsic-size placeholder, exactly like before this
+        // packet's threading landed.
+        let d = dom::parser::parse(r#"<img src="x.png" width="2" height="2">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match &img.content {
+            BoxContent::Replaced { image, .. } => assert!(image.is_none()),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn img_element_without_dimensions_defaults_to_zero_intrinsic() {
         let d = dom::parser::parse(r#"<img src="x.png">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
 
         fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
             if matches!(node.content, BoxContent::Replaced { .. }) {
@@ -535,7 +605,7 @@ mod tests {
     fn nested_structure_and_order_are_preserved() {
         let d = dom::parser::parse("<ul><li>one</li><li>two</li><li>three</li></ul>");
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
 
         fn find_ul(node: &LayoutNode) -> Option<&LayoutNode> {
             if matches!(node.content, BoxContent::Container) && node.children.len() == 3 {
@@ -553,7 +623,7 @@ mod tests {
     fn empty_document_yields_a_root_with_no_children() {
         let d = dom::Dom::new(); // seeded with a bare <html> root, no children
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("bare <html> root is not display:none");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("bare <html> root is not display:none");
         assert!(root.children.is_empty());
         assert!(matches!(root.content, BoxContent::Container));
     }
@@ -564,7 +634,7 @@ mod tests {
             r#"<table><tr><td colspan="2" rowspan="3">x</td><td>y</td></tr></table>"#,
         );
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
 
         fn find_cells<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
             if matches!(node.content, BoxContent::TableCell { .. }) {
@@ -609,7 +679,7 @@ mod tests {
             </tr></table>"#,
         );
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
 
         fn find_cells<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
             if matches!(node.content, BoxContent::TableCell { .. }) {
@@ -654,7 +724,7 @@ mod tests {
         let d = dom::parser::parse("<html><body>x</body></html>");
         let sheet = parser::parse("html { display: none; }");
         let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
-        assert!(build_box_tree(&d, &styles).is_none());
+        assert!(build_box_tree(&d, &styles, &HashMap::new()).is_none());
     }
 
     // ------------------------------------------------------------------
@@ -670,7 +740,7 @@ mod tests {
     fn text_input_renders_bracketed_value() {
         let d = dom::parser::parse(r#"<input type="text" name="a" value="hi">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[hi]").is_some());
     }
 
@@ -678,7 +748,7 @@ mod tests {
     fn text_input_without_type_defaults_to_text_behavior() {
         let d = dom::parser::parse(r#"<input name="a" value="hi">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[hi]").is_some());
     }
 
@@ -692,7 +762,7 @@ mod tests {
         // comment ("Placeholder convention") for the full rationale.
         let d = dom::parser::parse(r#"<input type="text" name="a" size="4">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[____]").is_some(), "expected 4 underscores inside brackets");
     }
 
@@ -700,7 +770,7 @@ mod tests {
     fn text_input_without_value_or_size_defaults_to_ten_underscores() {
         let d = dom::parser::parse(r#"<input type="text" name="a">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let expected = format!("[{}]", "_".repeat(10));
         assert!(find_text(&root, &expected).is_some());
     }
@@ -709,7 +779,7 @@ mod tests {
     fn password_input_masks_value_with_asterisks() {
         let d = dom::parser::parse(r#"<input type="password" name="p" value="secret">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[******]").is_some());
     }
 
@@ -717,12 +787,12 @@ mod tests {
     fn checkbox_shows_x_when_checked_and_blank_when_not() {
         let d = dom::parser::parse(r#"<input type="checkbox" name="c" checked>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[x]").is_some());
 
         let d2 = dom::parser::parse(r#"<input type="checkbox" name="c">"#);
         let styles2 = cascade::cascade(&d2, &[]);
-        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "[ ]").is_some());
     }
 
@@ -730,12 +800,12 @@ mod tests {
     fn radio_shows_star_when_checked_and_blank_when_not() {
         let d = dom::parser::parse(r#"<input type="radio" name="r" checked>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "(*)").is_some());
 
         let d2 = dom::parser::parse(r#"<input type="radio" name="r">"#);
         let styles2 = cascade::cascade(&d2, &[]);
-        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "( )").is_some());
     }
 
@@ -743,12 +813,12 @@ mod tests {
     fn submit_input_shows_value_or_default_submit_label() {
         let d = dom::parser::parse(r#"<input type="submit" value="Go">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[ Go ]").is_some());
 
         let d2 = dom::parser::parse(r#"<input type="submit">"#);
         let styles2 = cascade::cascade(&d2, &[]);
-        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "[ Submit ]").is_some());
     }
 
@@ -756,12 +826,12 @@ mod tests {
     fn reset_and_button_type_inputs_show_bracketed_labels() {
         let d = dom::parser::parse(r#"<input type="reset">"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[ Reset ]").is_some());
 
         let d2 = dom::parser::parse(r#"<input type="button" value="Click">"#);
         let styles2 = cascade::cascade(&d2, &[]);
-        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "[ Click ]").is_some());
     }
 
@@ -769,7 +839,7 @@ mod tests {
     fn hidden_input_renders_nothing() {
         let d = dom::parser::parse(r#"<div>before<input type="hidden" name="x" value="topsecret123"><span>after</span></div>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "before").is_some());
         assert!(find_text(&root, "after").is_some());
         assert!(find_text(&root, "topsecret123").is_none(), "hidden input's value must never appear");
@@ -779,17 +849,17 @@ mod tests {
     fn button_element_shows_value_then_child_text_then_default() {
         let d = dom::parser::parse(r#"<button>Send</button>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[ Send ]").is_some());
 
         let d2 = dom::parser::parse(r#"<button value="X">Ignored</button>"#);
         let styles2 = cascade::cascade(&d2, &[]);
-        let root2 = build_box_tree(&d2, &styles2).expect("root present");
+        let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "[ X ]").is_some(), "value attr takes priority over child text");
 
         let d3 = dom::parser::parse(r#"<button></button>"#);
         let styles3 = cascade::cascade(&d3, &[]);
-        let root3 = build_box_tree(&d3, &styles3).expect("root present");
+        let root3 = build_box_tree(&d3, &styles3, &HashMap::new()).expect("root present");
         assert!(find_text(&root3, "[ Submit ]").is_some(), "default when no value/child text");
     }
 
@@ -797,7 +867,7 @@ mod tests {
     fn textarea_shows_short_text_verbatim() {
         let d = dom::parser::parse(r#"<textarea name="n">hello</textarea>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "hello").is_some());
     }
 
@@ -805,7 +875,7 @@ mod tests {
     fn textarea_truncates_long_first_line() {
         let d = dom::parser::parse(r#"<textarea name="n">this line is definitely longer than twenty chars</textarea>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[...]").is_some(), "long content should be truncated with an ellipsis marker");
     }
 
@@ -813,7 +883,7 @@ mod tests {
     fn textarea_marks_multiline_content_even_if_first_line_is_short() {
         let d = dom::parser::parse("<textarea name=\"n\">line one\nline two</textarea>");
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "line one[...]").is_some());
     }
 
@@ -823,7 +893,7 @@ mod tests {
             r#"<select name="color"><option value="r">Red</option><option value="g" selected>Green</option></select>"#,
         );
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[ Green v]").is_some());
     }
 
@@ -833,7 +903,7 @@ mod tests {
             r#"<select name="color"><option value="r">Red</option><option value="g">Green</option></select>"#,
         );
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[ Red v]").is_some());
     }
 
@@ -841,7 +911,7 @@ mod tests {
     fn select_with_no_options_renders_without_panicking() {
         let d = dom::parser::parse(r#"<select name="color"></select>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[  v]").is_some());
     }
 
@@ -852,7 +922,7 @@ mod tests {
         // whole control is exactly one Container + one Text child.
         let d = dom::parser::parse(r#"<select name="c"><option>Only</option></select>"#);
         let styles = cascade::cascade(&d, &[]);
-        let root = build_box_tree(&d, &styles).expect("root present");
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
 
         fn find_select_box(node: &LayoutNode) -> Option<&LayoutNode> {
             let is_select_shaped = node.children.len() == 1
@@ -897,7 +967,7 @@ mod tests {
 
         // Must return (not abort/hang) even though the DOM nests far past
         // DEPTH_CAP.
-        let root = build_box_tree(&d, &styles);
+        let root = build_box_tree(&d, &styles, &HashMap::new());
         assert!(root.is_some());
         let root = root.unwrap();
 
