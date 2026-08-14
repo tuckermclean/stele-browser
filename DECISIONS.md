@@ -3,6 +3,29 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M4 — Pixel foundation
+
+### D24 — embedded PD bitmap font; raster painter; bounded pixel paths
+The fb-render path (P5/P9 glyph-raster deferral coming due). Choices:
+- **Font:** embedded `font8x8_basic` (128 ASCII glyphs, **public domain**,
+  from github.com/dhepper/font8x8) as a compiled-in atlas — the brief's "embed
+  one bitmap-friendly font" over shipping a TTF. 8×8 glyphs drawn
+  baseline-aligned within the 16px `vga_8x16` line box; non-ASCII → a tofu
+  fallback box (never a panic). License noted in REPORT.md. Revisit: a fixture
+  needs Latin-1/box-drawing beyond ASCII → embed a fuller PD page.
+- **Pixel paths are bounded** (`panic=abort` + hostile input): `draw_glyph`
+  clamps one glyph to `MAX_GLYPH_PX=1024` per axis AND early-returns O(1) when
+  the glyph's screen bbox doesn't intersect the surface (else a long document
+  at a large `font-size` is `O(chars·1024²)` wasted work on off-screen glyphs).
+  `--dump-png` fixes width at 800px and clamps height to `MAX_PNG_HEIGHT=20_000`
+  (64MB surface ceiling — the `tty::MAX_GRID_ROWS` analog). All raster
+  coordinates clamped to ±1e6 before reaching the `Surface`.
+- **Golden discipline for PIXELS:** PNG goldens can't be eyeballed by a
+  text-only reviewer, so the ORCHESTRATOR views the rendered PNG and
+  countersigns it visually; the golden test decodes both PNGs and compares RGBA
+  arrays (robust to encoder metadata), not raw bytes. `MemSurface::blit` stays
+  `todo!()` until the images packet (never called for image-free fixtures).
+
 ## M3 — Frames
 
 ### D23 — framesets as a driver-level recursive render; bounded against frame bombs

@@ -404,6 +404,39 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M4 · pixel foundation — STELE DRAWS
+
+- The renderer produces PIXELS. Embedded a public-domain 8×8 bitmap font
+  (`font8x8`, `src/text/glyphs.rs`, license in REPORT.md); implemented the
+  frozen `MemSurface::draw_text` stub (glyphs baseline-aligned, nearest-neighbor
+  scaled per `size_px`, clipped); added a `backend::raster` painter (Fragments →
+  Surface: Box bg+borders, Text, Image skipped for the next packet) + PNG
+  encode; and a `--dump-png <src> <out>` CLI (800px wide, content-driven height).
+- **First pixel golden `goldens/basic.png` (800×247)** — the orchestrator
+  VIEWED it and countersigned: `basic.html` renders faithfully (scaled
+  "Welcome"/"Section One" headings, blue "link", paragraph flow). Test decodes
+  both PNGs and compares RGBA arrays; `accept.sh` A3e added.
+- Loop: implementer (test-first, 8 commits) → reviewer (Spec ✅; no reachable
+  panic — every glyph/rect/PNG path clamped; **1 Important + minors**) → fix
+  round 1 (`6f114c0` red → `3ba1f0e` green) → scoped re-review (frozen clean,
+  golden byte-identical).
+    - **Important (fixed):** off-screen glyphs paid full `O(w·h)` raster cost
+      (fragments exist beyond the 20k-px surface cap), so a long doc at a large
+      `font-size` was `O(chars·1024²)` — a bounded-but-minutes CPU hang
+      (measured 17.1s → ~0ms after the fix). Fix: O(1) screen-bbox intersection
+      early-return in `draw_glyph`. `MAX_GLYPH_PX=1024` bounds one glyph;
+      `MAX_PNG_HEIGHT=20_000` caps the surface alloc at 64MB (tty
+      `MAX_GRID_ROWS` analog).
+    - Minors: transparent-border short-circuit; a `debug_assert` pinning
+      `MemSurface`'s `w*h*4` buffer invariant.
+- Frozen surface/Metrics/layout types untouched (only `text/mod.rs` adds
+  `pub(crate) mod glyphs;`); no new deps (`png` already present); no unsafe.
+  283 lib tests green. See D24.
+- **M4 in progress.** NEXT: images — `MemSurface::blit` + wire the P4 decoders
+  (`<img src>`→fetch→decode→`RgbaImage`→blit) + animated-GIF frame-0 +
+  `images.html` → THE SCREENSHOT. Then `img align=left` floats + the fbdev
+  (rustix) device backend.
+
 ## 2026-08-14 — M3 · frames (frameset viewports) — M3 COMPLETE
 
 - `frames` module: a driver-level feature ABOVE the single-document pipeline
