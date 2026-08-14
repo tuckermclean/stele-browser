@@ -84,8 +84,54 @@ impl Surface for MemSurface {
         }
     }
 
-    fn blit(&mut self, _at: Rect, _image: &crate::img::RgbaImage) {
-        todo!("P9: image blit into the mem surface")
+    /// Copy `image` into `at`, nearest-neighbor-scaled to `at`'s size,
+    /// alpha-blending each source pixel over the destination via the same
+    /// `put_pixel` blend `fill_rect`/`draw_glyph` already use.
+    ///
+    /// Total: a zero-sized `image` (either dimension) or zero-sized `at`
+    /// (either dimension) is a no-op — no image content to sample / no
+    /// destination area to paint, and either would otherwise divide by
+    /// zero in the scale math. Coordinates are widened to `i64` before any
+    /// arithmetic so a huge/degenerate `at` (`u32::MAX` width, an `i32`
+    /// origin near a bound) can't overflow computing its far edge; the
+    /// destination rect is then clipped to the surface bounds up front, so
+    /// the pixel loop below only ever visits on-surface, in-bounds
+    /// destination pixels (never relying on `put_pixel`'s own clip as the
+    /// only guard, unlike `draw_glyph`, since the loop bounds themselves
+    /// must stay a small, finite range regardless of how huge `at` is).
+    fn blit(&mut self, at: Rect, image: &crate::img::RgbaImage) {
+        if image.width == 0 || image.height == 0 || at.w == 0 || at.h == 0 {
+            return;
+        }
+
+        let dst_x0 = at.x as i64;
+        let dst_y0 = at.y as i64;
+        let dst_x1 = dst_x0 + at.w as i64;
+        let dst_y1 = dst_y0 + at.h as i64;
+
+        let clip_x0 = dst_x0.max(0);
+        let clip_y0 = dst_y0.max(0);
+        let clip_x1 = dst_x1.min(self.width as i64);
+        let clip_y1 = dst_y1.min(self.height as i64);
+        if clip_x1 <= clip_x0 || clip_y1 <= clip_y0 {
+            return; // `at` doesn't intersect the surface at all.
+        }
+
+        let (img_w, img_h) = (image.width as u64, image.height as u64);
+        let (at_w, at_h) = (at.w as u64, at.h as u64);
+
+        for y in clip_y0..clip_y1 {
+            let rel_y = (y - dst_y0) as u64;
+            let src_y = ((rel_y * img_h) / at_h).min(img_h - 1) as u32;
+            for x in clip_x0..clip_x1 {
+                let rel_x = (x - dst_x0) as u64;
+                let src_x = ((rel_x * img_w) / at_w).min(img_w - 1) as u32;
+                let idx = ((src_y as usize) * (image.width as usize) + (src_x as usize)) * 4;
+                let Some(src_px) = image.pixels.get(idx..idx + 4) else { continue };
+                let color = Color { r: src_px[0], g: src_px[1], b: src_px[2], a: src_px[3] };
+                self.put_pixel(x as i32, y as i32, color);
+            }
+        }
     }
 
     /// Rasterize `run` glyph-by-glyph via the embedded `text::glyphs` atlas
