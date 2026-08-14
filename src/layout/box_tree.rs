@@ -69,7 +69,7 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
             if is_replaced(el) {
                 return Some(LayoutNode {
                     style,
-                    content: BoxContent::Replaced { intrinsic: img_intrinsic(el) },
+                    content: BoxContent::Replaced { intrinsic: img_intrinsic(el), image: None },
                     children: Vec::new(),
                 });
             }
@@ -501,7 +501,7 @@ mod tests {
         }
         let img = find_img(&root).expect("img box present");
         match img.content {
-            BoxContent::Replaced { intrinsic } => {
+            BoxContent::Replaced { intrinsic, .. } => {
                 assert_eq!(intrinsic.w, 120.0);
                 assert_eq!(intrinsic.h, 80.0);
             }
@@ -523,7 +523,7 @@ mod tests {
         }
         let img = find_img(&root).expect("img box present");
         match img.content {
-            BoxContent::Replaced { intrinsic } => {
+            BoxContent::Replaced { intrinsic, .. } => {
                 assert_eq!(intrinsic.w, 0.0);
                 assert_eq!(intrinsic.h, 0.0);
             }

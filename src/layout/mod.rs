@@ -50,7 +50,14 @@ pub enum BoxContent {
     /// Character data for the inline engine to break into lines.
     Text(String),
     /// A replaced element with an intrinsic pixel size (img, form control).
-    Replaced { intrinsic: Size },
+    /// `image` is the decoded pixel data to paint, when known — `None` until
+    /// the M4 images packet's fetch+decode pre-pass resolves it (or when
+    /// decoding failed/was skipped), in which case the box still lays out at
+    /// its `intrinsic` size but paints as a placeholder. `Rc` (not an owned
+    /// `RgbaImage`) so cloning a `LayoutNode` during layout translation never
+    /// copies the underlying pixel buffer — single-threaded throughout, so
+    /// `Rc` (not `Arc`) is the right shared-ownership primitive here.
+    Replaced { intrinsic: Size, image: Option<std::rc::Rc<crate::img::RgbaImage>> },
     /// A table cell (`<td>`/`<th>`, `display: table-cell`). Otherwise just
     /// like `Container` — its children live in `LayoutNode.children` exactly
     /// as a `Container`'s do — but it additionally carries the `colspan`/

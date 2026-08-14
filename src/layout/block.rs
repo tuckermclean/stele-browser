@@ -308,7 +308,7 @@ fn translate_any<'a>(
                 .expect("taffy leaf alloc is infallible for a fresh tree");
             Built::Inline { taffy_id: id, runs }
         }
-        BoxContent::Replaced { intrinsic } => {
+        BoxContent::Replaced { intrinsic, .. } => {
             let mut style = base_style(&node.style);
             let iw = finite_nonneg(intrinsic.w);
             let ih = finite_nonneg(intrinsic.h);

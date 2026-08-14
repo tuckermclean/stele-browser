@@ -38,7 +38,7 @@ fn leaf_container(style: ComputedStyle) -> LayoutNode {
 }
 
 fn replaced(style: ComputedStyle, w: f32, h: f32) -> LayoutNode {
-    LayoutNode { style, content: BoxContent::Replaced { intrinsic: Size { w, h } }, children: Vec::new() }
+    LayoutNode { style, content: BoxContent::Replaced { intrinsic: Size { w, h }, image: None }, children: Vec::new() }
 }
 
 fn box_fragments(fragments: &[Fragment]) -> Vec<&Fragment> {
