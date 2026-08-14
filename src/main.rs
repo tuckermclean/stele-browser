@@ -282,26 +282,36 @@ fn print_stats(source: &str, viewport_width_px: f32) {
 /// totality bounds).
 fn dump_text(source: &str, cols: usize) -> String {
     let url = resolve_url(source);
-    let body = match fetch_body(&url) {
-        Ok(b) => b,
+    // Fetch the full Response (not just the body) — m5-link-css: `<link
+    // href>` stylesheets must resolve against the POST-redirect URL, same
+    // "review finding, Important" `dump_png`/`render_fb_surface` already
+    // apply to `<img src>` (see `stele::images::collect_images`'s call
+    // sites) — a document-relative `<link href>` has to resolve against
+    // wherever the document actually ended up, not where it was requested.
+    let response = match fetch_response(&url) {
+        Ok(r) => r,
         Err(_) => return String::new(),
     };
-    let html = String::from_utf8_lossy(&body);
+    let html = String::from_utf8_lossy(&response.body);
     let dom_tree = dom::parser::parse(&html);
 
     if let Some(frameset_id) = frames::find_frameset(&dom_tree) {
         return frames::render(&url, &dom_tree, frameset_id, cols).to_text();
     }
 
-    // M5: feed cascade real author sheets (every inline <style> block,
-    // in document order — see style::author's own doc comment for why
-    // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
-    // extra wiring: cascade reads it straight off each Element it already
-    // walks. M5 media: viewport WIDTH for a tty dump is `cols * 8px` (the
-    // tty cell width) — `collect_author_sheets_for_viewport` flattens any
-    // `@media` in those sheets against that width before cascade ever runs.
+    // M5 + m5-link-css: feed cascade every author sheet in document order —
+    // inline <style> blocks AND fetched <link rel=stylesheet href> sheets
+    // (stele::stylesheets::collect_all_author_sheets), interleaved by source
+    // position. Inline `style=` needs no extra wiring: cascade reads it
+    // straight off each Element it already walks. M5 media: viewport WIDTH
+    // for a tty dump is `cols * 8px` (the tty cell width) — the collector
+    // flattens any `@media` in those sheets (both in-CSS `@media` blocks and
+    // a `<link media=...>` attribute) against that width before cascade ever
+    // runs. --dump-text DOES want author CSS fetched (it affects
+    // `display:none` etc.), unlike the image pre-pass below, which is
+    // pixel-only and skipped here.
     let viewport_width = cols as f32 * 8.0;
-    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_width);
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, viewport_width);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // A tty dump never paints pixels, so skip the image fetch+decode
     // pre-pass entirely (an empty map — every <img> stays its `[alt]`-style
@@ -349,14 +359,15 @@ fn dump_png(source: &str) -> Vec<u8> {
         return blank_png();
     }
 
-    // M5: feed cascade real author sheets (every inline <style> block,
-    // in document order — see style::author's own doc comment for why
-    // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
-    // extra wiring: cascade reads it straight off each Element it already
-    // walks. M5 media: `--dump-png`'s viewport width is the fixed
-    // `DEFAULT_PNG_WIDTH` (below) — flatten any `@media` against THAT, not
-    // the pre-M5 unconditional pass-through.
-    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, DEFAULT_PNG_WIDTH as f32);
+    // M5 + m5-link-css: feed cascade every author sheet in document order —
+    // inline <style> blocks AND fetched <link rel=stylesheet href> sheets,
+    // resolved/fetched against `response.final_url` (same post-redirect
+    // rationale the <img src> fetch below already documents). Inline
+    // `style=` needs no extra wiring: cascade reads it straight off each
+    // Element it already walks. M5 media: `--dump-png`'s viewport width is
+    // the fixed `DEFAULT_PNG_WIDTH` (below) — flatten any `@media` (in-CSS
+    // or a `<link media=...>` attribute) against THAT.
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // Pixels matter on this path: fetch+decode every <img src> up front
     // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
@@ -430,13 +441,15 @@ fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
         return Err("frameset documents are not supported by --render-fb".to_string());
     }
 
-    // M5: feed cascade real author sheets (every inline <style> block,
-    // in document order — see style::author's own doc comment for why
-    // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
-    // extra wiring: cascade reads it straight off each Element it already
-    // walks. M5 media: `--render-fb`'s viewport width is the real
-    // framebuffer width (`width` param) — flatten any `@media` against that.
-    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, width as f32);
+    // M5 + m5-link-css: feed cascade every author sheet in document order —
+    // inline <style> blocks AND fetched <link rel=stylesheet href> sheets,
+    // resolved/fetched against `response.final_url` (same post-redirect
+    // rationale the <img src> fetch below already documents). Inline
+    // `style=` needs no extra wiring: cascade reads it straight off each
+    // Element it already walks. M5 media: `--render-fb`'s viewport width is
+    // the real framebuffer width (`width` param) — flatten any `@media`
+    // (in-CSS or a `<link media=...>` attribute) against that.
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
@@ -637,6 +650,47 @@ mod tests {
         assert_eq!(text, golden.trim_end_matches('\n'));
     }
 
+    /// m5-link-css: `fixtures/link-css.html` exercises the real
+    /// fetch->parse->cascade(WITH `<link>`-fetched author sheets)->box-tree->
+    /// layout->tty pipeline end to end — `dump_text` now fetches
+    /// `fixtures/link-css.css` (a REAL `file://` fetch, same as the
+    /// document's own fetch) via `stele::stylesheets::collect_all_author_sheets`
+    /// rather than that `<link>` sitting inert. PROPOSED golden (brief §10
+    /// blessing discipline, same as `basic.tty.txt`/`author-css.tty.txt`):
+    /// generated by this packet's implementer, never self-blessed — see the
+    /// packet report for the countersign/bless request. The fixture
+    /// demonstrates: (1) the external `<link>` sheet applying at all
+    /// (`p.hidden { display: none }` removes the second paragraph, mirroring
+    /// `author-css.html`'s own `display`-based proof, since color has no
+    /// tty-visible effect); (2) document order across `<link>` AND `<style>`
+    /// — a LATER inline `<style>` block overrides an EARLIER `<link>`'s
+    /// `.overridden` rule (both same specificity), proving the collector
+    /// interleaves them by source position rather than always ordering one
+    /// kind before the other; (3) a non-stylesheet `<link rel="icon">`
+    /// pointing at a nonexistent file causes no failure (never fetched at
+    /// all, since its `rel` doesn't match `stylesheet`).
+    #[test]
+    fn dump_text_over_file_fetch_matches_the_link_css_golden() {
+        let golden = include_str!("../goldens/link-css.tty.txt");
+        let text = dump_text("fixtures/link-css.html", 80);
+        assert_eq!(text, golden.trim_end_matches('\n'));
+    }
+
+    #[test]
+    fn link_css_hidden_paragraph_is_actually_removed_by_the_external_sheet() {
+        let text = dump_text("fixtures/link-css.html", 80);
+        assert!(!text.contains("the external"), "the linked display:none paragraph should not appear in the dump");
+    }
+
+    #[test]
+    fn link_css_later_style_block_wins_the_source_order_tie_over_the_earlier_link() {
+        let text = dump_text("fixtures/link-css.html", 80);
+        assert!(
+            text.contains("Visible again"),
+            "the paragraph re-enabled by the later <style> block should stay visible, overriding the earlier <link>'s rule"
+        );
+    }
+
     #[test]
     fn dump_text_on_a_missing_file_is_a_clean_empty_string_not_a_panic() {
         assert_eq!(dump_text("fixtures/does-not-exist-nope.html", 80), "");
@@ -776,6 +830,40 @@ mod tests {
         let (w, h) = decode_png_dims(&bytes);
         assert_eq!(w, DEFAULT_PNG_WIDTH);
         assert!(h > 0, "content-driven height should be nonzero for a real document");
+    }
+
+    /// m5-link-css: the pixel path (`dump_png`) fetches `<link>` sheets too
+    /// — unlike `--dump-text`'s golden above (which proves it via
+    /// `display:none`, since color has no tty-visible effect), this fixture
+    /// proves it via a `background-color` that only PIXELS can show, cross-
+    /// checking against a sibling document with no `<link>` at all so the
+    /// comparison isolates the `<link>` fetch specifically (not just "some
+    /// author CSS applied").
+    #[test]
+    fn dump_png_applies_an_external_link_stylesheet() {
+        let dir = std::env::temp_dir().join(format!("stele-dump-png-link-css-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("style.css"), "body { background-color: rgb(10, 200, 30); }").expect("write css");
+        std::fs::write(
+            dir.join("with-link.html"),
+            r#"<!doctype html><link rel="stylesheet" href="style.css"><body>x</body>"#,
+        )
+        .expect("write html");
+        std::fs::write(dir.join("without-link.html"), r#"<!doctype html><body>x</body>"#).expect("write html");
+
+        let with_link = dump_png(&dir.join("with-link.html").to_string_lossy());
+        let without_link = dump_png(&dir.join("without-link.html").to_string_lossy());
+
+        let with_link_pixels = decode_png_pixels(&with_link);
+        let without_link_pixels = decode_png_pixels(&without_link);
+        assert!(
+            with_link_pixels.chunks(4).any(|p| p == [10, 200, 30, 255]),
+            "the <link>-sourced background-color should appear in the painted PNG"
+        );
+        assert!(
+            !without_link_pixels.chunks(4).any(|p| p == [10, 200, 30, 255]),
+            "sanity: the sibling document with no <link> at all must not happen to already have this color"
+        );
     }
 
     #[test]

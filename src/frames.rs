@@ -136,7 +136,6 @@ use crate::fetch::{Fetch, Request, Url};
 use crate::layout::box_tree::build_box_tree;
 use crate::layout::{self, Fragment, FragmentKind, Point, Rect, Size};
 use crate::style::cascade;
-use crate::style::collect_author_sheets_for_viewport;
 use crate::style::ComputedStyle;
 
 /// Maximum nesting depth for framesets/frames (a top-level frameset counts
@@ -379,7 +378,7 @@ fn render_frame(
                 render_frameset_grid(&child_dom, child_frameset_id, &resolved, cell_w_px, cell_h_px, depth + 1, ctx)
             }
         }
-        None => render_single_document(&child_dom, cell_w_cells),
+        None => render_single_document(&child_dom, &resolved, cell_w_cells),
     };
     ctx.visited.pop();
     result
@@ -389,15 +388,21 @@ fn render_frame(
 /// cascade -> box-tree -> layout -> tty::render chain `main.rs::dump_text`
 /// drives for a top-level document — over an already-fetched-and-parsed
 /// `dom`, producing that frame's own [`TextGrid`] at `cols` cells wide.
-fn render_single_document(dom: &Dom, cols: usize) -> TextGrid {
-    // M5: same author-CSS wiring as main.rs's own single-document pipeline
-    // — each frame gets its own <style> blocks/inline style= applied, not
-    // just the UA sheet. M5 media: this frame's own viewport width is
+/// `base_url` is this frame's OWN resolved `src` (not the top-level
+/// document's) — m5-link-css: a `<link href>` inside this frame's `<head>`
+/// must resolve against ITS document, exactly like ordinary HTML
+/// document-relative resolution rules, not the frameset parent's URL.
+fn render_single_document(dom: &Dom, base_url: &Url, cols: usize) -> TextGrid {
+    // M5 + m5-link-css: same author-CSS wiring as main.rs's own
+    // single-document pipeline — each frame gets its own <style> blocks,
+    // fetched <link rel=stylesheet href> sheets, AND inline style= applied,
+    // not just the UA sheet. M5 media: this frame's own viewport width is
     // `cols * CELL_W` (its region's actual width in px, per the caller's
-    // track-sizing math above) — `@media` inside a frame's <style> is
-    // evaluated against THAT region's width, not the top-level document's.
+    // track-sizing math above) — `@media` (in-CSS or a `<link media=...>`
+    // attribute) inside a frame's stylesheets is evaluated against THAT
+    // region's width, not the top-level document's.
     let viewport_width = cols as f32 * CELL_W;
-    let author_sheets = collect_author_sheets_for_viewport(dom, viewport_width);
+    let author_sheets = crate::stylesheets::collect_all_author_sheets(dom, base_url, viewport_width);
     let styles = cascade::cascade(dom, &author_sheets);
     // Frames render to a tty text grid, never pixels — no fetch/decode work
     // for images here (mirrors main.rs's own `dump_text` scope), so an
@@ -551,6 +556,46 @@ fn compute_track_extents(spec: Option<&str>, total_px: f32) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::dom::ElementName;
+
+    /// A `file://` `Url` pointing at `fixtures/<name>` in this crate's own
+    /// checkout — same `CARGO_MANIFEST_DIR`-based pattern
+    /// `tests/frames_golden.rs`'s own `fixture_url` helper uses, duplicated
+    /// here since this module's tests are compiled into the lib crate, not
+    /// that separate integration-test crate.
+    fn fixture_url(name: &str) -> Url {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name);
+        Url::new(format!("file://{}", path.display()))
+    }
+
+    /// m5-link-css: a `<frame src="link-css.html">` pointing at the REAL
+    /// `fixtures/link-css.html`/`fixtures/link-css.css` pair proves
+    /// [`render_single_document`]'s new `base_url` parameter is actually
+    /// threaded through `render_frame` correctly — a frame's own document
+    /// gets its `<link rel=stylesheet href>` fetched and resolved against
+    /// ITS OWN url (not the top-level frameset document's), exactly like an
+    /// ordinary top-level document already does via `main.rs::dump_text`.
+    #[test]
+    fn a_frame_document_fetches_and_applies_its_own_link_stylesheet() {
+        let mut dom = Dom::new();
+        let root = dom.root();
+        let fs = dom.new_element(ElementName::new("frameset"));
+        dom.append_child(root, fs);
+        let frame = dom.new_element(ElementName::new("frame"));
+        if let Node::Element(el) = dom.node_mut(frame) {
+            el.attrs.set("src", "link-css.html");
+        }
+        dom.append_child(fs, frame);
+
+        // Base URL is some OTHER file under fixtures/ (deliberately not
+        // link-css.html itself) -- proves resolution against the frameset's
+        // base, not a same-file coincidence.
+        let base = fixture_url("frames.html");
+        let grid = render(&base, &dom, fs, 80);
+        let text = grid.to_text();
+
+        assert!(!text.contains("the external"), "the <link>-sourced display:none rule should have removed this paragraph inside the frame: {text:?}");
+        assert!(text.contains("Visible again"), "the later <style> block inside the frame doc should still win its source-order tie: {text:?}");
+    }
 
     // ------------------------------- track sizing (hand-computed) ---------
 

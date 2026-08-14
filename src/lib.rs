@@ -28,6 +28,7 @@ pub mod img;
 pub mod images;
 pub mod layout;
 pub mod style;
+pub mod stylesheets;
 pub mod surface;
 pub mod text;
 
