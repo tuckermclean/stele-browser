@@ -3,6 +3,31 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M5 — Dialect completeness
+
+### D31 — details/summary collapse, noscript shown, entities verified, --stats
+Curated-dialect finish, all in impl (no frozen-type change):
+- **`<details>`**: `open` absent → collapsed, only the first direct-child
+  `<summary>` built (rest dropped from the box tree, not just visually hidden);
+  `open` present → expanded. No `<summary>` → synthesized `"Details"` label.
+  Disclosure marker `> `/`v ` (ASCII, deterministic) glued as a synthetic
+  leading Text box (same mechanism as form-control placeholders). Interactivity
+  (click-toggle) is out of scope (no interactive shell).
+- **`<noscript>`**: UA `display:block` (was accidentally-visible via the
+  CSS-initial `inline`; now intentional). No-JS by construction → its content
+  always renders.
+- **entities**: all HTML 4.01 named + decimal + hex numeric decode correctly
+  (no P1 bug); unknown passes through literally. Known frozen-layout gap: NBSP
+  (U+00A0) decodes right but the inline tokenizer collapses it to a space
+  (`char::is_whitespace` includes NBSP) — flagged for a later inline tweak, not
+  forced in this packet's scope.
+- **`--stats`**: stderr-only `N ignored declaration(s), N ignored at-rule(s),
+  N media block(s)` aggregated across author sheets, computed in an independent
+  fetch+parse pass so `dump_text`/`dump_png` stdout can never be perturbed.
+  Surfaces charter C2 (ignore-unknown, but COUNT).
+Revisit: cookie-jar file persistence (C6) still to wire (HTTP-only); the NBSP
+inline behavior; details keyboard/click toggle when an interactive shell exists.
+
 ## M5 — @media
 
 ### D30 — @media evaluated in a viewport pre-pass (no frozen-signature change)

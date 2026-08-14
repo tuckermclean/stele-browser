@@ -404,6 +404,38 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M5 · dialect completeness (details/noscript/entities/--stats)
+
+- Finishes the curated dialect's remaining items (all in `box_tree`/`ua`/`main`
+  impl — frozen types zero-diff):
+  - **`<details>/<summary>`**: honors the `open` attribute — collapsed (no
+    `open`) renders ONLY the first `<summary>` (others dropped); `<details
+    open>` renders summary + body. Default `"Details"` label when no summary;
+    ASCII disclosure markers `> ` (closed) / `v ` (open). Golden shows a
+    collapsed section (body absent) beside an open one (body shown).
+  - **`<noscript>`**: added to the UA `display:block` group — its content is
+    SHOWN (Stele runs no script by construction, so `<noscript>` is "what to
+    render when scripting is off" = always). Golden shows the fallback `<p>`.
+  - **entities**: `fixtures/entities.html` verifies HTML 4.01 named + decimal +
+    hex numeric decoding — `&copy;`→©, `&reg;`→®, `&mdash;`→—, `&#169;`→©,
+    `&#x2014;`→—, unknown `&notanentity;` stays literal. All correct, NO P1 bug.
+    Documented finding (frozen-layout, not fixed): `&nbsp;` decodes to U+00A0
+    but `inline`'s tokenizer collapses it (Rust `char::is_whitespace` includes
+    NBSP) → renders as a plain space; flagged for a later inline-engine tweak.
+  - **`--stats`**: C2 "count what we refuse" — prints to STDERR
+    `N ignored declaration(s), N ignored at-rule(s), N media block(s)`
+    aggregated across author sheets; stdout/goldens unaffected (verified via a
+    real subprocess spawn).
+- Orchestrator-reviewed directly + 3 goldens countersigned (details open/closed,
+  noscript-visible, entities decoded). Frozen paths empty-diff; no deps; no
+  unsafe. 401 lib + bin/golden tests green; accept.sh A3j/A3k/A3l. See D31.
+- **M5 essentially COMPLETE**: author CSS · flexbox pixel-green · @media ·
+  details/summary · noscript · entities · --stats. Remaining minor item: wire
+  the cookie jar (C6) to a plain-file for cross-invocation persistence
+  (HTTP-only; fixtures are file://) — small, can fold into M6. NEXT: **M6** —
+  hardening (parser fuzz, size/strip pass, A1–A7 acceptance all green, REPORT.md
+  finalized) — the release gate.
+
 ## 2026-08-14 — M5 · @media — responsive CSS responds
 
 - `@media` queries now WORK. They were parsed only to be COUNTED and discarded
