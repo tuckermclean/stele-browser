@@ -426,6 +426,36 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-6 · tty readability (contrast guarantee) — the black-on-black fix
+
+- **Bug:** `TextGrid::to_ansi` emitted the literal CSS foreground (default
+  `Color::BLACK`) with the terminal-default background (SGR 49) whenever a cell
+  had no author background. On a dark terminal that is BLACK-ON-BLACK —
+  unstyled pages, error pages, and pages that set only a text color (e.g.
+  httpforever) were unreadable. Goldens never caught it because they only ever
+  asserted `to_text()` (chars), never the emitted color.
+- **Fix (B+C):** new pure `resolve_cell_colors(fg, bg) -> (Option<Color>,
+  Option<Color>)` — `None` means "emit the terminal's own default" (39/49).
+  - **B — terminal-native canvas:** no author background → defer to the
+    terminal theme. Unset/near-black/near-white foreground → `39` (terminal fg,
+    guaranteed visible); chromatic mid-tones (link blue) pass through so
+    meaningful color survives on both light and dark terminals.
+  - **C — readability guarantee:** author DID set a background → we control the
+    cell, so force a legible foreground: keep the author fg only if WCAG
+    contrast ≥ 4.5:1, else snap to black/white by background luminance. Kills
+    hostile dark-on-dark and light-on-light.
+  `to_ansi` now routes every cell through it and run-length-collapses on the
+  *resolved* pair; `to_text()` byte-identical (all prior tty goldens intact);
+  no unsafe; no deps.
+- **Golden with COLOR at last:** `goldens/tty-color.ansi` (blessed) asserts the
+  emitted SGR — plain→`39;49`, hostile `#222/#111`→white-on-#111, card
+  `#333/#eee`→black-on-#eee, link `#3366cc`→blue-on-default. Contrast can't
+  regress silently again. See D40.
+- **Known tradeoff (D40):** luminance is the non-gamma form specified in the
+  packet; it errs toward over-forcing contrast (safe: never yields an illegible
+  pair, only turns some author grays to pure black/white). Gamma-corrected
+  luminance for author-gray fidelity is a follow-up.
+
 ## 2026-08-14 — UI-5 · background-image (+ --no-bg-images)
 
 - CSS `background-image: url(...)` (and the `background` shorthand's url) now
