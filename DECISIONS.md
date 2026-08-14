@@ -19,6 +19,28 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — Interactive shell (keyboard)
+
+### D37 — the interactive terminal browser; rustix for raw mode
+`stele <url>` (bare positional, no `--headless`) launches an interactive
+terminal UI. **Split:** all logic is pure + unit-tested in `browser.rs`
+(focusables, `hit_test`, key parsing, `apply_key`, scroll/focus/reveal,
+history, `render_frame`); only `main::run_browser` (raw-mode enter/restore,
+terminal size, the blocking read→draw loop) is manual (no tty in CI —
+pty-verified). **Model:** arrows/PgUp-PgDn SCROLL (not element-nav);
+Tab/Shift-Tab focus with wrap + auto-scroll-to-reveal; focus-on-load = first
+visible focusable; Enter follows a link (`Url::resolve`) or submits a
+submit/image control (`form::serialize_submit`, default values — text/checkbox
+editing deferred); Backspace back (no forward stack, v0); F5/`r` reload;
+`q`/Ctrl-C quit; yellow fixed highlight. **Dep:** `rustix` (charter substrate),
+`default-features=false` + `["termios","std"]` — linux_raw backend, no `unsafe`
+in our code; cross-compiles + runs on i486 (CI-verified). Raw mode clears
+ICANON|ECHO|ISIG (Ctrl-C as a byte) but keeps OPOST. Restore runs on normal
+quit; `panic=abort` skips it on a genuine panic, so the loop is written total.
+Known edge: two adjacent links with identical `href` merge into one focusable;
+Fragment carries no NodeId, so control→form resolution is a best-effort DOM
+walk that degrades to no-op. Revisit: (c2) mouse; form-field editing.
+
 ## UI — Colored tty render
 
 ### D36 — TextGrid carries fg/bg; to_ansi() for color, to_text() unchanged

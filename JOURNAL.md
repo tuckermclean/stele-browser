@@ -426,6 +426,34 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-3 · interactive shell (keyboard) — STELE IS A BROWSER
+
+- `stele <url>` (no `--headless`) now launches a live terminal browser you
+  DRIVE. `src/browser.rs` (new lib module, 27 pure unit tests) owns the whole
+  model: `Focusable` extraction from the `interactive`-tagged fragments (+ a
+  pure `hit_test(col,row)` for the mouse packet to reuse), `ViewState`
+  (scroll/focus/size), a buffering `KeyParser` (partial escapes across reads,
+  total on hostile bytes), `apply_key` (one pure state transition), `History`
+  back-stack, `render_frame` (viewport window + yellow focus-highlight + status
+  line via `to_ansi`), and DOM-side form resolution for submit.
+- Keys: ↑↓/PgUp/PgDn SCROLL; Tab/Shift-Tab cycle focus (wrap + auto-scroll to
+  reveal); Enter FOLLOWS a focused link (`url.resolve(href)`) or SUBMITS a
+  focused submit button (reusing `form::serialize_submit`, default values);
+  Backspace = back; F5 or `r` = reload; `q`/Ctrl-C = quit. Non-submit control
+  editing (typing/toggling) is the c2/later scope.
+- **New dep `rustix`** (charter-blessed; `default-features=false`, features
+  `["termios","std"]`) for raw-mode termios + terminal-size — its linux_raw
+  backend **cross-compiled clean for i486 and ran under qemu -cpu 486** (CI
+  green), same posture as taffy. No `unsafe` in our code (rustix safe API). The
+  thin I/O loop (`main::run_browser`: raw enter/restore, blocking read, draw)
+  is the only un-CI-tested part (no terminal in CI) — the implementer verified
+  it end-to-end over a real pty (Tab-highlight, follow, back, submit, restore).
+- Frozen types untouched; 761 tests green. Raw mode also clears ISIG (Ctrl-C →
+  byte 0x03) but keeps OPOST (no `\r\n` staircase); normal quit restores the
+  terminal (a genuine mid-loop panic wouldn't under panic=abort, but the loop
+  is total). See D37. NEXT: (c2) MOUSE — gpm `/dev/gpmctl` socket + xterm SGR,
+  reusing `hit_test`. Then (e) background-image.
+
 ## 2026-08-14 — UI-2 · colored tty render (fg/bg + ANSI)
 
 - The terminal gets COLOR. `TextGrid`'s cell is now `Cell { ch, fg, bg }` (was
