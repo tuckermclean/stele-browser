@@ -404,6 +404,34 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M5 · flex-polite pixel-green — MODERN FLEX ON A 486
+
+- The charter's headline promise, delivered and VISIBLE: a modern no-JS blog
+  layout in real CSS flexbox, styled via an author `<style>` block, rendered to
+  pixels. `fixtures/flex-polite.html` → `goldens/flex-polite.png` (800×572,
+  orchestrator-VIEWED and blessed): a `justify-content: space-between` header
+  (title left / nav right, `align-items: center` across font sizes), a
+  two-column body (`flex-grow: 1` article beside a fixed 220px `aside`), a
+  full-width footer — backgrounds/borders/padding all from author CSS.
+- **Genuine flex bug found + fixed** (first real flex render surfaced it, as
+  hoped): `block::translate_container_children`'s flex branch turned EVERY child
+  into a flex item — including whitespace-only `Text` nodes from source
+  newlines/indentation — so `<nav>\n <a>..</a>\n <a>..</a>\n</nav>` grew a
+  phantom zero-width flex item that doubled the `gap`. Per CSS Flexbox §4 a
+  child text node of only collapsible whitespace generates NO anonymous flex
+  item; fixed via `is_whitespace_only_text` skip. RED test measured 82px vs
+  66px expected gap; GREEN after. All other flex mechanics (row, flex-grow vs
+  fixed sibling, space-between, gap, align-items) were correct on first render.
+- The golden test renders through the REAL author-CSS pipeline
+  (`collect_author_sheets` + `cascade(dom, &sheets)`), with a load-bearing test
+  proving it (`without_author_css_the_header_children_would_stack_instead_of_flex`).
+- Orchestrator-reviewed directly + visually blessed; frozen paths empty-diff;
+  no deps; no unsafe. 363 lib + flex geometry/golden tests green. accept.sh A3g.
+  See D29.
+- **M5 progressing:** author CSS ✅ · flex-polite ✅. NEXT: `@media` evaluation
+  (needs a small viewport freeze amendment threading the viewport into cascade),
+  then `details`/`summary`, `noscript`, full entities, `--stats` counter.
+
 ## 2026-08-14 — M5 · author CSS wired — pages get their own styles
 
 - **The CSS engine is now actually used.** Discovery: every `cascade()` call in
