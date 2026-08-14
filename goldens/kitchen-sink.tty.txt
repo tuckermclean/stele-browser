@@ -1,0 +1,95 @@
+
+  Kitchen Sink
+
+
+
+Text & Inline Markup
+
+
+A paragraph with bold, italic, emphasis, and strong text, plus a link. Entities:
+© 2026 Stele Project — all rights reserved (© numeric copy too).
+
+
+Lists
+
+
+     First unordered item
+     Second unordered item, inline-styled bold
+
+
+     First ordered item
+     Second ordered item
+
+
+  A blockquote: set apart from the surrounding text, per 1996 convention.
+
+
+
+ preformatted text keeps its spacing
+
+
+
+Line one of a paragraph.
+Line two, after an explicit break.
+
+
+Table
+
+
+ Item     Qty    Notes
+
+ Widget   4      Blue
+          2      Red
+
+ Gadget          Backorder
+
+Form
+
+
+
+Name: [Ada]
+
+
+[x] Subscribe
+
+
+Color: [ Green v]
+
+
+[ Send ]
+
+
+Images
+
+
+
+   a plain inline image.
+
+
+      A floated image with wrapping text alongside it: enough words here to run
+      several lines next to the floated square before the paragraph text clears
+      the bottom of the image and returns to the full paragraph width for its
+final few words.
+
+
+Flexbox
+
+
+
+   This region grows (flex-grow: 1) to fill remaining space.     Fixed 120px
+
+
+Disclosure & Noscript
+
+
+> Collapsed section (click to expand)
+v Expanded section (already open)
+
+Body text that SHOULD appear while expanded.
+
+
+Stele never runs script by construction, so this noscript content always
+renders.
+
+
+End of kitchen sink.

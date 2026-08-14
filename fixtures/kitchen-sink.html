@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+<title>Kitchen Sink &mdash; Stele Coverage Fixture</title>
+<style>
+  body { margin: 0; }
+  .banner { background-color: #24344d; color: white; padding: 12px 16px; }
+  .banner h1 { margin: 0; }
+  blockquote { border-left: 4px solid #9db6dd; margin: 12px 0; padding: 4px 12px; }
+  pre { background-color: #f4f1ea; padding: 8px; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #333333; padding: 4px 8px; }
+  .flexrow { display: flex; justify-content: space-between; gap: 16px; padding: 12px; background-color: #e4ecf7; }
+  .flexrow .grow { flex-grow: 1; background-color: #ffffff; border: 1px solid #9db6dd; padding: 8px; }
+  .flexrow .fixed { width: 120px; background-color: #ffffff; border: 1px solid #9db6dd; padding: 8px; }
+  @media (max-width: 500px) {
+    .banner { background-color: #4d2424; }
+  }
+</style>
+</head>
+<body>
+
+<div class="banner">
+<h1>Kitchen Sink</h1>
+</div>
+
+<h2>Text &amp; Inline Markup</h2>
+<p>A paragraph with <b>bold</b>, <i>italic</i>, <em>emphasis</em>, and <strong>strong</strong>
+text, plus a <a href="https://example.com/">link</a>. Entities: &copy; 2026 Stele Project
+&mdash; all rights reserved (&#169; numeric copy too).</p>
+
+<h3>Lists</h3>
+<ul>
+<li>First unordered item</li>
+<li>Second unordered item, <span style="font-weight: bold;">inline-styled bold</span></li>
+</ul>
+<ol>
+<li>First ordered item</li>
+<li>Second ordered item</li>
+</ol>
+
+<blockquote>
+A blockquote: set apart from the surrounding text, per 1996 convention.
+</blockquote>
+
+<pre>
+preformatted   text
+   keeps    its   spacing
+</pre>
+
+<hr>
+
+<p>Line one of a paragraph.<br>Line two, after an explicit break.</p>
+
+<h2>Table</h2>
+<table>
+<thead>
+<tr><th>Item</th><th>Qty</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td rowspan="2">Widget</td><td>4</td><td>Blue</td></tr>
+<tr><td>2</td><td>Red</td></tr>
+<tr><td colspan="2">Gadget</td><td>Backorder</td></tr>
+</tbody>
+</table>
+
+<h2>Form</h2>
+<form action="/kitchen-sink" method="post">
+<p>Name: <input type="text" name="name" value="Ada" size="12"></p>
+<p><input type="checkbox" name="subscribe" checked> Subscribe</p>
+<p>Color:
+<select name="color">
+<option value="r">Red</option>
+<option value="g" selected>Green</option>
+<option value="b">Blue</option>
+</select>
+</p>
+<p><input type="submit" value="Send"></p>
+</form>
+
+<h2>Images</h2>
+<p><img src="images-blue.gif" width="16" height="16" alt="blue square"> a plain inline image.</p>
+<p><img src="images-red.png" align="left" width="48" height="48" alt="floated red square">A floated image
+with wrapping text alongside it: enough words here to run several lines next to the floated
+square before the paragraph text clears the bottom of the image and returns to the full
+paragraph width for its final few words.</p>
+
+<h2>Flexbox</h2>
+<div class="flexrow">
+<div class="grow">This region grows (flex-grow: 1) to fill remaining space.</div>
+<div class="fixed">Fixed 120px</div>
+</div>
+
+<h2>Disclosure &amp; Noscript</h2>
+<details>
+<summary>Collapsed section (click to expand)</summary>
+<p>Body text that should not appear while collapsed.</p>
+</details>
+<details open>
+<summary>Expanded section (already open)</summary>
+<p>Body text that SHOULD appear while expanded.</p>
+</details>
+
+<noscript>
+<p>Stele never runs script by construction, so this noscript content always renders.</p>
+</noscript>
+
+<p>End of kitchen sink.</p>
+
+</body>
+</html>
