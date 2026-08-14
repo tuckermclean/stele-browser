@@ -346,6 +346,54 @@ mod tests {
         assert_eq!(s.bytes().len(), 4 * 4 * 4);
     }
 
+    /// Review fix (Important #1): `MAX_GLYPH_PX` bounds ONE glyph's pixel
+    /// loop, but with no screen-bbox-vs-surface intersection check, a glyph
+    /// placed entirely off-canvas still ran the full `O(w_px * h_px)` loop
+    /// (up to ~1024*1024 iterations at a saturating `size_px`) only to have
+    /// every `put_pixel` silently clip it. Many off-screen characters at a
+    /// saturating `size_px` (a real, reachable shape: a long document with a
+    /// huge author `font-size`, well within the 64MiB response-body cap) is
+    /// an aggregate CPU-hang vector. Assert this completes promptly — before
+    /// the fix, 512 chars * ~1M wasted iterations each is measurably slow;
+    /// after it, an off-screen glyph is an O(1) bbox check regardless of
+    /// character count.
+    #[test]
+    fn draw_text_skips_off_screen_glyphs_without_paying_their_full_pixel_cost() {
+        let mut s = MemSurface::new(50, 50, Color::WHITE);
+        let text: String = std::iter::repeat('A').take(512).collect();
+        // size_px 4096 -> scale 256 -> w_px/h_px both saturate MAX_GLYPH_PX
+        // (1024), so each glyph's *unfixed* inner loop is ~1024*1024 == ~1M
+        // iterations. Placed far past the 50x50 surface on both axes, so
+        // NONE of the 512 glyphs are visible.
+        let run = TextRun { text: &text, x: 1_000_000, baseline: 1_000_000, size_px: 4096.0, color: Color::BLACK };
+
+        let start = std::time::Instant::now();
+        s.draw_text(&run);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs_f64() < 1.0,
+            "512 off-screen glyphs at a saturating size_px took {elapsed:?} -- \
+             should be an O(1) bbox-skip per glyph, not O(pixels) per glyph"
+        );
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255], "off-screen text must not paint any pixel");
+        }
+    }
+
+    #[test]
+    fn off_screen_glyph_writes_zero_pixels_while_an_on_screen_one_still_renders() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        s.draw_text(&TextRun { text: "A", x: 10_000, baseline: 10_012, size_px: 16.0, color: Color::BLACK });
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255], "off-screen glyph must write zero pixels");
+        }
+
+        s.draw_text(&TextRun { text: "A", x: 4, baseline: 12, size_px: 16.0, color: Color::BLACK });
+        let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
+        assert!(count_black > 0, "on-screen glyph should still render after an off-screen one was skipped");
+    }
+
     #[test]
     fn draw_text_respects_run_color() {
         let mut s = MemSurface::new(20, 20, Color::WHITE);
