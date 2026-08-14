@@ -1736,9 +1736,201 @@ mod tests {
             MouseKind::Move,
         ] {
             let ev = MouseEvent { col: c, row: r, kind };
-            let (next, cmd) = apply_mouse(ev, view, &page);
+            let (next, cmd) = apply_mouse(ev, view.clone(), &page);
             assert_eq!(next, view, "{kind:?} must not change view");
             assert!(matches!(cmd, Command::None), "{kind:?} must be a no-op command");
         }
+    }
+
+    // ------------------------------------------------- editable text inputs
+    // packet/shell-forms (P7 c3): text `<input>`s become typeable, and
+    // Enter/a form's submit control build a real `Command::Submit` out of
+    // whatever the user actually typed -- see the module's ViewState doc
+    // comment ("fields"/"cursor") and `apply_key`'s edit-mode dispatch.
+
+    #[test]
+    fn is_text_input_kind_truth_table() {
+        for kind in ["text", "search", "email", "url", "tel", "password", "number", "", "made-up-future-type"] {
+            assert!(is_text_input_kind(kind), "{kind:?} should be text-like");
+        }
+        for kind in ["submit", "button", "reset", "checkbox", "radio", "hidden", "image", "file"] {
+            assert!(!is_text_input_kind(kind), "{kind:?} should NOT be text-like");
+        }
+    }
+
+    #[test]
+    fn typing_into_a_focused_text_input_appends_to_its_buffer_and_advances_the_cursor() {
+        let html = r#"<form action="/search"><input type="text" name="q"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (view, _) = apply_key(Key::Tab, view, &page); // focus the input
+        assert_eq!(view.focus, Some(0));
+        let (view, _) = apply_key(Key::Char('c'), view, &page);
+        let (view, _) = apply_key(Key::Char('a'), view, &page);
+        let (view, cmd) = apply_key(Key::Char('t'), view, &page);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(view.fields.get(&0).map(String::as_str), Some("cat"));
+        assert_eq!(view.cursor, 3);
+    }
+
+    #[test]
+    fn backspace_in_edit_mode_deletes_from_the_buffer_and_is_not_command_back() {
+        let html = r#"<form action="/search"><input type="text" name="q"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (view, _) = apply_key(Key::Tab, view, &page);
+        let (view, _) = apply_key(Key::Char('h'), view, &page);
+        let (view, _) = apply_key(Key::Char('i'), view, &page);
+        let (view, cmd) = apply_key(Key::Backspace, view, &page);
+        assert!(matches!(cmd, Command::None), "backspace while editing must not be Command::Back");
+        assert_eq!(view.fields.get(&0).map(String::as_str), Some("h"));
+        assert_eq!(view.cursor, 1);
+    }
+
+    #[test]
+    fn q_and_r_type_into_a_focused_text_input_instead_of_quitting_or_reloading() {
+        let html = r#"<form action="/search"><input type="text" name="q"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (view, _) = apply_key(Key::Tab, view, &page);
+        let (view, cmd_q) = apply_key(Key::Char('q'), view, &page);
+        assert!(matches!(cmd_q, Command::None), "q must not quit while editing");
+        let (view, cmd_r) = apply_key(Key::Char('r'), view, &page);
+        assert!(matches!(cmd_r, Command::None), "r must not reload while editing");
+        assert_eq!(view.fields.get(&0).map(String::as_str), Some("qr"));
+    }
+
+    #[test]
+    fn q_r_and_backspace_on_a_focused_link_still_quit_reload_and_go_back() {
+        let html = r#"<a href="/x">link</a>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24, ..Default::default() };
+        let (_, cmd_q) = apply_key(Key::Char('q'), view.clone(), &page);
+        assert!(matches!(cmd_q, Command::Quit));
+        let (_, cmd_r) = apply_key(Key::Char('r'), view.clone(), &page);
+        assert!(matches!(cmd_r, Command::Reload));
+        let (_, cmd_bs) = apply_key(Key::Backspace, view, &page);
+        assert!(matches!(cmd_bs, Command::Back));
+    }
+
+    #[test]
+    fn left_and_right_move_the_cursor_and_clamp_at_the_buffer_bounds() {
+        let html = r#"<form action="/search"><input type="text" name="q"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (view, _) = apply_key(Key::Tab, view, &page);
+        let (view, _) = apply_key(Key::Char('a'), view, &page);
+        let (view, _) = apply_key(Key::Char('b'), view, &page);
+        assert_eq!(view.cursor, 2);
+        let (view, _) = apply_key(Key::Left, view, &page);
+        assert_eq!(view.cursor, 1);
+        let (view, _) = apply_key(Key::Left, view, &page);
+        assert_eq!(view.cursor, 0);
+        let (view, _) = apply_key(Key::Left, view, &page); // already at 0 -- must clamp, not underflow
+        assert_eq!(view.cursor, 0);
+        let (view, _) = apply_key(Key::Right, view, &page);
+        let (view, _) = apply_key(Key::Right, view, &page);
+        assert_eq!(view.cursor, 2);
+        let (view, _) = apply_key(Key::Right, view, &page); // already at len -- must clamp
+        assert_eq!(view.cursor, 2);
+    }
+
+    #[test]
+    fn enter_in_a_filled_text_field_submits_the_owning_form_with_the_typed_value() {
+        let html = r#"<form action="/search"><input name="q"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (mut view, _) = apply_key(Key::Tab, view, &page);
+        for c in "hello world".chars() {
+            let (next, _) = apply_key(Key::Char(c), view, &page);
+            view = next;
+        }
+        let (_, cmd) = apply_key(Key::Enter, view, &page);
+        match cmd {
+            Command::Submit(req) => {
+                assert!(
+                    req.url.as_str() == "http://example.com/search?q=hello+world" || req.url.as_str() == "http://example.com/search?q=hello%20world",
+                    "{}",
+                    req.url.as_str()
+                );
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_field_form_persists_buffers_across_tab_and_submits_both() {
+        let html = r#"<form action="/go"><input name="a"><input name="b"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        assert_eq!(page.focusables.len(), 2);
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (view, _) = apply_key(Key::Tab, view, &page); // focus field a
+        let (mut view, _) = apply_key(Key::Char('1'), view, &page);
+        view = apply_key(Key::Tab, view, &page).0; // focus field b, buffer for a must persist
+        assert_eq!(view.fields.get(&0).map(String::as_str), Some("1"), "field a's buffer must survive the Tab");
+        let (view, _) = apply_key(Key::Char('2'), view, &page);
+        let (_, cmd) = apply_key(Key::Enter, view, &page);
+        match cmd {
+            Command::Submit(req) => assert_eq!(req.url.as_str(), "http://example.com/go?a=1&b=2"),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_a_focused_text_input_now_submits_its_form_instead_of_a_no_op() {
+        // packet/shell-forms behavior change (spec-mandated, not a
+        // regression): before this packet, Enter on a focused text input
+        // was a documented no-op ("editing is a later packet"). This
+        // packet's whole point is teaching the shell to edit + submit text
+        // fields, so Enter on one now behaves like pressing the form's own
+        // submit button -- see `apply_key_editing`'s Enter arm.
+        let html = r#"<form action="/search" method="get">
+            <input type="text" name="q">
+            <input type="submit" name="go" value="Go">
+        </form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24, ..Default::default() };
+        let (_, cmd) = apply_key(Key::Enter, view, &page);
+        match cmd {
+            // No submit button was "clicked" (Enter fired from inside the
+            // text field itself, not the button) -- see `submit_owning_form`
+            // -- so `go` does NOT appear; only `q`'s own (empty, untyped)
+            // value does.
+            Command::Submit(req) => assert_eq!(req.url.as_str(), "http://example.com/search?q="),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clicking_a_text_input_focuses_it_without_submitting() {
+        let html = r#"<form action="/search"><input type="text" name="q"><input type="submit" value="Go"></form>"#;
+        let page = build_page(html, 80, "http://example.com/");
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
+        let (c, r, _, _) = page.focusables[0].rect_cells;
+        let ev = MouseEvent { col: c, row: r, kind: MouseKind::Press(MouseButton::Left) };
+        let (next, cmd) = apply_mouse(ev, view, &page);
+        assert_eq!(next.focus, Some(0));
+        assert!(matches!(cmd, Command::None), "clicking into a text field must not submit");
+    }
+
+    // --------------------------------------------------------- clamp_scroll
+
+    #[test]
+    fn clamp_scroll_pulls_an_out_of_range_offset_back_to_the_new_max() {
+        let html: String = (0..100).map(|i| format!("<p>line {i}</p>")).collect();
+        let page = build_page(&html, 40, "http://example.com/");
+        let max = page.grid_rows().saturating_sub(5);
+        let view = ViewState { scroll_row: max + 500, focus: None, cols: 40, rows: 5, ..Default::default() };
+        let clamped = clamp_scroll(view, &page);
+        assert_eq!(clamped.scroll_row, max);
+    }
+
+    #[test]
+    fn clamp_scroll_leaves_an_in_range_offset_unchanged() {
+        let html: String = (0..100).map(|i| format!("<p>line {i}</p>")).collect();
+        let page = build_page(&html, 40, "http://example.com/");
+        let view = ViewState { scroll_row: 3, focus: None, cols: 40, rows: 5, ..Default::default() };
+        let clamped = clamp_scroll(view.clone(), &page);
+        assert_eq!(clamped, view);
     }
 }
