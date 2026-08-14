@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head><title>Details/Summary Fixture</title></head>
+<body>
+<h1>Disclosure Widgets</h1>
+
+<p>Below: one collapsed &lt;details&gt; (no open attribute) and one expanded
+&lt;details open&gt;, each with a &lt;summary&gt; label and body content.</p>
+
+<details>
+<summary>Collapsed section (click to expand)</summary>
+<p>You should not see this collapsed body text in the render.</p>
+</details>
+
+<details open>
+<summary>Expanded section (already open)</summary>
+<p>You SHOULD see this expanded body text in the render.</p>
+</details>
+
+<p>End of fixture.</p>
+</body>
+</html>
