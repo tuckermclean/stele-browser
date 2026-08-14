@@ -299,6 +299,26 @@ Append-only running log. Newest at the bottom.
   table INTEGRATION (freeze amendment adding `Display::Table/Row/Cell`, box-tree
   wiring feeding `solve_table` output to taffy as fixed bases), frames, forms;
   plus the P7b interactive shell to close M2's "follow links" clause.
+
+## 2026-08-14 — M3 · freeze amendment: CSS table Display values
+
+- The gateway to real tables. Added `Display::{Table, TableRow, TableCell,
+  TableRowGroup}` to the frozen enum — the marker the layout engine will key
+  off to run `layout::table::solve_table`. This packet ONLY lands the marker +
+  wiring and keeps everything green; real table box-tree/taffy integration is
+  the next packet.
+- Wiring: the CSS value parser maps `table`/`table-row`/`table-cell`/
+  `table-row-group` (unknown values still ignored, C2); the UA sheet assigns
+  them (`table{display:table}`, `tr`, `td/th`, `thead/tbody/tfoot`). Blast
+  radius was tiny — the ONLY exhaustive `match` on `Display` in the codebase is
+  `block::map_display`; box_tree/table use `==` only. `map_display` maps all
+  four new variants to taffy `Block` for now (tables render as stacked block
+  boxes — visually wrong but total + green), explicit arms (no catch-all) so
+  the next packet's compiler errors guide the real implementation. See D19.
+- Orchestrator reviewed the frozen-type change directly (small, additive,
+  cascade test confirms `<table>`→`Display::Table`); 199 lib + 13 bin + 88
+  integration tests green, no regressions, no deps, no unsafe.
+
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a
