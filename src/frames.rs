@@ -41,21 +41,26 @@
 //! made `pub(crate)` by this packet so both modules share one source of
 //! truth rather than duplicating the magic numbers).
 //!
-//! ## Row height is content-driven, like the rest of this backend
+//! ## Row/column extent is fixed from track math alone — never from
+//! ## rendered content (this is what makes incremental compositing safe)
 //!
-//! Column WIDTH is load-bearing: it's threaded into each cell's own
-//! sub-render as its `cols` (bounds text wrapping), exactly like `--cols` on
-//! the top-level pipeline. Row height computed from the `rows` attribute is
-//! only a MINIMUM/nominal hint — mirroring `backend::tty`'s own documented
-//! philosophy that "height is always content-driven" for the single-doc
-//! pipeline, a row's actual height is `max(nominal track height, the
-//! tallest actual rendered grid among that row's cells)`. This keeps
-//! `rows="100,*"`-style hints meaningful for typical content while never
-//! silently truncating a cell whose real content is taller than its nominal
-//! slot (a real windowed browser would give that frame a scrollbar; a
-//! headless text dump has no scrolling, so growing the row is the least
-//! lossy choice — the alternative, clipping, would silently drop content
-//! from the dump).
+//! Both axes of the grid are sized ENTIRELY from `compute_track_extents`
+//! before a single cell is rendered: column width bounds each cell's own
+//! sub-render `cols` (text wrapping), and row height is that row's nominal
+//! track extent, full stop — NOT grown to fit whatever a cell's document
+//! actually renders. A cell whose real content is taller than its nominal
+//! row slot is clipped at the row boundary by [`tty::TextGrid::blit`]'s own
+//! bounds-clipping (dropped, not overflowed into the next row) — the same
+//! "clip rather than overflow" rule `backend::tty::render` already applies
+//! at the right edge of a text run. A real windowed browser would give an
+//! overflowing frame a scrollbar; a headless text dump has neither
+//! scrolling nor a legible way to signal "there's more" mid-grid, so
+//! clipping at the boundary is the least-surprising choice — and,
+//! critically, it's what makes the compositing loop below able to blit each
+//! cell immediately and drop it, rather than holding every cell's grid
+//! resident just to learn how tall the row "should" grow (see Totality
+//! below — an earlier revision of this module DID grow rows to fit content
+//! and was reviewer-flagged for the resulting unbounded peak memory).
 //!
 //! ## Compositing / separators
 //!
@@ -84,10 +89,34 @@
 //!     the grid-cell count of any ONE frameset before the global budget
 //!     even gets consulted).
 //!   - A same-URL cycle on the current fetch path (`FrameCtx::visited`)
-//!     short-circuits to a placeholder rather than re-fetching.
+//!     short-circuits to a placeholder rather than re-fetching. This is a
+//!     plain `Url::as_str()` string comparison — no percent-decoding or
+//!     case-folding — so a pathological `a%2ehtml` vs `A.html` pair could in
+//!     principle evade it; [`MAX_FRAME_DEPTH`] is the unconditional backstop
+//!     that still bounds that case (URL normalization is a broader `fetch`
+//!     concern, out of scope for this packet).
 //! Any bound tripping, any fetch failure, any malformed `rows`/`cols`, or a
 //! zero-size region all resolve to a placeholder/empty sub-grid — never a
 //! panic, never an abort, matching this whole codebase's totality covenant.
+//!
+//! ## Peak memory: incremental compositing, one child at a time
+//!
+//! `render_frameset_grid` allocates its canvas ONCE via `TextGrid::blank`
+//! (sized purely from track math, so it's bounded by `TextGrid::blank`'s own
+//! `MAX_GRID_ROWS`/`MAX_GRID_COLS` clamp regardless of how pathological the
+//! `rows`/`cols` attributes are), then renders and blits cells ONE AT A
+//! TIME: render a cell's own `TextGrid`, `blit` it into the canvas
+//! immediately, and let it drop before the next cell is even rendered. Peak
+//! extra memory for the whole recursive render of one document is therefore
+//! the (bounded) canvas plus exactly one in-flight child `TextGrid` — NOT
+//! `O(MAX_TOTAL_FRAMES)` children held simultaneously. This matters because
+//! a frame's own rendered height is content-driven and unrelated to its
+//! small nominal cell (a single fetched document can legitimately render
+//! `MAX_GRID_ROWS` tall regardless of how little screen space its frame
+//! cell nominally occupies) — collecting all of one frameset's children
+//! before compositing (an earlier revision of this module did exactly that)
+//! could hold up to `MAX_TOTAL_FRAMES` such grids live at once, hundreds of
+//! MB, which aborts on allocation failure under `panic = "abort"`.
 //!
 //! ## v0 simplifications (documented, not oversights)
 //!
@@ -206,10 +235,14 @@ pub fn render(base_url: &Url, dom: &Dom, frameset_id: NodeId, cols: usize) -> Te
 }
 
 /// Render one `<frameset>` node's own region (`width_px` x `height_px`) as a
-/// composited grid: partition into `rows x cols` tracks, render each cell's
-/// child (`<frame>`, nested `<frameset>`, or absent -> blank), then
-/// [`TextGrid::blit`] each into a canvas sized to the actual (content-grown)
-/// row heights. See module docs for the sizing/compositing rules.
+/// composited grid: partition into `rows x cols` tracks (pure math, no
+/// rendering), allocate the canvas ONCE at that fixed size, then render and
+/// [`TextGrid::blit`] each cell ONE AT A TIME — immediately dropping each
+/// child's grid before the next cell is even rendered, so peak memory is the
+/// (bounded) canvas plus exactly one in-flight child, never all of a row's
+/// or a frameset's cells at once. See the module's "Row/column extent is
+/// fixed from track math alone" and "Peak memory" docs for why this is safe
+/// (and why an earlier revision that grew rows to fit content was not).
 fn render_frameset_grid(
     dom: &Dom,
     frameset_id: NodeId,
@@ -233,45 +266,35 @@ fn render_frameset_grid(
     let n_rows = row_extents_px.len();
 
     let col_widths_cells: Vec<usize> = col_extents_px.iter().map(|&px| tty::cell_index(px, CELL_W)).collect();
-    let row_heights_nominal: Vec<usize> = row_extents_px.iter().map(|&px| tty::cell_index(px, CELL_H)).collect();
+    let row_heights_cells: Vec<usize> = row_extents_px.iter().map(|&px| tty::cell_index(px, CELL_H)).collect();
 
     let cell_children: Vec<NodeId> = el.children.iter().copied().filter(|&c| is_frame_or_frameset(dom, c)).collect();
 
-    let total_cells = n_rows * n_cols;
-    let mut grids: Vec<TextGrid> = Vec::with_capacity(total_cells);
-    for idx in 0..total_cells {
-        let r = idx / n_cols;
-        let c = idx % n_cols;
-        let cell_w_px = col_extents_px[c];
-        let cell_h_px = row_extents_px[r];
-        let cell_w_cells = col_widths_cells[c];
-        let grid = match cell_children.get(idx) {
-            Some(&child_id) => render_cell(dom, child_id, base_url, cell_w_px, cell_h_px, cell_w_cells, depth, ctx),
-            None => TextGrid::blank(cell_w_cells, 0),
-        };
-        grids.push(grid);
-    }
-
-    let mut row_heights_actual = row_heights_nominal.clone();
-    for r in 0..n_rows {
-        for c in 0..n_cols {
-            let tallest = grids[r * n_cols + c].rows_len();
-            if tallest > row_heights_actual[r] {
-                row_heights_actual[r] = tallest;
-            }
-        }
-    }
-
-    let total_rows: usize = row_heights_actual.iter().sum();
+    // Canvas size comes ENTIRELY from track math above, before any cell is
+    // rendered — `TextGrid::blank` clamps to MAX_GRID_ROWS/MAX_GRID_COLS
+    // regardless of how pathological `rows`/`cols` are, so this allocation
+    // is bounded independent of anything a fetched frame document does.
+    let total_rows: usize = row_heights_cells.iter().sum();
     let mut canvas = TextGrid::blank(cols_total, total_rows);
+
     let mut row_offset = 0usize;
     for r in 0..n_rows {
         let mut col_offset = 0usize;
         for c in 0..n_cols {
-            canvas.blit(&grids[r * n_cols + c], col_offset, row_offset);
+            let idx = r * n_cols + c;
+            let cell_w_px = col_extents_px[c];
+            let cell_h_px = row_extents_px[r];
+            let cell_w_cells = col_widths_cells[c];
+            // Render exactly one cell, blit it, then let `grid` drop at the
+            // end of this iteration -- never held alongside its siblings.
+            let grid = match cell_children.get(idx) {
+                Some(&child_id) => render_cell(dom, child_id, base_url, cell_w_px, cell_h_px, cell_w_cells, depth, ctx),
+                None => TextGrid::blank(cell_w_cells, 0),
+            };
+            canvas.blit(&grid, col_offset, row_offset);
             col_offset += col_widths_cells[c];
         }
-        row_offset += row_heights_actual[r];
+        row_offset += row_heights_cells[r];
     }
     canvas
 }
@@ -656,7 +679,12 @@ mod tests {
 
     #[test]
     fn two_stacked_placeholder_frames_land_on_separate_rows() {
-        let (dom, fs) = frameset_dom(None, Some("1,1"), &["frame", "frame"]);
+        // "16,16": each track is exactly CELL_H (16px) -> exactly 1 cell of
+        // nominal row height each. Row extent is now fixed from track math
+        // alone (never grown to fit content — see module docs), so the
+        // track values must reserve real cell height for the single-line
+        // placeholder text to survive, unlike the old content-grown design.
+        let (dom, fs) = frameset_dom(None, Some("16,16"), &["frame", "frame"]);
         let grid = render(&Url::new("file:///x.html"), &dom, fs, 10);
         let text = grid.to_text();
         let lines: Vec<&str> = text.lines().collect();

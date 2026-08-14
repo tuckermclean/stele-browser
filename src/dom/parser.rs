@@ -15,7 +15,7 @@ use crate::dom::{Dom, ElementName, Node, NodeId};
 
 /// Elements with no content model and no end tag (brief §4/dialect note).
 const VOID_ELEMENTS: &[&str] = &[
-    "br", "hr", "img", "meta", "link", "input", "area", "base", "col", "wbr", "embed",
+    "br", "hr", "img", "meta", "link", "input", "area", "base", "col", "wbr", "embed", "frame",
 ];
 
 /// Elements whose contents are raw text, not markup. `script` is additionally
@@ -1101,6 +1101,31 @@ mod tests {
         assert!(children_of(&dom, hr).is_empty());
         // br/hr must not have swallowed "line two"/"after" as children.
         assert_eq!(text_of(&dom, p), "line oneline twoafter");
+    }
+
+    /// `<frame>` is EMPTY-content-model (void) per HTML 4.01, and real 1996
+    /// framesets write `<frame src="a"><frame src="b">` with NO closing
+    /// tags at all (unlike ordinary transitional markup's tolerated-but-
+    /// unnecessary self-closing `/>`). Before `frame` is void, the second
+    /// `<frame>` would nest INSIDE the first (since a non-void element stays
+    /// open on the stack) rather than becoming its sibling — silently
+    /// collapsing every real-world frameset to one visible frame. This is
+    /// what the `frames` packet's review caught: its own fixture only
+    /// worked because it hand-added `</frame>` close tags no real 1996 page
+    /// would have written.
+    #[test]
+    fn frame_is_void_like_real_1996_framesets_write_it() {
+        let dom = parse(r#"<frameset><frame src="a"><frame src="b"></frameset>"#);
+        let root = dom.root();
+        let frameset = find_descendant(&dom, root, "frameset").expect("frameset");
+        let frames = find_children(&dom, frameset, "frame");
+        assert_eq!(frames.len(), 2, "two <frame>s should be SIBLINGS under <frameset>, not nested");
+        assert!(children_of(&dom, frames[0]).is_empty(), "a void <frame> has no children");
+        assert!(children_of(&dom, frames[1]).is_empty(), "a void <frame> has no children");
+        let el0 = dom.node(frames[0]).element().unwrap();
+        let el1 = dom.node(frames[1]).element().unwrap();
+        assert_eq!(el0.attrs.get("src"), Some("a"));
+        assert_eq!(el1.attrs.get("src"), Some("b"));
     }
 
     #[test]
