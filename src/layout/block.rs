@@ -397,6 +397,15 @@ fn translate_any<'a>(
 /// `<p><img align=left>text...</p>` shape needs the float and the wrapping
 /// text folded into one taffy leaf so `inline::layout_runs` sees both
 /// together), not broken out into its own stacked block box.
+/// True for a `Text` `LayoutNode` whose entire content is whitespace (or
+/// which is empty) — see `translate_container_children`'s flex branch for
+/// why this matters: such a node must not become its own flex item. Only
+/// `Text` nodes qualify; any other content kind is never whitespace-only by
+/// definition.
+fn is_whitespace_only_text(n: &LayoutNode) -> bool {
+    matches!(&n.content, BoxContent::Text(t) if t.trim().is_empty())
+}
+
 fn is_inline_ish(n: &LayoutNode) -> bool {
     match &n.content {
         BoxContent::Text(_) => true,
@@ -460,6 +469,25 @@ fn translate_container_children<'a>(
     let mut out = Vec::new();
     if node.style.display == Display::Flex {
         for child in &node.children {
+            // CSS Flexbox (§4 "Flex Items"): "a child text node consisting
+            // entirely of collapsible white space is not rendered, i.e. it
+            // does not generate an anonymous flex item" — skip it entirely
+            // rather than giving it its own taffy flex-item node. Without
+            // this, ordinary document-formatted markup (any HTML with
+            // newlines/indentation between flex children — the overwhelming
+            // common case, not a contrived one) turns every whitespace-only
+            // `Text` node between real children into a phantom zero-width
+            // flex item that still counts toward `gap` on both sides,
+            // silently doubling the visual gap between real items (found via
+            // `fixtures/flex-polite.html`'s `<nav>` links: M5 flex-polite
+            // packet). A non-whitespace text node (real inline content
+            // directly inside a flex container, e.g. `<div style="display:
+            // flex">hello<span>world</span></div>`) is untouched — it still
+            // becomes its own flex item, matching the module docs' existing
+            // "every child is its own taffy child node" flex contract.
+            if is_whitespace_only_text(child) {
+                continue;
+            }
             out.push(translate_any(child, taffy, depth, table_budget));
         }
         return out;
