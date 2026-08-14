@@ -25,6 +25,7 @@ pub mod fetch;
 pub mod form;
 pub mod frames;
 pub mod img;
+pub mod images;
 pub mod layout;
 pub mod style;
 pub mod surface;

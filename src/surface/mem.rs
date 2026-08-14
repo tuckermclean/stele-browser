@@ -84,8 +84,54 @@ impl Surface for MemSurface {
         }
     }
 
-    fn blit(&mut self, _at: Rect, _image: &crate::img::RgbaImage) {
-        todo!("P9: image blit into the mem surface")
+    /// Copy `image` into `at`, nearest-neighbor-scaled to `at`'s size,
+    /// alpha-blending each source pixel over the destination via the same
+    /// `put_pixel` blend `fill_rect`/`draw_glyph` already use.
+    ///
+    /// Total: a zero-sized `image` (either dimension) or zero-sized `at`
+    /// (either dimension) is a no-op — no image content to sample / no
+    /// destination area to paint, and either would otherwise divide by
+    /// zero in the scale math. Coordinates are widened to `i64` before any
+    /// arithmetic so a huge/degenerate `at` (`u32::MAX` width, an `i32`
+    /// origin near a bound) can't overflow computing its far edge; the
+    /// destination rect is then clipped to the surface bounds up front, so
+    /// the pixel loop below only ever visits on-surface, in-bounds
+    /// destination pixels (never relying on `put_pixel`'s own clip as the
+    /// only guard, unlike `draw_glyph`, since the loop bounds themselves
+    /// must stay a small, finite range regardless of how huge `at` is).
+    fn blit(&mut self, at: Rect, image: &crate::img::RgbaImage) {
+        if image.width == 0 || image.height == 0 || at.w == 0 || at.h == 0 {
+            return;
+        }
+
+        let dst_x0 = at.x as i64;
+        let dst_y0 = at.y as i64;
+        let dst_x1 = dst_x0 + at.w as i64;
+        let dst_y1 = dst_y0 + at.h as i64;
+
+        let clip_x0 = dst_x0.max(0);
+        let clip_y0 = dst_y0.max(0);
+        let clip_x1 = dst_x1.min(self.width as i64);
+        let clip_y1 = dst_y1.min(self.height as i64);
+        if clip_x1 <= clip_x0 || clip_y1 <= clip_y0 {
+            return; // `at` doesn't intersect the surface at all.
+        }
+
+        let (img_w, img_h) = (image.width as u64, image.height as u64);
+        let (at_w, at_h) = (at.w as u64, at.h as u64);
+
+        for y in clip_y0..clip_y1 {
+            let rel_y = (y - dst_y0) as u64;
+            let src_y = ((rel_y * img_h) / at_h).min(img_h - 1) as u32;
+            for x in clip_x0..clip_x1 {
+                let rel_x = (x - dst_x0) as u64;
+                let src_x = ((rel_x * img_w) / at_w).min(img_w - 1) as u32;
+                let idx = ((src_y as usize) * (image.width as usize) + (src_x as usize)) * 4;
+                let Some(src_px) = image.pixels.get(idx..idx + 4) else { continue };
+                let color = Color { r: src_px[0], g: src_px[1], b: src_px[2], a: src_px[3] };
+                self.put_pixel(x as i32, y as i32, color);
+            }
+        }
     }
 
     /// Rasterize `run` glyph-by-glyph via the embedded `text::glyphs` atlas
@@ -428,6 +474,146 @@ mod tests {
         // columns 0..=5; at x0=4 that's surface columns 4..=9, row
         // baseline-8+4 = 8.
         assert_eq!(px(&s, 4, 8), (200, 10, 10, 255));
+    }
+
+    // ------------------------------------------------------------------ blit
+
+    use crate::img::RgbaImage;
+
+    /// A tiny `RgbaImage` built from a flat list of `(r,g,b,a)` tuples,
+    /// row-major, `w * h` long.
+    fn image(w: u32, h: u32, px: &[(u8, u8, u8, u8)]) -> RgbaImage {
+        assert_eq!(px.len(), (w * h) as usize);
+        let mut pixels = Vec::with_capacity(px.len() * 4);
+        for &(r, g, b, a) in px {
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
+        RgbaImage { width: w, height: h, pixels }
+    }
+
+    #[test]
+    fn blit_scales_the_image_nearest_neighbor_to_fill_the_target_rect() {
+        // A 2x1 image (red | blue) blitted into a 4x2 target: nearest-
+        // neighbor scaling should split the target exactly in half (columns
+        // 0-1 red, columns 2-3 blue), replicated down both rows.
+        let img = image(2, 1, &[(255, 0, 0, 255), (0, 0, 255, 255)]);
+        let mut s = MemSurface::new(4, 2, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 4, h: 2 }, &img);
+
+        for y in 0..2 {
+            assert_eq!(px(&s, 0, y), (255, 0, 0, 255));
+            assert_eq!(px(&s, 1, y), (255, 0, 0, 255));
+            assert_eq!(px(&s, 2, y), (0, 0, 255, 255));
+            assert_eq!(px(&s, 3, y), (0, 0, 255, 255));
+        }
+    }
+
+    #[test]
+    fn blit_alpha_blends_a_semi_transparent_source_over_the_background() {
+        let img = image(1, 1, &[(0, 0, 0, 128)]); // half-opaque black
+        let mut s = MemSurface::new(1, 1, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 1, h: 1 }, &img);
+        // Same source-over blend `put_pixel` already implements: expect a
+        // roughly 50/50 mix of black over white, not pure black or white.
+        let (r, g, b, a) = px(&s, 0, 0);
+        assert!(r > 0 && r < 255, "expected a blended value, got r={r}");
+        assert_eq!((r, g, b), (r, r, r), "grayscale blend stays grayscale");
+        assert_eq!(a, 255);
+    }
+
+    #[test]
+    fn blit_with_zero_width_image_is_a_no_op() {
+        let img = RgbaImage { width: 0, height: 3, pixels: Vec::new() };
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 4, h: 4 }, &img);
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn blit_with_zero_height_image_is_a_no_op() {
+        let img = RgbaImage { width: 3, height: 0, pixels: Vec::new() };
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 4, h: 4 }, &img);
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn blit_with_zero_size_target_rect_is_a_no_op() {
+        let img = image(1, 1, &[(0, 0, 0, 255)]);
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 0, h: 0 }, &img);
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn blit_clips_to_surface_bounds_when_the_target_rect_overhangs() {
+        // A solid black 2x2 image blitted at (2,2) on a 3x3 surface: the
+        // target rect (2,2)-(4,4) hangs off the right/bottom edge, so only
+        // the top-left pixel of the target rect actually lands on-surface.
+        let img = image(2, 2, &[(0, 0, 0, 255); 4]);
+        let mut s = MemSurface::new(3, 3, Color::WHITE);
+        s.blit(Rect { x: 2, y: 2, w: 2, h: 2 }, &img);
+        assert_eq!(px(&s, 2, 2), (0, 0, 0, 255), "on-surface corner should be painted");
+        // Every other pixel (nothing else is in-bounds for this rect) stays background.
+        for y in 0..3 {
+            for x in 0..3 {
+                if (x, y) != (2, 2) {
+                    assert_eq!(px(&s, x, y), (255, 255, 255, 255), "unexpected paint at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blit_entirely_off_surface_never_panics_and_paints_nothing() {
+        let img = image(1, 1, &[(0, 0, 0, 255)]);
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        s.blit(Rect { x: -100, y: -100, w: 5, h: 5 }, &img);
+        s.blit(Rect { x: 1000, y: 1000, w: 5, h: 5 }, &img);
+        for i in (0..s.bytes().len()).step_by(4) {
+            assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn blit_with_huge_target_rect_clips_rather_than_panicking() {
+        let img = image(1, 1, &[(0, 0, 0, 255)]);
+        let mut s = MemSurface::new(4, 4, Color::WHITE);
+        s.blit(Rect { x: i32::MIN / 2, y: i32::MIN / 2, w: u32::MAX, h: u32::MAX }, &img);
+        // Must not panic; surface stays valid. (Whether it paints anything
+        // is incidental — the huge rect may or may not intersect the
+        // surface depending on where its origin lands; the point is totality.)
+        assert_eq!(s.bytes().len(), 4 * 4 * 4);
+    }
+
+    /// Review finding (Minor, quick test gap): `blit`'s `image.pixels.get(idx
+    /// ..idx + 4)` guard against a `RgbaImage` whose `pixels` buffer is
+    /// shorter than `width * height * 4` implies (a malformed/truncated
+    /// decode result reaching `blit` -- unreachable via the real P4
+    /// decoders/`images::collect_images` today, but `blit` is a `Surface`
+    /// trait method or a hostile future caller could still construct one)
+    /// was correct but untested. Pins: out-of-range source pixels are
+    /// silently skipped (destination stays background), never a panic.
+    #[test]
+    fn blit_with_a_truncated_pixel_buffer_skips_out_of_range_pixels_without_panicking() {
+        // A 2x2 image claims 16 bytes of pixels (2*2*4) but only carries 4
+        // (one real pixel, opaque black, at index 0). Blit 1:1 into a 2x2
+        // surface: only the (0,0) source pixel is in-bounds; the other
+        // three destination pixels have no backing source data and must
+        // stay background rather than reading past the buffer's end.
+        let img = crate::img::RgbaImage { width: 2, height: 2, pixels: vec![0, 0, 0, 255] };
+        let mut s = MemSurface::new(2, 2, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 2, h: 2 }, &img); // must not panic
+        assert_eq!(px(&s, 0, 0), (0, 0, 0, 255), "the one in-bounds source pixel should still paint");
+        assert_eq!(px(&s, 1, 0), (255, 255, 255, 255), "out-of-range source pixel must be skipped, not read OOB");
+        assert_eq!(px(&s, 0, 1), (255, 255, 255, 255), "out-of-range source pixel must be skipped, not read OOB");
+        assert_eq!(px(&s, 1, 1), (255, 255, 255, 255), "out-of-range source pixel must be skipped, not read OOB");
     }
 
     #[test]

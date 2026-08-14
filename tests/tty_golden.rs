@@ -18,6 +18,8 @@
 //! P-forms) are the same discipline again: PROPOSED, not self-blessed — see
 //! that packet's report for the countersign/bless request.
 
+use std::collections::HashMap;
+
 use stele::backend::tty;
 use stele::dom;
 use stele::layout::{self, box_tree::build_box_tree, Size};
@@ -31,7 +33,7 @@ const COLS: usize = 80;
 fn dump(html: &str, cols: usize) -> String {
     let dom_tree = dom::parser::parse(html);
     let styles = cascade::cascade(&dom_tree, &[]);
-    let Some(root) = build_box_tree(&dom_tree, &styles) else {
+    let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return String::new();
     };
     let viewport = Size { w: cols as f32 * 8.0, h: 100_000.0 };
@@ -77,5 +79,5 @@ fn display_none_root_dumps_to_empty_text() {
     let dom_tree = dom::parser::parse("<html><body>x</body></html>");
     let sheet = stele::style::parser::parse("html { display: none; }");
     let styles = cascade::cascade(&dom_tree, std::slice::from_ref(&sheet));
-    assert!(build_box_tree(&dom_tree, &styles).is_none());
+    assert!(build_box_tree(&dom_tree, &styles, &HashMap::new()).is_none());
 }

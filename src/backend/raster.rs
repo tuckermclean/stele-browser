@@ -18,11 +18,14 @@
 //!   `backend::tty`'s own module docs describe for this field, just consumed
 //!   here as real pixels rather than a text-mode row) and hands it to
 //!   `Surface::draw_text`.
-//! - `FragmentKind::Image { .. }`: skipped. No M4 fixture emits a real
-//!   `Image` fragment yet (today's block-flow pipeline paints a `Replaced`
-//!   box as a plain `Box`, per `layout::block`'s own doc comment), and
-//!   `MemSurface::blit` is still `todo!()` — wiring real image pixels is the
-//!   NEXT packet's job. `// TODO(images packet): blit`.
+//! - `FragmentKind::Image { image }`: `blit`s `image` into the fragment's
+//!   own rect (images packet, M4): `layout::block::emit` only produces this
+//!   fragment kind for a `Replaced` box whose `image` field is `Some` (a
+//!   successfully fetched+decoded `<img>`) — a `Replaced` with no decoded
+//!   image still paints as a plain `Box` placeholder, unchanged. `blit`
+//!   itself (`MemSurface::blit`) handles the scaling (nearest-neighbor, to
+//!   the fragment's laid-out size) and alpha-blending; this arm is a
+//!   one-line hand-off.
 //!
 //! ## Totality
 //!
@@ -47,9 +50,8 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment]) {
         match &fragment.kind {
             FragmentKind::Box { style } => paint_box(surface, &fragment.rect, style),
             FragmentKind::Text { text, baseline, style } => paint_text(surface, &fragment.rect, text, *baseline, style),
-            FragmentKind::Image { .. } => {
-                // TODO(images packet): blit `image` into `fragment.rect`
-                // once MemSurface::blit is real (see this module's docs).
+            FragmentKind::Image { image } => {
+                surface.blit(to_pixel_rect(&fragment.rect), image);
             }
         }
     }
@@ -318,10 +320,25 @@ mod tests {
     // ----------------------------------------------------------- paint: Image
 
     #[test]
-    fn image_fragment_is_skipped_not_blitted() {
-        // MemSurface::blit is still todo!() (next packet) -- if `paint`
-        // called it, this test would panic. Skipping it is the documented
-        // M4 scope call.
+    fn image_fragment_is_blitted_into_its_rect() {
+        let mut s = MemSurface::new(10, 10, Color::WHITE);
+        let mut image = RgbaImage::new(2, 2);
+        image.pixels = [255u8, 0, 0, 255].repeat(4); // solid opaque red, 2x2
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image } }];
+        paint(&mut s, &fragments);
+        assert_eq!(px(&s, 0, 0), Color::rgb(255, 0, 0));
+        assert_eq!(px(&s, 3, 3), Color::rgb(255, 0, 0));
+        assert_eq!(px(&s, 5, 5), Color::WHITE, "outside the image's rect stays background");
+    }
+
+    #[test]
+    fn fully_transparent_image_fragment_paints_nothing() {
+        // Distinct from the skip-entirely M2 scope call this replaces:
+        // `paint` now always calls `blit`, but a fully transparent source
+        // image (RgbaImage::new's own default: zeroed pixels, alpha 0)
+        // still results in no visible change, via blit's own alpha blend
+        // (put_pixel is a no-op for alpha 0) -- not because `paint` special-
+        // cased it.
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let fragments =
             vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image: RgbaImage::new(2, 2) } }];

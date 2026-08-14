@@ -404,6 +404,39 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M4 · images — THE SCREENSHOT
+
+- `<img>` renders real pixels. Pipeline: `images::collect_images` (new
+  driver-level pre-pass — walk `<img src>`, resolve against the doc's FINAL
+  URL, fetch, decode via P4 `img::decode_bytes`, frame 0) → `HashMap<NodeId,
+  Rc<RgbaImage>>` → `box_tree` threads it into `BoxContent::Replaced { intrinsic,
+  image }` (freeze amendment, commit 1, `Rc` so `LayoutNode` clones don't copy
+  buffers) → `block::emit` emits `FragmentKind::Image` → `raster::paint` →
+  `MemSurface::blit` (frozen stub now real: nearest-neighbor scale, alpha
+  blend, fully clipped). Decode gated to the `--dump-png` path (tty passes an
+  empty map).
+- **THE SCREENSHOT** (`goldens/images.png`, 800×347, orchestrator-VIEWED and
+  blessed, saved to REPORT.md): `fixtures/images.html` renders an "Images"
+  heading + four labeled swatches — red PNG, a photographic JPEG patch, blue
+  GIF, and the animated GIF's yellow frame-0 (frame 1 is green — frame-0 rule
+  confirmed). All four decoders working end to end.
+- Loop: implementer (test-first, 11 commits) → reviewer (Spec ✅; blit + pre-pass
+  total per-image; **1 Critical + 1 Important + minors**) → fix round 1
+  (`14b5702`) → orchestrator re-verify (frozen clean, both goldens byte-identical).
+    - **Critical (fixed):** unbounded aggregate image memory — `MAX_IMAGES=256`
+      capped count and `MAX_DECODE_PIXELS` capped each (~244MiB), but no dedup/
+      budget → 256×244MiB ≈ 61GiB (or same-src ×256) → OOM abort. Fix: dedup
+      decodes by resolved URL (shared `Rc`) + `MAX_TOTAL_IMAGE_BYTES=256MiB`
+      aggregate budget (halt decoding past it → placeholders). The 4th axis
+      this aggregate-bomb pattern has surfaced on (tables/tty/raster/images).
+    - **Important (fixed):** image base was the pre-redirect URL — relative
+      `<img>` 404'd after a redirect. Now uses `Response::final_url`.
+    - Minors: blit truncated-buffer test; repeated-src dedup test.
+- Freeze surface untouched except the one `Replaced.image` field; no deps; no
+  unsafe/async/TLS/JS (blocking std fetch only). 305 lib tests green. See D25.
+- **M4 progress:** foundation ✅ · images ✅ (THE SCREENSHOT). NEXT: `img
+  align=left` floats (inline engine), then the fbdev (rustix) device backend.
+
 ## 2026-08-14 — M4 · pixel foundation — STELE DRAWS
 
 - The renderer produces PIXELS. Embedded a public-domain 8×8 bitmap font

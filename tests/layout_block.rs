@@ -3,6 +3,9 @@
 //! sizing and totality on degenerate input. Hand-built `LayoutNode` trees —
 //! no parsing/cascade involved (that's `layout_integration.rs`).
 
+use std::rc::Rc;
+
+use stele::img::RgbaImage;
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
 use stele::style::computed::{BorderSide, BorderStyle, Dimension, Edges, LengthPercentage, LengthPercentageAuto};
 use stele::style::ComputedStyle;
@@ -38,7 +41,15 @@ fn leaf_container(style: ComputedStyle) -> LayoutNode {
 }
 
 fn replaced(style: ComputedStyle, w: f32, h: f32) -> LayoutNode {
-    LayoutNode { style, content: BoxContent::Replaced { intrinsic: Size { w, h } }, children: Vec::new() }
+    LayoutNode { style, content: BoxContent::Replaced { intrinsic: Size { w, h }, image: None }, children: Vec::new() }
+}
+
+fn replaced_with_image(style: ComputedStyle, w: f32, h: f32, image: Rc<RgbaImage>) -> LayoutNode {
+    LayoutNode {
+        style,
+        content: BoxContent::Replaced { intrinsic: Size { w, h }, image: Some(image) },
+        children: Vec::new(),
+    }
 }
 
 fn box_fragments(fragments: &[Fragment]) -> Vec<&Fragment> {
@@ -141,6 +152,36 @@ fn replaced_node_occupies_intrinsic_size_in_flow() {
     let boxes = box_fragments(&fragments);
     assert_eq!(boxes.len(), 2);
     assert_eq!(boxes[1].rect.size, Size { w: 64.0, h: 48.0 });
+}
+
+#[test]
+fn replaced_node_with_an_image_emits_an_image_fragment_at_its_rect_not_a_placeholder_box() {
+    let mut style = block_style();
+    style.width = Dimension::Auto;
+    style.height = Dimension::Auto;
+    let image = Rc::new(RgbaImage::new(4, 4));
+    let root = container(block_style(), vec![replaced_with_image(style, 64.0, 48.0, image)]);
+    let fragments = layout(&root, Size { w: 640.0, h: 480.0 });
+
+    let image_fragments: Vec<&Fragment> =
+        fragments.iter().filter(|f| matches!(f.kind, FragmentKind::Image { .. })).collect();
+    assert_eq!(
+        image_fragments.len(),
+        1,
+        "a Replaced with Some(image) should emit exactly one Image fragment, not a Box placeholder"
+    );
+    assert_eq!(image_fragments[0].rect.size, Size { w: 64.0, h: 48.0 });
+    match &image_fragments[0].kind {
+        FragmentKind::Image { image: emitted } => {
+            assert_eq!((emitted.width, emitted.height), (4, 4));
+        }
+        _ => unreachable!(),
+    }
+
+    // Only the outer container's own Box fragment -- no placeholder Box for
+    // the now-real-image replaced element.
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 1);
 }
 
 #[test]
