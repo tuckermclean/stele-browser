@@ -656,25 +656,39 @@ mod tests {
 
     #[test]
     fn to_ansi_emits_run_length_optimized_escapes_with_reset_at_line_end() {
-        let red = Color::rgb(255, 0, 0);
+        // packet/tty-color: the fg must survive `resolve_cell_colors` unforced
+        // for this test to actually exercise a run split (a color that fails
+        // the 4.5:1 contrast floor against `navy` would get forced to the
+        // SAME fallback the default-fg cell below also forces to, collapsing
+        // both cells into one run and defeating the point of this test).
+        // Yellow clears contrast against navy comfortably; the default black
+        // fg in cell 2 does not, and gets forced to white -- two distinct
+        // resolved pairs, i.e. still one escape per change.
+        let yellow = Color::rgb(255, 255, 0);
         let navy = Color::rgb(0, 0, 128);
-        let fragments = vec![box_fragment_bg(0.0, 0.0, 24.0, 16.0, navy), text_fragment_fg(0.0, 0.0, 16.0, 16.0, "hi", red)];
+        let fragments = vec![box_fragment_bg(0.0, 0.0, 24.0, 16.0, navy), text_fragment_fg(0.0, 0.0, 16.0, 16.0, "hi", yellow)];
         let grid = render(&fragments, 3);
-        // Row is 3 cells: "h" (red/navy), "i" (red/navy), " " (default fg/navy).
-        // fg changes at cell 2 (BLACK default instead of red); bg stays navy
-        // throughout, so only ONE escape should fire per fg change.
-        let expected = "\x1b[38;2;255;0;0;48;2;0;0;128mhi\x1b[38;2;0;0;0;48;2;0;0;128m \x1b[0m";
+        // Row is 3 cells: "h" (yellow/navy), "i" (yellow/navy), " " (default
+        // fg forced to white/navy, since BLACK-on-navy fails 4.5:1). fg
+        // changes at cell 2, bg stays navy throughout, so only ONE escape
+        // should fire per fg change.
+        let expected = "\x1b[38;2;255;255;0;48;2;0;0;128mhi\x1b[38;2;255;255;255;48;2;0;0;128m \x1b[0m";
         assert_eq!(grid.to_ansi(), expected);
     }
 
     #[test]
     fn to_ansi_uniformly_colored_line_emits_exactly_one_escape() {
+        // packet/tty-color: pure white text on the terminal's own (unset)
+        // canvas is an "extreme" color (L > 0.85) per `resolve_cell_colors`,
+        // so it resolves to the terminal's own default fg/bg (39/49) rather
+        // than a literal white RGB triplet -- still exactly one escape per
+        // uniformly-colored run, just not a literal color passthrough.
         let white = Color::rgb(255, 255, 255);
         let fragments = vec![text_fragment_fg(0.0, 0.0, 32.0, 16.0, "abcd", white)];
         let grid = render(&fragments, 4);
         let ansi = grid.to_ansi();
         assert_eq!(ansi.matches('\x1b').count(), 2, "one color escape + one reset, got: {ansi:?}");
-        assert_eq!(ansi, "\x1b[38;2;255;255;255;49mabcd\x1b[0m");
+        assert_eq!(ansi, "\x1b[39;49mabcd\x1b[0m");
     }
 
     #[test]
@@ -693,6 +707,98 @@ mod tests {
     fn to_ansi_on_an_empty_grid_is_an_empty_string() {
         let grid = render(&[], 10);
         assert_eq!(grid.to_ansi(), "");
+    }
+
+    // ------------------- resolve_cell_colors: B+C readability (packet/tty-color)
+
+    #[test]
+    fn resolve_unstyled_cell_emits_terminal_defaults() {
+        // (BLACK, TRANSPARENT) is the grid's own default `Cell` -- an
+        // uncolored document must render as the terminal's own default
+        // fg/bg (SGR 39/49), NOT literal black-on-whatever-49-means. This is
+        // the exact bug this packet fixes: black-on-black on a dark
+        // terminal is invisible.
+        assert_eq!(resolve_cell_colors(Color::BLACK, Color::TRANSPARENT), (None, None));
+    }
+
+    #[test]
+    fn resolve_unset_fg_on_transparent_bg_emits_terminal_defaults() {
+        assert_eq!(resolve_cell_colors(Color::TRANSPARENT, Color::TRANSPARENT), (None, None));
+    }
+
+    #[test]
+    fn resolve_near_white_text_on_transparent_bg_falls_back_to_terminal_default_fg() {
+        // Near-white (L > 0.85) on the terminal's own (unknown) canvas could
+        // vanish on a light-theme terminal; the terminal's own default fg is
+        // guaranteed visible against its own background.
+        assert_eq!(resolve_cell_colors(Color::WHITE, Color::TRANSPARENT), (None, None));
+    }
+
+    #[test]
+    fn resolve_chromatic_link_color_on_transparent_bg_passes_through() {
+        // A mid-tone/chromatic color (neither near-black nor near-white)
+        // contrasts acceptably against either a dark or a light terminal
+        // background, so it's preserved rather than defaulted away.
+        let link = Color::rgb(0x33, 0x66, 0xcc);
+        assert_eq!(resolve_cell_colors(link, Color::TRANSPARENT), (Some(link), None));
+    }
+
+    #[test]
+    fn resolve_hostile_dark_on_dark_is_forced_to_white_on_the_authors_own_bg() {
+        // The author set a concrete (opaque) bg, so we own this cell's whole
+        // canvas -- #222-on-#111 fails the 4.5:1 contrast floor, so fg is
+        // forced to max-contrast white rather than staying #222.
+        let fg = Color::rgb(0x22, 0x22, 0x22);
+        let bg = Color::rgb(0x11, 0x11, 0x11);
+        assert_eq!(resolve_cell_colors(fg, bg), (Some(Color::WHITE), Some(bg)));
+    }
+
+    #[test]
+    fn resolve_light_card_text_is_forced_to_black_when_the_authors_own_gray_falls_short_of_4_5_to_1() {
+        // #333 on #eee is the packet brief's own illustrative "readable
+        // card" example, described there as adequate contrast. Under the
+        // SPECIFIED (non-gamma-corrected) luminance formula L = (0.2126r +
+        // 0.7152g + 0.0722b)/255, this pair's ratio is:
+        //   L(#333) = 51/255 = 0.2, L(#eee) = 238/255 = 0.93333...
+        //   ratio = (0.93333 + 0.05) / (0.2 + 0.05) = 0.98333 / 0.25 = 3.9333
+        // -- under the 4.5:1 floor, so rule 2's "else" branch fires and
+        // forces max-contrast BLACK rather than letting #333 pass through.
+        // (A gamma-corrected/true-WCAG luminance would put this same pair
+        // around ~10.8:1 instead -- comfortably adequate -- but flipping to
+        // gamma-corrected luminance would ALSO push the chromatic-link case
+        // above (#3366cc, L ~= 0.146 under gamma vs 0.386 under the linear
+        // formula) below the 0.15 "extreme" cutoff, breaking THAT case
+        // instead. The two illustrative examples in the brief are mutually
+        // exclusive under a single luminance model; this implementation
+        // follows the brief's explicit formula literally and reports this
+        // discrepancy back rather than silently picking one to special-case.
+        // Still fully readable either way: forced BLACK-on-#eee, just not
+        // byte-identical to the author's own gray.)
+        let fg = Color::rgb(0x33, 0x33, 0x33);
+        let bg = Color::rgb(0xee, 0xee, 0xee);
+        assert_eq!(resolve_cell_colors(fg, bg), (Some(Color::BLACK), Some(bg)));
+    }
+
+    #[test]
+    fn resolve_unset_fg_on_concrete_dark_bg_defaults_to_white() {
+        let bg = Color::rgb(0x11, 0x11, 0x11);
+        assert_eq!(resolve_cell_colors(Color::TRANSPARENT, bg), (Some(Color::WHITE), Some(bg)));
+    }
+
+    #[test]
+    fn resolve_unset_fg_on_concrete_light_bg_defaults_to_black() {
+        let bg = Color::rgb(0xee, 0xee, 0xee);
+        assert_eq!(resolve_cell_colors(Color::TRANSPARENT, bg), (Some(Color::BLACK), Some(bg)));
+    }
+
+    #[test]
+    fn to_ansi_unstyled_cell_uses_terminal_defaults_not_literal_black() {
+        let fragments = vec![text_fragment(0.0, 0.0, 8.0, 16.0, "x")];
+        let grid = render(&fragments, 1);
+        let ansi = grid.to_ansi();
+        assert!(ansi.contains("39"), "expected default-fg SGR 39, got: {ansi:?}");
+        assert!(ansi.contains("49"), "expected default-bg SGR 49, got: {ansi:?}");
+        assert!(!ansi.contains("38;2;0;0;0"), "must not emit literal black fg for unstyled text: {ansi:?}");
     }
 
     #[test]
