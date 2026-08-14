@@ -258,9 +258,41 @@ pub(crate) fn parse_color(tokens: &[Token]) -> Option<Color> {
 /// all — `apply_property` then counts the whole declaration against
 /// `ignored_declarations`, matching charter C2 (unknown/unhandled parts are
 /// ignored, never guessed at).
-fn parse_background_color_component(_tokens: &[Token]) -> Option<Color> {
-    // P7 tty-color RED: `background` shorthand color extraction not yet
-    // implemented — every value is currently ignored.
+fn parse_background_color_component(tokens: &[Token]) -> Option<Color> {
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+                i += 1;
+                while i < tokens.len() && tokens[i] != Token::RParen {
+                    i += 1;
+                }
+                i += 1; // step past the RParen (or past `len` if unterminated)
+            }
+            Token::Function(name) if name.eq_ignore_ascii_case("rgb") || name.eq_ignore_ascii_case("rgba") => {
+                let start = i;
+                i += 1;
+                while i < tokens.len() && tokens[i] != Token::RParen {
+                    i += 1;
+                }
+                let end = (i + 1).min(tokens.len());
+                if let Some(c) = parse_color(&tokens[start..end]) {
+                    return Some(c);
+                }
+                i = end;
+            }
+            Token::Hash(_) => {
+                if let Some(c) = parse_color(&tokens[i..i + 1]) {
+                    return Some(c);
+                }
+                i += 1;
+            }
+            Token::Ident(name) if named_color(name).is_some() => {
+                return named_color(name);
+            }
+            _ => i += 1,
+        }
+    }
     None
 }
 

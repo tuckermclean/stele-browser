@@ -235,7 +235,29 @@ impl TextGrid {
     /// size (`MAX_GRID_COLS` × `MAX_GRID_ROWS`); every color component is a
     /// `u8`, so there's no non-finite/out-of-range value to guard against.
     pub fn to_ansi(&self) -> String {
-        todo!("P7 tty-color RED: to_ansi not yet implemented")
+        let mut out = String::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let mut last: Option<(Color, Color)> = None;
+            for cell in row {
+                if last != Some((cell.fg, cell.bg)) {
+                    if cell.bg.a == 0 {
+                        out.push_str(&format!("\x1b[38;2;{};{};{};49m", cell.fg.r, cell.fg.g, cell.fg.b));
+                    } else {
+                        out.push_str(&format!(
+                            "\x1b[38;2;{};{};{};48;2;{};{};{}m",
+                            cell.fg.r, cell.fg.g, cell.fg.b, cell.bg.r, cell.bg.g, cell.bg.b
+                        ));
+                    }
+                    last = Some((cell.fg, cell.bg));
+                }
+                out.push(cell.ch);
+            }
+            out.push_str("\x1b[0m");
+        }
+        out
     }
 
     #[cfg(test)]
@@ -301,8 +323,19 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
 /// `render`'s own row-count math use, widened to at least one cell so a
 /// fragment with a real (non-zero, finite) size always covers something
 /// even if its rounded span would otherwise collapse to empty.
-fn fill_box(_rows: &mut [Vec<Cell>], _fragment: &Fragment, _bg: Color, _cols: usize) {
-    // P7 tty-color RED: v0-era no-op stub — Box still paints nothing.
+fn fill_box(rows: &mut [Vec<Cell>], fragment: &Fragment, bg: Color, cols: usize) {
+    if bg.a == 0 {
+        return;
+    }
+    let row_start = cell_index(fragment.rect.origin.y, CELL_H);
+    let row_end = cell_index(fragment.rect.origin.y + nonneg(fragment.rect.size.h), CELL_H).max(row_start + 1);
+    let col_start = cell_index(fragment.rect.origin.x, CELL_W).min(cols);
+    let col_end = cell_index(fragment.rect.origin.x + nonneg(fragment.rect.size.w), CELL_W).min(cols).max(col_start);
+    for row in rows.iter_mut().skip(row_start).take(row_end - row_start) {
+        for cell in row.iter_mut().skip(col_start).take(col_end - col_start) {
+            cell.bg = bg;
+        }
+    }
 }
 
 /// Write `text`'s characters left-to-right into `rows`, starting at the cell
@@ -341,8 +374,9 @@ fn write_marker(rows: &mut [Vec<Cell>], fragment: &Fragment, text: &str, fg: Opt
             break;
         }
         rows[row][col].ch = ch;
-        // P7 tty-color RED: `fg` intentionally not yet applied.
-        let _ = fg;
+        if let Some(c) = fg {
+            rows[row][col].fg = c;
+        }
         col += 1;
     }
 }
