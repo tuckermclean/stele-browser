@@ -21,6 +21,7 @@
 pub mod backend;
 pub mod dom;
 pub mod fetch;
+pub mod form;
 pub mod img;
 pub mod layout;
 pub mod style;
