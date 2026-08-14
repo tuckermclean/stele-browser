@@ -141,6 +141,13 @@ pub enum InlineContent {
 pub struct InlineRun {
     pub content: InlineContent,
     pub style: ComputedStyle,
+    /// Interactive provenance (P7 interactive-provenance freeze amendment):
+    /// carried straight from the source `LayoutNode::interactive` this run
+    /// was flattened from (`block::translate_any`/`block::flatten_inline`),
+    /// so `block::emit` can copy it onto every `Fragment` this run produces
+    /// — including each line a wrapped link's text splits across, since a
+    /// wrapped run still points back at the same `runs[run_index]` entry.
+    pub interactive: Option<crate::layout::Interactive>,
 }
 
 /// A slice of one source [`InlineRun`] that landed on one line, positioned
@@ -727,25 +734,29 @@ mod tests {
     }
 
     fn run(text: &str) -> InlineRun {
-        InlineRun { content: InlineContent::Text(text.to_string()), style: ComputedStyle::default() }
+        InlineRun { content: InlineContent::Text(text.to_string()), style: ComputedStyle::default(), interactive: None }
     }
 
     fn run_with(text: &str, mut f: impl FnMut(&mut ComputedStyle)) -> InlineRun {
         let mut style = ComputedStyle::default();
         f(&mut style);
-        InlineRun { content: InlineContent::Text(text.to_string()), style }
+        InlineRun { content: InlineContent::Text(text.to_string()), style, interactive: None }
     }
 
     /// A non-floated replaced atom (M4 part 2): sits inline like a word.
     fn atom(w: f32, h: f32) -> InlineRun {
-        InlineRun { content: InlineContent::Replaced { intrinsic: Size { w, h }, image: None }, style: ComputedStyle::default() }
+        InlineRun {
+            content: InlineContent::Replaced { intrinsic: Size { w, h }, image: None },
+            style: ComputedStyle::default(),
+            interactive: None,
+        }
     }
 
     /// A floated replaced atom (M4 part 3): pulled out of line flow.
     fn float_atom(w: f32, h: f32, side: CssFloat) -> InlineRun {
         let mut style = ComputedStyle::default();
         style.float = side;
-        InlineRun { content: InlineContent::Replaced { intrinsic: Size { w, h }, image: None }, style }
+        InlineRun { content: InlineContent::Replaced { intrinsic: Size { w, h }, image: None }, style, interactive: None }
     }
 
     #[test]

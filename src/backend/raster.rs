@@ -231,7 +231,7 @@ mod tests {
     fn box_fragment_fills_its_background_color() {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = box_style(Color::rgb(10, 20, 30), BorderSide::default());
-        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 4.0, 4.0), kind: FragmentKind::Box { style } }];
+        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 4.0, 4.0), kind: FragmentKind::Box { style }, interactive: None }];
         paint(&mut s, &fragments);
         assert_eq!(px(&s, 3, 3), Color::rgb(10, 20, 30));
         assert_eq!(px(&s, 0, 0), Color::WHITE, "outside the box stays background");
@@ -241,7 +241,7 @@ mod tests {
     fn transparent_background_paints_nothing() {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = box_style(Color::TRANSPARENT, BorderSide::default());
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style } }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
         paint(&mut s, &fragments);
         assert_eq!(px(&s, 5, 5), Color::WHITE);
     }
@@ -251,7 +251,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 2.0, style: BorderStyle::Solid, color: Color::rgb(255, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
-        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 6.0, 6.0), kind: FragmentKind::Box { style } }];
+        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None }];
         paint(&mut s, &fragments);
         // top edge
         assert_eq!(px(&s, 4, 2), Color::rgb(255, 0, 0));
@@ -270,7 +270,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 3.0, style: BorderStyle::None, color: Color::rgb(255, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style } }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
         paint(&mut s, &fragments);
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
@@ -285,7 +285,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 3.0, style: BorderStyle::Solid, color: Color::rgba(255, 0, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style } }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
         paint(&mut s, &fragments);
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
@@ -299,6 +299,7 @@ mod tests {
         let fragments = vec![Fragment {
             rect: rect(4.0, 0.0, 8.0, 16.0),
             kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style },
+            interactive: None,
         }];
         paint(&mut s, &fragments);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
@@ -310,7 +311,11 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = ComputedStyle::default();
         let fragments =
-            vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Text { text: String::new(), baseline: 8.0, style } }];
+            vec![Fragment {
+                rect: rect(0.0, 0.0, 10.0, 10.0),
+                kind: FragmentKind::Text { text: String::new(), baseline: 8.0, style },
+                interactive: None,
+            }];
         paint(&mut s, &fragments);
         for i in (0..s.bytes().len()).step_by(4) {
             assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
@@ -324,7 +329,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let mut image = RgbaImage::new(2, 2);
         image.pixels = [255u8, 0, 0, 255].repeat(4); // solid opaque red, 2x2
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image } }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image }, interactive: None }];
         paint(&mut s, &fragments);
         assert_eq!(px(&s, 0, 0), Color::rgb(255, 0, 0));
         assert_eq!(px(&s, 3, 3), Color::rgb(255, 0, 0));
@@ -341,7 +346,11 @@ mod tests {
         // cased it.
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let fragments =
-            vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image: RgbaImage::new(2, 2) } }];
+            vec![Fragment {
+                rect: rect(0.0, 0.0, 4.0, 4.0),
+                kind: FragmentKind::Image { image: RgbaImage::new(2, 2) },
+                interactive: None,
+            }];
         paint(&mut s, &fragments); // must not panic
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
@@ -354,8 +363,8 @@ mod tests {
         let first = box_style(Color::rgb(255, 0, 0), BorderSide::default());
         let second = box_style(Color::rgb(0, 255, 0), BorderSide::default());
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: first } },
-            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: second } },
+            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: first }, interactive: None },
+            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: second }, interactive: None },
         ];
         paint(&mut s, &fragments);
         assert_eq!(px(&s, 5, 5), Color::rgb(0, 255, 0));
@@ -378,9 +387,13 @@ mod tests {
             let style = box_style(Color::rgb(1, 2, 3), border);
             let text_style = ComputedStyle { font_size: f32::NAN, ..ComputedStyle::default() };
             let fragments = vec![
-                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Box { style } },
-                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Text { text: "z".to_string(), baseline: f32::NAN, style: text_style } },
-                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Image { image: RgbaImage::new(1, 1) } },
+                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Box { style }, interactive: None },
+                Fragment {
+                    rect: rect(x, y, w, h),
+                    kind: FragmentKind::Text { text: "z".to_string(), baseline: f32::NAN, style: text_style },
+                    interactive: None,
+                },
+                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Image { image: RgbaImage::new(1, 1) }, interactive: None },
             ];
             paint(&mut s, &fragments); // must not panic
         }

@@ -41,6 +41,42 @@ pub struct LayoutNode {
     pub style: ComputedStyle,
     pub content: BoxContent,
     pub children: Vec<LayoutNode>,
+    /// Interactive provenance (P7 interactive-provenance freeze amendment):
+    /// `Some` when this box is part of an `<a href>` link or a form control,
+    /// `None` for ordinary content. `box_tree` populates this (propagating a
+    /// link's `Interactive::Link` onto every descendant box under the `<a>`,
+    /// and setting `Interactive::FormControl` on a synthesized control's own
+    /// box + its placeholder label); `layout::block::emit` copies it onto
+    /// every `Fragment` produced for this node (including every line a
+    /// wrapped link's text splits across). This packet only lands and
+    /// populates the carrier — no interactive behavior (click/focus/submit)
+    /// exists yet, and painters (`backend::tty`/`backend::raster`) ignore it
+    /// entirely, so no rendering changes.
+    pub interactive: Option<Interactive>,
+}
+
+/// Interactive provenance carried from the DOM into the rendered fragment
+/// stream (P7 interactive-provenance freeze amendment) — enough for a future
+/// interactive shell to highlight a focusable region, follow a link, or
+/// submit a form, without re-deriving any of it from the DOM at paint time.
+/// Small by design (`Box<str>`, not `String` — these are read-only once
+/// built, never mutated in place): a fragment stream can be large, and this
+/// rides on every fragment under an interactive element.
+#[derive(Debug, Clone)]
+pub enum Interactive {
+    /// An `<a href>` link. `href` is the raw (unresolved) attribute value —
+    /// resolving it against the document's base URL is a future interactive
+    /// shell's job, not this carrier's.
+    Link { href: Box<str> },
+    /// A form control (`<input>`, `<button>`, `<textarea>`, `<select>`).
+    /// `kind` is the control's effective type (`"text"`, `"checkbox"`,
+    /// `"submit"`, `"select"`, `"button"`, ...); `name` is its `name`
+    /// attribute, when present (needed to contribute a `name=value` pair on
+    /// submit — see `form::serialize_submit`'s "successful controls"
+    /// algorithm); `form_action` is the enclosing `<form>`'s raw `action`
+    /// attribute, when the control sits inside one (unresolved — same
+    /// resolve-at-submit-time deferral as `Link::href`).
+    FormControl { kind: Box<str>, name: Option<Box<str>>, form_action: Option<Box<str>> },
 }
 
 /// What a box holds.
@@ -80,6 +116,11 @@ pub enum BoxContent {
 pub struct Fragment {
     pub rect: Rect,
     pub kind: FragmentKind,
+    /// See [`LayoutNode::interactive`]'s doc comment — copied verbatim from
+    /// the source `LayoutNode` by `layout::block::emit`. `None` for ordinary
+    /// content; painters ignore it (no rendering change from this field's
+    /// presence).
+    pub interactive: Option<Interactive>,
 }
 
 pub enum FragmentKind {

@@ -23,10 +23,12 @@ fn build_layout_tree(dom: &Dom, styles: &[ComputedStyle], id: NodeId) -> Option<
         return None;
     }
     match dom.node(id) {
-        Node::Text(text) => Some(LayoutNode { style, content: BoxContent::Text(text.clone()), children: Vec::new() }),
+        Node::Text(text) => {
+            Some(LayoutNode { style, content: BoxContent::Text(text.clone()), children: Vec::new(), interactive: None })
+        }
         Node::Element(el) => {
             let children = el.children.iter().filter_map(|&c| build_layout_tree(dom, styles, c)).collect();
-            Some(LayoutNode { style, content: BoxContent::Container, children })
+            Some(LayoutNode { style, content: BoxContent::Container, children, interactive: None })
         }
     }
 }

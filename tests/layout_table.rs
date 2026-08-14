@@ -16,7 +16,12 @@ fn styled(display: Display) -> ComputedStyle {
 }
 
 fn text_node(s: &str) -> LayoutNode {
-    LayoutNode { style: ComputedStyle::default(), content: BoxContent::Text(s.to_string()), children: Vec::new() }
+    LayoutNode {
+        style: ComputedStyle::default(),
+        content: BoxContent::Text(s.to_string()),
+        children: Vec::new(),
+        interactive: None,
+    }
 }
 
 fn cell(colspan: u16, rowspan: u16, text: &str) -> LayoutNode {
@@ -24,19 +29,20 @@ fn cell(colspan: u16, rowspan: u16, text: &str) -> LayoutNode {
         style: styled(Display::TableCell),
         content: BoxContent::TableCell { colspan, rowspan },
         children: vec![text_node(text)],
+        interactive: None,
     }
 }
 
 fn row(cells: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::TableRow), content: BoxContent::Container, children: cells }
+    LayoutNode { style: styled(Display::TableRow), content: BoxContent::Container, children: cells, interactive: None }
 }
 
 fn tbody(rows: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::TableRowGroup), content: BoxContent::Container, children: rows }
+    LayoutNode { style: styled(Display::TableRowGroup), content: BoxContent::Container, children: rows, interactive: None }
 }
 
 fn table(children: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children }
+    LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children, interactive: None }
 }
 
 /// Wrap a table in a plain block container, matching a real document's
@@ -52,7 +58,12 @@ fn table(children: Vec<LayoutNode>) -> LayoutNode {
 /// purpose) and would otherwise make geometry assertions about the table's
 /// OWN box ambiguous with the (wider) stretched viewport box.
 fn root_with(table_node: LayoutNode) -> LayoutNode {
-    LayoutNode { style: styled(Display::Block), content: BoxContent::Container, children: vec![table_node] }
+    LayoutNode {
+        style: styled(Display::Block),
+        content: BoxContent::Container,
+        children: vec![table_node],
+        interactive: None,
+    }
 }
 
 fn box_fragments(fragments: &[Fragment]) -> Vec<&Fragment> {
@@ -240,6 +251,7 @@ fn deeply_nested_tables_do_not_abort() {
             style: styled(Display::TableCell),
             content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
             children: vec![inner],
+            interactive: None,
         };
         inner = table(vec![row(vec![wrapping_cell])]);
     }
@@ -257,6 +269,7 @@ fn very_deeply_nested_tables_do_not_abort() {
             style: styled(Display::TableCell),
             content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
             children: vec![inner],
+            interactive: None,
         };
         inner = table(vec![row(vec![wrapping_cell])]);
     }
