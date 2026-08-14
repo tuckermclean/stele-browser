@@ -3,6 +3,25 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M3 — Freeze amendment: table cell spans
+
+### D20 — `BoxContent::TableCell` carries colspan/rowspan into LayoutNode
+`colspan`/`rowspan` are HTML attributes on `<td>`/`<th>`, but `box_tree`
+produces `LayoutNode`s that carry only `ComputedStyle` + `BoxContent` +
+children — attributes are dropped. The table column solver (P8) needs the
+spans to build the grid, and (unlike inline content) the layout engine can't
+recover them. **Options:** (a) add a field to `LayoutNode` (breaks every
+literal constructor across the tests); (b) add a `BoxContent` variant carrying
+the spans. **Choice: (b)** — `BoxContent::TableCell { colspan: u16, rowspan:
+u16 }`, additive, touched only by the code that builds/consumes cells (existing
+`Container`/`Text`/`Replaced` literals unaffected). `box_tree` populates it for
+`display: table-cell` nodes, defaulting missing/unparseable/zero to 1 and
+clamping to HTML's limits (colspan ≤ 1000, rowspan ≤ 65534) so downstream holds
+only sane values. Until the table-layout packet, a `TableCell` translates
+exactly like a `Container` (stacked block) in all three `layout::block`
+matches. Revisit: never — this is the stable carrier the table-layout packet
+reads.
+
 ## M3 — Freeze amendment: CSS table Display values
 
 ### D19 — table display values land as a marker, block-fallback until integration

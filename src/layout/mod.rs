@@ -50,6 +50,20 @@ pub enum BoxContent {
     Text(String),
     /// A replaced element with an intrinsic pixel size (img, form control).
     Replaced { intrinsic: Size },
+    /// A table cell (`<td>`/`<th>`, `display: table-cell`). Otherwise just
+    /// like `Container` — its children live in `LayoutNode.children` exactly
+    /// as a `Container`'s do — but it additionally carries the `colspan`/
+    /// `rowspan` HTML attributes the table column solver (P8) needs to build
+    /// the grid. `box_tree` has already parsed, defaulted (missing/
+    /// unparseable/zero → 1), and clamped these (`colspan` <= 1000, `rowspan`
+    /// <= 65534, per the HTML spec's own limits) — this carrier holds
+    /// already-sane values, no further validation needed downstream.
+    ///
+    /// This packet only lands the carrier: until the table-layout packet
+    /// wires `solve_table`, a `TableCell` still translates through
+    /// `layout::block` exactly like a `Container` (a plain stacked block) —
+    /// see `layout::block::translate_any`.
+    TableCell { colspan: u16, rowspan: u16 },
 }
 
 /// The output of layout: paint-ordered, positioned fragments the `Surface`

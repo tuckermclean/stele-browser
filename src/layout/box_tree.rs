@@ -80,7 +80,13 @@ fn build_node(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: usize) -> 
                     .filter_map(|&child| build_node(dom, styles, child, depth + 1))
                     .collect()
             };
-            Some(LayoutNode { style, content: BoxContent::Container, children })
+            let content = if style.display == Display::TableCell {
+                let (colspan, rowspan) = cell_spans(el);
+                BoxContent::TableCell { colspan, rowspan }
+            } else {
+                BoxContent::Container
+            };
+            Some(LayoutNode { style, content, children })
         }
     }
 }
@@ -108,6 +114,40 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
         Some(v)
     } else {
         None
+    }
+}
+
+/// Max `colspan`/`rowspan` a table cell is allowed to carry, per the HTML
+/// spec's own limits on these attributes. Clamping here — rather than
+/// trusting the wire — keeps the eventual column solver (P8) from being
+/// handed an attacker-controlled grid width/height to iterate over.
+const MAX_COLSPAN: u16 = 1000;
+const MAX_ROWSPAN: u16 = 65534;
+
+/// Parse a `<td>`/`<th>`'s `colspan`/`rowspan` attributes. Missing,
+/// unparseable, or zero values default to `1` (HTML's own default and floor
+/// for both attributes — a span of 0 has no visual meaning); out-of-range
+/// values clamp to [`MAX_COLSPAN`]/[`MAX_ROWSPAN`] rather than being rejected
+/// outright, so a hostile document degrades to a large-but-bounded cell
+/// instead of losing the cell's content entirely.
+fn cell_spans(el: &Element) -> (u16, u16) {
+    (parse_span(el.attrs.get("colspan"), MAX_COLSPAN), parse_span(el.attrs.get("rowspan"), MAX_ROWSPAN))
+}
+
+fn parse_span(raw: Option<&str>, max: u16) -> u16 {
+    // Parse as u32 first so an absurdly large literal (more digits than a
+    // u16 holds) parses successfully and then clamps, rather than failing
+    // to parse and silently falling back to the same default (1) a
+    // deliberately malformed value would — clamping and defaulting are
+    // different outcomes worth keeping distinct even though both are safe.
+    let v: u32 = match raw.and_then(|s| s.trim().parse().ok()) {
+        Some(v) => v,
+        None => return 1,
+    };
+    if v == 0 {
+        1
+    } else {
+        v.min(max as u32) as u16
     }
 }
 
@@ -274,6 +314,97 @@ mod tests {
         let root = build_box_tree(&d, &styles).expect("bare <html> root is not display:none");
         assert!(root.children.is_empty());
         assert!(matches!(root.content, BoxContent::Container));
+    }
+
+    #[test]
+    fn table_cell_maps_to_box_content_table_cell_with_spans() {
+        let d = dom::parser::parse(
+            r#"<table><tr><td colspan="2" rowspan="3">x</td><td>y</td></tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+
+        fn find_cells<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
+            if matches!(node.content, BoxContent::TableCell { .. }) {
+                out.push(node);
+            }
+            for c in &node.children {
+                find_cells(c, out);
+            }
+        }
+        let mut cells = Vec::new();
+        find_cells(&root, &mut cells);
+        assert_eq!(cells.len(), 2, "expected two table cells");
+
+        match cells[0].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 2);
+                assert_eq!(rowspan, 3);
+            }
+            _ => unreachable!(),
+        }
+        // The cell's children (its text content) are still built underneath
+        // it, exactly as a Container's would be.
+        assert!(find_text(cells[0], "x").is_some());
+
+        match cells[1].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1, "missing colspan defaults to 1");
+                assert_eq!(rowspan, 1, "missing rowspan defaults to 1");
+            }
+            _ => unreachable!(),
+        }
+        assert!(find_text(cells[1], "y").is_some());
+    }
+
+    #[test]
+    fn table_cell_span_parsing_defaults_and_clamps() {
+        let d = dom::parser::parse(
+            r#"<table><tr>
+                <td colspan="0" rowspan="0">a</td>
+                <td colspan="abc" rowspan="xyz">b</td>
+                <td colspan="99999" rowspan="99999">c</td>
+            </tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+
+        fn find_cells<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
+            if matches!(node.content, BoxContent::TableCell { .. }) {
+                out.push(node);
+            }
+            for c in &node.children {
+                find_cells(c, out);
+            }
+        }
+        let mut cells = Vec::new();
+        find_cells(&root, &mut cells);
+        assert_eq!(cells.len(), 3);
+
+        // colspan="0"/rowspan="0" -> min 1, never 0.
+        match cells[0].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1);
+                assert_eq!(rowspan, 1);
+            }
+            _ => unreachable!(),
+        }
+        // Unparseable -> default 1.
+        match cells[1].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1);
+                assert_eq!(rowspan, 1);
+            }
+            _ => unreachable!(),
+        }
+        // Absurdly large -> clamped (colspan <= 1000, rowspan <= 65534).
+        match cells[2].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1000);
+                assert_eq!(rowspan, 65534);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
