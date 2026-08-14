@@ -57,7 +57,7 @@ use crate::text::Metrics;
 /// orders over the values in play). 1,000,000px is far beyond any real
 /// document's content while leaving enormous headroom over anything a real
 /// fixture needs.
-const MAX_DIM: f32 = 1_000_000.0;
+pub(crate) const MAX_DIM: f32 = 1_000_000.0;
 
 /// The maximum number of floated replaced atoms one [`layout_runs`] call
 /// will place. Distinct from any depth/count cap upstream (`box_tree`'s
@@ -79,7 +79,7 @@ const MAX_FLOATS: usize = 256;
 /// negative value to `0.0`. The one totality seam every intrinsic size,
 /// glyph measurement, and derived accumulator in this module passes through
 /// before it can influence line-breaking or float placement.
-fn clamp_dim(v: f32) -> f32 {
+pub(crate) fn clamp_dim(v: f32) -> f32 {
     if v.is_finite() {
         v.clamp(0.0, MAX_DIM)
     } else {
@@ -1017,5 +1017,29 @@ mod tests {
         let out = layout_runs(&runs, 100.0, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].runs[0].text, "hi");
+    }
+
+    /// Code review coverage gap: `available_width == 0` combined with a
+    /// float present — the classic "float starves the line to nothing and
+    /// the engine spins trying to lay out the rest" hang in real engines.
+    /// `layout_runs` has no while/retry construct (every loop here is a
+    /// bounded `for` over an already-finite slice — clusters, words, or
+    /// `MAX_FLOATS`-capped floats), so this is provably not a hang by
+    /// construction, but it's cheap insurance against a future regression
+    /// that reintroduces a retry loop.
+    #[test]
+    fn zero_width_container_with_a_float_present_returns_promptly() {
+        let runs = [float_atom(10.0, 10.0, CssFloat::Left), run("aa bb cc")];
+        let out = layout_runs(&runs, 0.0, &FixedMetrics);
+        // The float itself still gets placed (clamped to the zero-width
+        // container per `place_floats`'s own clamp), and every word still
+        // lands somewhere (first-item-on-line overflow rule) rather than
+        // being lost or looping.
+        assert_eq!(out.floats.len(), 1);
+        assert_eq!(out.floats[0].rect.size.w, 0.0);
+        assert_eq!(out.lines.len(), 3, "each word overflows its own zero-width line, none dropped");
+        for line in &out.lines {
+            assert!(line.rect.size.w.is_finite());
+        }
     }
 }

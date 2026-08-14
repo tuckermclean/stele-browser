@@ -175,6 +175,31 @@ fn float_wider_than_container_clamps_and_does_not_panic() {
     assert!(!texts(&fragments).is_empty(), "text must still render below/after the oversized float");
 }
 
+/// Defense-in-depth (code review): a non-floated inline atom's PAINTED
+/// height must be clamped the same way its width already is (`inline::
+/// clamp_dim`/`MAX_DIM`), not just floored non-negative. Before the fix,
+/// `block::emit`'s `InlineContent::Replaced` arm ran `intrinsic.h` through
+/// `finite_nonneg` (floor only, no upper cap) while `inline::layout_runs`
+/// itself already clamps the same value via `clamp_dim` for line-height
+/// purposes — a hostile `<img height=999999999999>` (non-floated) produced
+/// a `Fragment` with `rect.size.h` around 1e12, inert today only because
+/// `MemSurface::blit` happens to clip to surface bounds. Relying on that
+/// downstream consumer as the sole guard is fragile, so this asserts the
+/// fragment itself is bounded regardless of what paints it.
+#[test]
+fn non_floated_inline_img_with_huge_height_clamps_the_painted_rect() {
+    let html = r#"<p>before <img src="x.png" width="10" height="999999999999"> after</p>"#;
+    let fragments = render(html, 800.0);
+    let images = image_or_placeholder_rects(&fragments);
+    assert_eq!(images.len(), 1);
+    assert!(
+        images[0].size.h <= 1_000_000.0,
+        "non-floated atom height must clamp to MAX_DIM like its width does, got {}",
+        images[0].size.h
+    );
+    assert!(images[0].size.h.is_finite());
+}
+
 /// Silence an "unused function" warning for `text_fragments` while keeping
 /// it available for future assertions in this file (mirrors the pattern in
 /// other packet test files that keep small shared helpers around).

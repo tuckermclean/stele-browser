@@ -960,9 +960,20 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                         // descent := 0" convention), painted as a real
                         // image when decoded or a placeholder `Box`
                         // otherwise — same fallback rule `Built::Replaced`
-                        // already uses below.
+                        // already uses below. Height goes through
+                        // `inline::clamp_dim` (not the plain `finite_nonneg`
+                        // used elsewhere in this file), matching the SAME
+                        // clamp `inline::word_metrics` already applies to
+                        // this atom's `intrinsic.h` when it sizes the line
+                        // box — code review defense-in-depth: `finite_nonneg`
+                        // floors negative/non-finite to zero but has no
+                        // upper bound, so a hostile `<img height=1e13>`
+                        // would otherwise reach `Fragment::rect` uncapped
+                        // (harmless today only because `MemSurface::blit`
+                        // happens to clip to surface bounds — a downstream
+                        // consumer shouldn't be the only guard).
                         InlineContent::Replaced { intrinsic, image } => {
-                            let h = finite_nonneg(intrinsic.h);
+                            let h = inline::clamp_dim(intrinsic.h);
                             let atom_origin =
                                 Point { x: run_origin.x, y: origin.y + line.rect.origin.y + (line.baseline - h) };
                             let rect = Rect { origin: atom_origin, size: Size { w: run.width, h } };
