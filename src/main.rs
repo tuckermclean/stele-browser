@@ -826,8 +826,13 @@ fn run_browser(source: &str) {
         return;
     }
 
-    let (cols, rows) = terminal_size();
-    let content_rows = rows.saturating_sub(1).max(1);
+    // packet/shell-forms: `cols`/`rows`/`content_rows` are now `mut` --
+    // re-queried on every trip around the `'outer` loop below (see that
+    // loop's own resize-handling comment) so the shell re-flows when the
+    // terminal is resized, instead of staying pinned to whatever size it
+    // happened to be at launch.
+    let (mut cols, mut rows) = terminal_size();
+    let mut content_rows = rows.saturating_sub(1).max(1);
 
     let mut history = browser::History::new(resolve_url(source));
     let mut page = load_page(history.current(), cols);
@@ -855,6 +860,33 @@ fn run_browser(source: &str) {
     let mut gpm_read_buf = [0u8; 256];
 
     'outer: loop {
+        // packet/shell-forms: honor a terminal resize. Re-queried every
+        // iteration (cheap: one `ioctl`) rather than once at startup;
+        // rebuilding is skipped entirely unless the size actually changed
+        // (`!=` below), so an unchanged terminal costs nothing extra here.
+        // NOTE (documented limitation, not a bug): this loop has no
+        // `SIGWINCH` handler (the packet brief's own constraint — no
+        // signal handler, no `unsafe`), so the blocking `poll` below won't
+        // WAKE UP purely because the window resized; the new size is
+        // picked up the next time around this loop, which in practice
+        // means "on the user's next keystroke/mouse event after resizing"
+        // rather than instantaneously. Manually verified (this whole loop
+        // is the un-CI-testable thin half of the packet split -- see the
+        // module's own section doc comment); the pure clamp this triggers,
+        // `browser::clamp_scroll`, IS unit-tested in `browser.rs`.
+        let (new_cols, new_rows) = terminal_size();
+        if (new_cols, new_rows) != (cols, rows) {
+            cols = new_cols;
+            rows = new_rows;
+            content_rows = rows.saturating_sub(1).max(1);
+            page = load_page(history.current(), cols);
+            let mut next_view = browser::ViewState { cols, rows: content_rows, ..view };
+            if next_view.focus.is_some_and(|idx| idx >= page.focusables.len()) {
+                next_view.focus = None;
+            }
+            view = browser::clamp_scroll(next_view, &page);
+        }
+
         let frame = browser::render_frame(&page, &view);
         print!("\x1b[H\x1b[2J{frame}");
         let _ = std::io::stdout().flush();

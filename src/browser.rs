@@ -36,6 +36,8 @@
 //! (`Enter` degrades to `Command::None`), it never associates with the WRONG
 //! form/control.
 
+use std::collections::BTreeMap;
+
 use crate::backend::tty::{self, Cell, TextGrid};
 use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
@@ -332,10 +334,15 @@ fn resolve_control_nodes(dom: &Dom, styles: &[ComputedStyle], focusables: &mut [
 // =========================================================================
 
 /// The interactive shell's mutable view over a [`Page`]: scroll position,
-/// which focusable (if any) is focused, and the terminal geometry it was
-/// last computed for. `Copy` — small, and every action below returns a new
-/// value rather than mutating in place, keeping `apply_key` a pure function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// which focusable (if any) is focused, the terminal geometry it was last
+/// computed for, and (packet/shell-forms) every text `<input>`'s edit
+/// buffer touched so far. No longer `Copy` (a `BTreeMap`/`String` can't be)
+/// — every action below still returns a NEW value rather than mutating a
+/// caller's copy in place (see e.g. `insert_char`'s `mut view: ViewState`
+/// parameter, which takes OWNERSHIP and mutates its own local binding, not
+/// anything the caller can still observe), keeping `apply_key` pure in the
+/// sense that matters: deterministic, no hidden aliasing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ViewState {
     pub scroll_row: usize,
     pub focus: Option<usize>,
@@ -344,6 +351,19 @@ pub struct ViewState {
     /// CONTENT rows visible at once — terminal height MINUS the one status
     /// line `render_frame` always reserves at the bottom (see that fn).
     pub rows: usize,
+    /// Per-focusable edit buffers for text-input `FormControl`s, keyed by
+    /// focusable index. Lazily seeded (from the control's DOM default
+    /// `value`, via `control_node`) the first time that focusable is
+    /// focused — see [`focus_on`] — and otherwise left completely alone by
+    /// every non-text-input focusable (a link, a submit button, ...) never
+    /// gets an entry. Persists across focus changes: tabbing from field A
+    /// to field B and back leaves A's typed text exactly as it was.
+    pub fields: BTreeMap<usize, String>,
+    /// Cursor position (a CHARACTER offset, not a byte offset — see
+    /// `char_byte_offset` — in `0..=buffer.chars().count()`) within
+    /// whichever field `focus` currently names. Meaningless, and never
+    /// consulted, when `focus` isn't a text-input focusable.
+    pub cursor: usize,
 }
 
 impl ViewState {
@@ -354,7 +374,11 @@ impl ViewState {
     /// opens with a tall banner before its first link), the very first
     /// focusable in the document (brief: "focus = the first focusable
     /// that's visible (or the first overall)"). A page with no focusables
-    /// at all starts with `focus: None`.
+    /// at all starts with `focus: None`. When the initial focus lands on a
+    /// text input straight away (no `Tab` needed), its buffer is seeded
+    /// from the DOM default `value` too — see [`focus_on`] — so a page
+    /// that opens with a pre-filled search box behaves the same whether the
+    /// user starts typing immediately or tabs away and back first.
     pub fn initial(page: &Page, cols: usize, rows: usize) -> ViewState {
         let rows = rows.max(1);
         let focus = if page.focusables.is_empty() {
@@ -362,13 +386,25 @@ impl ViewState {
         } else {
             Some(page.focusables.iter().position(|f| f.rect_cells.1 < rows).unwrap_or(0))
         };
-        ViewState { scroll_row: 0, focus, cols, rows }
+        let view = ViewState { scroll_row: 0, cols, rows, ..Default::default() };
+        match focus {
+            Some(idx) => focus_on(view, page, idx),
+            None => view,
+        }
     }
 
     fn max_scroll(&self, page: &Page) -> usize {
         page.grid_rows().saturating_sub(self.rows)
     }
 }
+
+/// Cap on a single field's edit buffer, in characters — user-driven growth
+/// (typing) is otherwise unbounded, and `panic = "abort"` totality means
+/// this module can't rely on an allocator failure ever being catchable.
+/// 4096 is generous for any real form field while still being a small,
+/// fixed bound. `Key::Char` past the cap is silently dropped (documented:
+/// "ignore input beyond it" — the packet brief's own call), not an error.
+const MAX_FIELD_LEN: usize = 4096;
 
 /// Bytes -> [`Key`], pure. Never produced for a byte sequence that doesn't
 /// (yet, or ever) resolve to a recognized key — see [`KeyParser`].
@@ -843,15 +879,35 @@ pub enum Command {
 /// any `Command` the thin I/O loop should carry out. Total over any
 /// `ViewState`/`Page` (including an empty page with zero focusables, or a
 /// `view.focus` index stale for `page` — defensive `.get()`, never a panic).
+///
+/// packet/shell-forms: when `view.focus` names a text-input focusable, EVERY
+/// key is first offered to [`apply_key_editing`] instead — printable
+/// characters type into that field's buffer rather than firing the global
+/// `q`/`r` shortcuts, Backspace edits the buffer rather than navigating
+/// Back, and so on (see that function's own doc comment for the full
+/// remap). Focus on anything else (a link, a submit button, no focus at
+/// all) falls through to the ORIGINAL key handling below, unchanged.
 pub fn apply_key(key: Key, view: ViewState, page: &Page) -> (ViewState, Command) {
+    if let Some(idx) = editing_focus(&view, page) {
+        return apply_key_editing(key, view, page, idx);
+    }
     match key {
         Key::Up => (scroll_by(view, page, -1), Command::None),
         Key::Down => (scroll_by(view, page, 1), Command::None),
-        Key::PageUp => (scroll_by(view, page, -(view.rows as i64)), Command::None),
-        Key::PageDown => (scroll_by(view, page, view.rows as i64), Command::None),
+        Key::PageUp => {
+            let rows = view.rows as i64;
+            (scroll_by(view, page, -rows), Command::None)
+        }
+        Key::PageDown => {
+            let rows = view.rows as i64;
+            (scroll_by(view, page, rows), Command::None)
+        }
         Key::Tab => (move_focus(view, page, 1), Command::None),
         Key::ShiftTab => (move_focus(view, page, -1), Command::None),
-        Key::Enter => (view, enter_command(view, page)),
+        Key::Enter => {
+            let cmd = enter_command(&view, page);
+            (view, cmd)
+        }
         Key::Backspace => (view, Command::Back),
         Key::F5 => (view, Command::Reload),
         Key::CtrlC => (view, Command::Quit),
@@ -861,10 +917,63 @@ pub fn apply_key(key: Key, view: ViewState, page: &Page) -> (ViewState, Command)
     }
 }
 
+/// `view.focus`, but only when it names a text-input `FormControl` — the
+/// signal `apply_key` uses to switch into edit-mode key handling. `None`
+/// for no focus, a stale/out-of-range focus index, a link, or any
+/// non-text-input control kind (submit/checkbox/radio/select/...).
+fn editing_focus(view: &ViewState, page: &Page) -> Option<usize> {
+    let idx = view.focus?;
+    if is_text_input_focusable(page, idx) {
+        Some(idx)
+    } else {
+        None
+    }
+}
+
+fn is_text_input_focusable(page: &Page, idx: usize) -> bool {
+    match page.focusables.get(idx).map(|f| &f.interactive) {
+        Some(Interactive::FormControl { kind, .. }) => is_text_input_kind(kind),
+        _ => false,
+    }
+}
+
+/// True for a text-like `<input>` control kind — an edit-in-place candidate
+/// for the interactive shell: `text`/`search`/`email`/`url`/`tel`/
+/// `password`/`number`, and any unrecognized or absent type (HTML5's own
+/// "unknown input type falls back to text" rule — `control_kind_of`'s own
+/// `"input"` arm already defaults a missing `type` attribute to `"text"`,
+/// so an empty string here only happens for a synthetic/test `Interactive`,
+/// not a real document; a genuinely unrecognized type string, e.g.
+/// `"date"`, reaches here as itself and is still treated as text-like,
+/// matching real browsers). False for the value-less activator kinds
+/// (`submit`/`button`/`reset`/`image`), the toggle kinds (`checkbox`/
+/// `radio`), the two kinds with no visible text buffer at all (`hidden`/
+/// `file`), and `select`/`textarea` (their own tag name, per
+/// `control_kind_of`'s "any other control tag its own name" arm) — a
+/// documented v0 scope limit, not an oversight: this packet teaches the
+/// shell to edit plain `<input>` text fields only.
+pub fn is_text_input_kind(kind: &str) -> bool {
+    !matches!(kind, "submit" | "button" | "reset" | "checkbox" | "radio" | "hidden" | "image" | "file" | "select" | "textarea")
+}
+
 fn scroll_by(view: ViewState, page: &Page, delta: i64) -> ViewState {
     let max = view.max_scroll(page) as i64;
     let next = (view.scroll_row as i64 + delta).clamp(0, max.max(0));
     ViewState { scroll_row: next as usize, ..view }
+}
+
+/// Clamp `view.scroll_row` back into `[0, max_scroll]` for `page`'s CURRENT
+/// height — the one bit of "reflow after the terminal resized" logic pure
+/// and small enough to live here, unit-tested, rather than in `main.rs`'s
+/// thin (un-CI-testable) resize glue; see that module's `run_browser` loop.
+/// An already-in-range `scroll_row` is returned unchanged.
+pub fn clamp_scroll(view: ViewState, page: &Page) -> ViewState {
+    let max = view.max_scroll(page);
+    if view.scroll_row <= max {
+        view
+    } else {
+        ViewState { scroll_row: max, ..view }
+    }
 }
 
 /// Tab (`dir: 1`) / Shift-Tab (`dir: -1`): move `focus` to the next/previous
@@ -880,9 +989,151 @@ fn move_focus(view: ViewState, page: &Page, dir: i64) -> ViewState {
         None => if dir > 0 { 0 } else { n - 1 },
         Some(f) => (f as i64 + dir).rem_euclid(n),
     } as usize;
-    let mut next = ViewState { focus: Some(next_idx), ..view };
+    let mut next = focus_on(view, page, next_idx);
     reveal(&mut next, page, next_idx);
     next
+}
+
+/// Set `view.focus` to `idx` and, when `idx` names a text-input focusable,
+/// lazily seed its edit buffer — see [`ViewState::fields`]'s doc comment —
+/// the first time it's focused: if `view.fields` doesn't already have an
+/// entry for `idx`, insert one from the control's DOM default `value` (via
+/// `control_node`; empty string when there's no resolvable DOM node at
+/// all), then place the cursor at the END of whatever text is there
+/// (mirroring real browsers/terminal editors: tabbing into a pre-filled
+/// field puts the cursor after the existing text, ready to keep typing).
+/// Re-focusing an ALREADY-seeded field leaves its buffer untouched (only
+/// the cursor moves to the end) — never re-reads the DOM default over
+/// whatever the user has since typed. Every other focusable kind (link,
+/// submit button, ...) just moves `focus`; `fields`/`cursor` are untouched.
+fn focus_on(view: ViewState, page: &Page, idx: usize) -> ViewState {
+    let mut next = ViewState { focus: Some(idx), ..view };
+    if is_text_input_focusable(page, idx) {
+        let len = next.fields.entry(idx).or_insert_with(|| dom_default_value(page, idx)).chars().count();
+        next.cursor = len;
+    }
+    next
+}
+
+/// The DOM default `value` attribute for focusable `idx`'s control — empty
+/// string when it has none, isn't resolved to a real DOM node at all (see
+/// `resolve_control_nodes`'s own best-effort-failure doc comment), or isn't
+/// an element for some other reason. This is what a text field's edit
+/// buffer is seeded FROM (see [`focus_on`]) the first time it's focused —
+/// never consulted again afterward; once `view.fields` has an entry, THAT
+/// is the value both rendering and submission use, not this.
+fn dom_default_value(page: &Page, idx: usize) -> String {
+    let Some(f) = page.focusables.get(idx) else { return String::new() };
+    let Some(cn) = f.control_node else { return String::new() };
+    match dom_util::node_checked(&page.dom, cn.control_id) {
+        Some(Node::Element(el)) => el.attrs.get("value").unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Edit-mode key handling for the text-input focusable `idx` (already
+/// confirmed by `apply_key`'s [`editing_focus`] check). Printable
+/// characters TYPE into the buffer instead of triggering the global
+/// `q`=Quit/`r`=Reload shortcuts; Backspace edits the buffer instead of
+/// navigating Back; Left/Right move the cursor within the buffer. Enter
+/// SUBMITS the owning form (`submit_owning_form`) rather than being a
+/// no-op. Tab/Shift-Tab still move focus (and so may seed a DIFFERENT
+/// field's buffer, via `move_focus`'s own `focus_on` call); scrolling
+/// (Up/Down/PageUp/PageDown) and F5/Ctrl-C stay exactly as they are outside
+/// edit mode — F5/Ctrl-C in particular are NOT printable text, so there's
+/// no typing/global-shortcut ambiguity for either of them.
+fn apply_key_editing(key: Key, view: ViewState, page: &Page, idx: usize) -> (ViewState, Command) {
+    match key {
+        Key::Char(c) => (insert_char(view, idx, c), Command::None),
+        Key::Backspace => (backspace(view, idx), Command::None),
+        Key::Left => (move_cursor(view, idx, -1), Command::None),
+        Key::Right => (move_cursor(view, idx, 1), Command::None),
+        Key::Enter => {
+            let cmd = submit_owning_form(&view, page, idx);
+            (view, cmd)
+        }
+        Key::Tab => (move_focus(view, page, 1), Command::None),
+        Key::ShiftTab => (move_focus(view, page, -1), Command::None),
+        Key::Up => (scroll_by(view, page, -1), Command::None),
+        Key::Down => (scroll_by(view, page, 1), Command::None),
+        Key::PageUp => {
+            let rows = view.rows as i64;
+            (scroll_by(view, page, -rows), Command::None)
+        }
+        Key::PageDown => {
+            let rows = view.rows as i64;
+            (scroll_by(view, page, rows), Command::None)
+        }
+        Key::F5 => (view, Command::Reload),
+        Key::CtrlC => (view, Command::Quit),
+    }
+}
+
+/// Byte offset in `s` of character index `char_idx` — `String::insert`/
+/// `replace_range` both need a BYTE offset, but `view.cursor` is a
+/// character offset (so a multi-byte scalar counts as one cursor step, not
+/// several) — total: `char_idx` past the end (or `s` being pure ASCII,
+/// where char/byte offsets coincide) safely falls back to `s.len()`.
+fn char_byte_offset(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(s.len())
+}
+
+/// Insert `c` into field `idx`'s buffer at the cursor, then advance the
+/// cursor by one. A no-op on the buffer's CONTENT once it's already at
+/// [`MAX_FIELD_LEN`] characters (documented cap against unbounded
+/// user-driven growth — see that constant's own doc comment) — the cursor
+/// itself is still clamped into range either way, never left stale.
+fn insert_char(mut view: ViewState, idx: usize, c: char) -> ViewState {
+    let buf = view.fields.entry(idx).or_default();
+    let len = buf.chars().count();
+    let cursor = view.cursor.min(len);
+    if len < MAX_FIELD_LEN {
+        let byte_pos = char_byte_offset(buf, cursor);
+        buf.insert(byte_pos, c);
+        view.cursor = cursor + 1;
+    } else {
+        view.cursor = cursor;
+    }
+    view
+}
+
+/// Delete the character immediately before the cursor in field `idx`'s
+/// buffer (a no-op at `cursor == 0` — there's nothing before it), then move
+/// the cursor back by one. Total even if `idx` has no buffer yet (shouldn't
+/// happen — `editing_focus` only routes here once a text input is
+/// focused, and focusing always seeds a buffer via `focus_on` — but a
+/// direct/synthetic `ViewState` with a stale `cursor` and no matching
+/// `fields` entry still can't underflow or panic here).
+fn backspace(mut view: ViewState, idx: usize) -> ViewState {
+    if view.cursor == 0 {
+        return view;
+    }
+    let Some(buf) = view.fields.get_mut(&idx) else {
+        view.cursor = 0;
+        return view;
+    };
+    let len = buf.chars().count();
+    let at = view.cursor.min(len);
+    if at == 0 {
+        view.cursor = 0;
+        return view;
+    }
+    let start = char_byte_offset(buf, at - 1);
+    let end = char_byte_offset(buf, at);
+    buf.replace_range(start..end, "");
+    view.cursor = at - 1;
+    view
+}
+
+/// Move the cursor within field `idx`'s buffer by `delta` characters,
+/// clamped to `[0, buffer.chars().count()]` — total for any `delta`
+/// (including one that would under/overflow a bare `usize` add/subtract)
+/// via `i64` arithmetic before clamping back down.
+fn move_cursor(mut view: ViewState, idx: usize, delta: i64) -> ViewState {
+    let len = view.fields.get(&idx).map(|b| b.chars().count()).unwrap_or(0);
+    let next = (view.cursor as i64 + delta).clamp(0, len as i64);
+    view.cursor = next as usize;
+    view
 }
 
 /// Adjust `view.scroll_row` (in place) so focusable `idx`'s rect is fully
@@ -910,27 +1161,81 @@ fn is_submit_kind(kind: &str) -> bool {
     matches!(kind, "submit" | "image")
 }
 
-fn enter_command(view: ViewState, page: &Page) -> Command {
+/// Activate whatever `view.focus` currently names — the shared path both
+/// `apply_key`'s non-editing `Enter` arm AND every mouse click
+/// (`mouse_click`) use. A text-input `FormControl` deliberately does
+/// nothing here (`!is_submit_kind` catches it, same as checkbox/radio/
+/// select/textarea): a bare "activate" gesture on a text field should only
+/// ever FOCUS it, never submit — real browsers never submit a form just
+/// because you clicked into a search box. Submitting a text field's owning
+/// form is a SEPARATE, more specific gesture (`submit_owning_form`, wired
+/// up only for Enter WHILE EDITING — see `apply_key_editing`), not this
+/// one.
+fn enter_command(view: &ViewState, page: &Page) -> Command {
     let Some(idx) = view.focus else { return Command::None };
     let Some(f) = page.focusables.get(idx) else { return Command::None };
     match &f.interactive {
         Interactive::Link { href } => Command::Navigate(page.url.resolve(href)),
         Interactive::FormControl { kind, .. } => {
             if !is_submit_kind(kind) {
-                // Editing (text/checkbox/radio/select/...) is a later
-                // packet — see the module doc comment's own scope note.
                 return Command::None;
             }
             match f.control_node {
-                Some(ControlNode { control_id, form_id: Some(form_id) }) => {
-                    Command::Submit(form::serialize_submit(&page.dom, form_id, &page.url, Some(control_id)))
-                }
+                Some(ControlNode { control_id, form_id: Some(form_id) }) => submit_form_with_overrides(view, page, form_id, control_id),
                 // No enclosing form (invalid markup) or resolution failed
                 // (see `resolve_control_nodes`'s doc comment): nothing
                 // sensible to submit -- degrade to a no-op, never a panic.
                 _ => Command::None,
             }
         }
+    }
+}
+
+/// Every text field's current buffer, translated from focusable index to
+/// the real DOM `NodeId` `form::serialize_submit_with_overrides` needs —
+/// the interactive shell's one hook into that module's "successful
+/// controls" walk (see its own doc comment). Deliberately unfiltered by
+/// WHICH form a field belongs to: an override for a control the walk never
+/// visits (a field that lives in a different `<form>`) is simply never
+/// looked up, not a correctness hazard — see
+/// `serialize_submit_with_overrides`'s own doc comment.
+fn field_overrides(view: &ViewState, page: &Page) -> Vec<(NodeId, String)> {
+    view.fields.iter().filter_map(|(&idx, buf)| page.focusables.get(idx).and_then(|f| f.control_node).map(|cn| (cn.control_id, buf.clone()))).collect()
+}
+
+/// Build the `Command::Submit` for activating submit control `control_id`
+/// (an `<input type=submit|image>` or `<button type=submit>`) belonging to
+/// `form_id` — same as the ORIGINAL (pre-packet/shell-forms) submit path,
+/// except every text field's typed value (`field_overrides`) now overrides
+/// its DOM default, so a form with several inputs submits what the user
+/// actually typed into ALL of them, not just whichever one happened to be
+/// focused.
+fn submit_form_with_overrides(view: &ViewState, page: &Page, form_id: NodeId, control_id: NodeId) -> Command {
+    let overrides = field_overrides(view, page);
+    Command::Submit(form::serialize_submit_with_overrides(&page.dom, form_id, &page.url, Some(control_id), &overrides))
+}
+
+/// Enter, pressed while EDITING text-input focusable `idx` (see
+/// `apply_key_editing`): submit ITS owning form. `activator: None` — no
+/// submit/image control in the form contributes its own name=value, since
+/// no button was actually clicked (a v0 simplification: real browsers
+/// implicitly activate the form's first default button on an Enter-to-
+/// submit gesture from inside a text field; this browser has no notion of
+/// "the default button" wired up yet — documented, not a silent gap).
+/// `field_overrides` still supplies every OTHER text field's typed value
+/// (this one included — `focus_on` already seeded `idx`'s own buffer
+/// before any typing into it could happen).
+fn submit_owning_form(view: &ViewState, page: &Page, idx: usize) -> Command {
+    let Some(f) = page.focusables.get(idx) else { return Command::None };
+    match f.control_node {
+        Some(ControlNode { form_id: Some(form_id), .. }) => {
+            let overrides = field_overrides(view, page);
+            Command::Submit(form::serialize_submit_with_overrides(&page.dom, form_id, &page.url, None, &overrides))
+        }
+        // No enclosing form, or resolution failed: nothing to submit --
+        // degrade to a no-op, never a panic (same posture as
+        // `enter_command`'s own control_node match).
+        _ => Command::None,
     }
 }
 
@@ -976,8 +1281,8 @@ fn mouse_click(col: usize, row: usize, view: ViewState, page: &Page) -> (ViewSta
     let page_row = view.scroll_row.saturating_add(row);
     match page.hit_test(col, page_row) {
         Some(idx) => {
-            let next = ViewState { focus: Some(idx), ..view };
-            let cmd = enter_command(next, page);
+            let next = focus_on(view, page, idx);
+            let cmd = enter_command(&next, page);
             (next, cmd)
         }
         None => (view, Command::None),
@@ -1052,7 +1357,63 @@ pub fn render_frame(page: &Page, view: &ViewState) -> String {
             highlight(&mut window, f.rect_cells, view.scroll_row, view.rows);
         }
     }
+    draw_text_fields(&mut window, page, view);
     format!("{}\n{}", window.to_ansi(), status_line(page, view.cols))
+}
+
+/// Overlay every KNOWN edit buffer's current text onto `window` — called
+/// AFTER [`highlight`], so a focused field's overlaid characters still sit
+/// on top of the existing yellow-on-black focus highlight (this function
+/// only ever touches `Cell::ch`, never `fg`/`bg`, except at the one cursor
+/// cell — see below). Without this, a typed-into field would keep showing
+/// `page.grid`'s ORIGINAL static `[value]`/`[__________]` placeholder,
+/// baked in at load time by `tty::render`/`layout::box_tree` — stale the
+/// moment the user types anything. A field the user tabbed away from (no
+/// longer `view.focus`, but still present in `view.fields`) still shows
+/// its typed text; only the CURRENTLY focused field also gets a cursor
+/// marker (a single reverse-video cell — swapping `fg`/`bg` again on top of
+/// the focus highlight's own swap reads as a visibly distinct third color
+/// combination, not a no-op).
+fn draw_text_fields(window: &mut TextGrid, page: &Page, view: &ViewState) {
+    let cols = window.cols();
+    for (&idx, buf) in &view.fields {
+        let Some(f) = page.focusables.get(idx) else { continue };
+        let (col, row, w, _h) = f.rect_cells;
+        if w == 0 || row < view.scroll_row || row >= view.scroll_row + view.rows {
+            continue;
+        }
+        let wr = row - view.scroll_row;
+        let chars: Vec<char> = buf.chars().collect();
+        let is_focused = view.focus == Some(idx);
+        let cursor = view.cursor.min(chars.len());
+        let start = field_scroll_start(chars.len(), w, cursor);
+        for i in 0..w {
+            let c = col + i;
+            if c >= cols {
+                break;
+            }
+            let mut cell: Cell = window.get(wr, c);
+            cell.ch = chars.get(start + i).copied().unwrap_or(' ');
+            if is_focused && start + i == cursor {
+                std::mem::swap(&mut cell.fg, &mut cell.bg); // cursor marker
+            }
+            window.set(wr, c, cell);
+        }
+    }
+}
+
+/// The scroll offset (a char index into the buffer) so a `w`-cell-wide
+/// window always contains `cursor` — truncating/horizontally scrolling a
+/// buffer longer than its field, per the packet brief. Total for any
+/// combination, including `w == 0` (the caller skips drawing entirely in
+/// that case, but this still returns `0` rather than dividing by anything)
+/// and a `buf_len`/`cursor` shorter than `w` (no scrolling needed at all).
+fn field_scroll_start(buf_len: usize, w: usize, cursor: usize) -> usize {
+    if w == 0 || buf_len < w {
+        return 0;
+    }
+    let max_start = buf_len - w;
+    if cursor >= w { cursor + 1 - w } else { 0 }.min(max_start)
 }
 
 fn highlight(window: &mut TextGrid, rect: (usize, usize, usize, usize), scroll_row: usize, rows: usize) {
@@ -1168,7 +1529,7 @@ mod tests {
         let html: String = (0..100).map(|i| format!("<p>line {i}</p>")).collect();
         let page = build_page(&html, 40, "http://example.com/");
         let max = page.grid_rows().saturating_sub(5);
-        let mut view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5 };
+        let mut view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5, ..Default::default() };
         for _ in 0..1000 {
             let (next, _) = apply_key(Key::Down, view, &page);
             view = next;
@@ -1182,8 +1543,8 @@ mod tests {
     fn up_and_page_up_clamp_at_zero() {
         let html = "<p>hi</p>";
         let page = build_page(html, 40, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5 };
-        let (after_up, _) = apply_key(Key::Up, view, &page);
+        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5, ..Default::default() };
+        let (after_up, _) = apply_key(Key::Up, view.clone(), &page);
         assert_eq!(after_up.scroll_row, 0);
         let (after_pgup, _) = apply_key(Key::PageUp, view, &page);
         assert_eq!(after_pgup.scroll_row, 0);
@@ -1195,7 +1556,7 @@ mod tests {
     fn tab_cycles_focusables_in_order_and_wraps() {
         let html = r#"<a href="/a">A</a><a href="/b">B</a><a href="/c">C</a>"#;
         let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
         let (v1, _) = apply_key(Key::Tab, view, &page);
         assert_eq!(v1.focus, Some(0));
         let (v2, _) = apply_key(Key::Tab, v1, &page);
@@ -1210,7 +1571,7 @@ mod tests {
     fn shift_tab_reverses_and_wraps_from_none_to_the_last() {
         let html = r#"<a href="/a">A</a><a href="/b">B</a><a href="/c">C</a>"#;
         let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
         let (v1, _) = apply_key(Key::ShiftTab, view, &page);
         assert_eq!(v1.focus, Some(2));
         let (v2, _) = apply_key(Key::ShiftTab, v1, &page);
@@ -1221,7 +1582,7 @@ mod tests {
     fn tab_onto_an_offscreen_focusable_scrolls_to_reveal_it() {
         let html: String = (0..200).map(|i| format!("<p>line {i}</p>")).collect::<String>() + r#"<a href="/x">link</a>"#;
         let page = build_page(&html, 40, "http://example.com/");
-        let mut view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5 };
+        let mut view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5, ..Default::default() };
         let (next, _) = apply_key(Key::Tab, view, &page);
         view = next;
         let idx = view.focus.expect("a focusable exists");
@@ -1236,7 +1597,7 @@ mod tests {
     fn enter_on_a_link_navigates_to_the_resolved_href() {
         let html = r#"<a href="/next">Next</a>"#;
         let page = build_page(html, 80, "http://example.com/dir/page.html");
-        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24, ..Default::default() };
         let (_, cmd) = apply_key(Key::Enter, view, &page);
         match cmd {
             Command::Navigate(url) => assert_eq!(url.as_str(), "http://example.com/next"),
@@ -1252,7 +1613,7 @@ mod tests {
         </form>"#;
         let page = build_page(html, 80, "http://example.com/");
         assert_eq!(page.focusables.len(), 2);
-        let view = ViewState { scroll_row: 0, focus: Some(1), cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: Some(1), cols: 80, rows: 24, ..Default::default() };
         let (_, cmd) = apply_key(Key::Enter, view, &page);
         match cmd {
             Command::Submit(req) => {
@@ -1266,18 +1627,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn enter_on_a_plain_text_input_is_a_no_op() {
-        let html = r#"<form action="/search" method="get">
-            <input type="text" name="q">
-            <input type="submit" name="go" value="Go">
-        </form>"#;
-        let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24 };
-        let (next, cmd) = apply_key(Key::Enter, view, &page);
-        assert!(matches!(cmd, Command::None));
-        assert_eq!(next, view);
-    }
+    // packet/shell-forms note: the test that used to live here
+    // (`enter_on_a_plain_text_input_is_a_no_op`) pinned the PRE-this-packet
+    // behavior — Enter on a focused text input was a documented no-op
+    // ("editing is a later packet"). That's exactly what this packet
+    // implements, so the scenario now has a different, intentional outcome
+    // — see `enter_on_a_focused_text_input_now_submits_its_form_instead_of_a_no_op`
+    // in the "editable text inputs" section below, which replaces it with
+    // the new contract (and explains why in its own comment).
 
     // ------------------------------------------------------------- history
 
@@ -1466,7 +1823,7 @@ mod tests {
     fn frame_render_windows_the_viewport_at_the_scroll_offset() {
         let html: String = (0..10).map(|i| format!("<p>line{i}</p>")).collect();
         let page = build_page(&html, 20, "http://example.com/");
-        let view = ViewState { scroll_row: 2, focus: None, cols: 20, rows: 3 };
+        let view = ViewState { scroll_row: 2, focus: None, cols: 20, rows: 3, ..Default::default() };
         let frame = render_frame(&page, &view);
         // 3 content lines + 1 status line = 4 lines.
         assert_eq!(frame.lines().count(), 4);
@@ -1476,8 +1833,8 @@ mod tests {
     fn frame_render_highlights_the_focused_cells_differently_from_unfocused() {
         let html = r#"<a href="/x">link</a>"#;
         let page = build_page(html, 20, "http://example.com/");
-        let unfocused = ViewState { scroll_row: 0, focus: None, cols: 20, rows: 2 };
-        let focused = ViewState { scroll_row: 0, focus: Some(0), cols: 20, rows: 2 };
+        let unfocused = ViewState { scroll_row: 0, focus: None, cols: 20, rows: 2, ..Default::default() };
+        let focused = ViewState { scroll_row: 0, focus: Some(0), cols: 20, rows: 2, ..Default::default() };
         let frame_unfocused = render_frame(&page, &unfocused);
         let frame_focused = render_frame(&page, &focused);
         assert_ne!(frame_unfocused, frame_focused);
@@ -1489,7 +1846,7 @@ mod tests {
     #[test]
     fn frame_render_status_line_carries_the_url() {
         let page = build_page("<p>hi</p>", 40, "http://example.com/page.html");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 3 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 3, ..Default::default() };
         let frame = render_frame(&page, &view);
         let status = frame.lines().last().unwrap();
         assert!(status.contains("http://example.com/page.html"), "{status:?}");
@@ -1500,11 +1857,11 @@ mod tests {
     #[test]
     fn empty_page_tab_and_enter_are_no_ops_scroll_stays_bounded() {
         let page = build_page("", 40, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5 };
-        let (v1, c1) = apply_key(Key::Tab, view, &page);
+        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5, ..Default::default() };
+        let (v1, c1) = apply_key(Key::Tab, view.clone(), &page);
         assert_eq!(v1.focus, None);
         assert!(matches!(c1, Command::None));
-        let (v2, c2) = apply_key(Key::Enter, view, &page);
+        let (v2, c2) = apply_key(Key::Enter, view.clone(), &page);
         assert_eq!(v2, view);
         assert!(matches!(c2, Command::None));
         let (v3, _) = apply_key(Key::Down, view, &page);
@@ -1516,7 +1873,7 @@ mod tests {
         let html: String = (0..3000).map(|i| format!(r#"<a href="/{i}">l{i}</a>"#)).collect();
         let page = build_page(&html, 80, "http://example.com/");
         assert!(page.focusables.len() > 1000);
-        let mut view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let mut view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
         for _ in 0..50 {
             let (next, _) = apply_key(Key::Tab, view, &page);
             view = next;
@@ -1529,8 +1886,8 @@ mod tests {
     fn stale_focus_index_past_the_end_of_focusables_does_not_panic() {
         let html = r#"<a href="/a">A</a>"#;
         let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: Some(999), cols: 80, rows: 24 };
-        let (_, cmd) = apply_key(Key::Enter, view, &page);
+        let view = ViewState { scroll_row: 0, focus: Some(999), cols: 80, rows: 24, ..Default::default() };
+        let (_, cmd) = apply_key(Key::Enter, view.clone(), &page);
         assert!(matches!(cmd, Command::None));
         let _ = render_frame(&page, &view); // must not panic either
     }
@@ -1630,7 +1987,7 @@ mod tests {
     fn apply_mouse_wheel_scrolls_a_few_lines_and_clamps() {
         let html: String = (0..100).map(|i| format!("<p>line {i}</p>")).collect();
         let page = build_page(&html, 40, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 40, rows: 5, ..Default::default() };
         let (next, cmd) = apply_mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::WheelDown }, view, &page);
         assert!(matches!(cmd, Command::None));
         assert_eq!(next.scroll_row, WHEEL_SCROLL_LINES as usize);
@@ -1641,7 +1998,7 @@ mod tests {
         assert_eq!(still_zero.scroll_row, 0, "must clamp at zero, not underflow");
 
         let max = page.grid_rows().saturating_sub(5);
-        let at_bottom = ViewState { scroll_row: max, focus: None, cols: 40, rows: 5 };
+        let at_bottom = ViewState { scroll_row: max, focus: None, cols: 40, rows: 5, ..Default::default() };
         let (after, _) = apply_mouse(MouseEvent { col: 0, row: 0, kind: MouseKind::WheelDown }, at_bottom, &page);
         assert_eq!(after.scroll_row, max, "must clamp at max, not overshoot");
     }
@@ -1650,7 +2007,7 @@ mod tests {
     fn apply_mouse_click_on_a_link_focuses_and_navigates() {
         let html = r#"<a href="/next">Next</a>"#;
         let page = build_page(html, 80, "http://example.com/dir/page.html");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
         let (c, r, _, _) = page.focusables[0].rect_cells;
         let ev = MouseEvent { col: c, row: r, kind: MouseKind::Press(MouseButton::Left) };
         let (next, cmd) = apply_mouse(ev, view, &page);
@@ -1673,7 +2030,7 @@ mod tests {
         // coordinate is in VIEWPORT space and must be translated through
         // `scroll_row` to the right PAGE row before hit-testing.
         let scroll_row = r.saturating_sub(2);
-        let view = ViewState { scroll_row, focus: None, cols: 80, rows: 24 };
+        let view = ViewState { scroll_row, focus: None, cols: 80, rows: 24, ..Default::default() };
         let viewport_row = r - scroll_row;
         let ev = MouseEvent { col: c, row: viewport_row, kind: MouseKind::Press(MouseButton::Left) };
         let (next, cmd) = apply_mouse(ev, view, &page);
@@ -1688,9 +2045,9 @@ mod tests {
     fn apply_mouse_click_on_empty_space_is_a_no_op() {
         let html = r#"<a href="/x">link</a>"#;
         let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: Some(0), cols: 80, rows: 24, ..Default::default() };
         let ev = MouseEvent { col: 70, row: 20, kind: MouseKind::Press(MouseButton::Left) };
-        let (next, cmd) = apply_mouse(ev, view, &page);
+        let (next, cmd) = apply_mouse(ev, view.clone(), &page);
         assert_eq!(next, view, "no focus/scroll change on a miss");
         assert!(matches!(cmd, Command::None));
     }
@@ -1699,11 +2056,11 @@ mod tests {
     fn apply_mouse_click_on_the_status_line_row_is_ignored() {
         let html = r#"<a href="/x">link</a>"#;
         let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 5 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 5, ..Default::default() };
         // `view.rows` is the content-row count; row == view.rows is the
         // status line render_frame draws just below it.
         let ev = MouseEvent { col: 0, row: 5, kind: MouseKind::Press(MouseButton::Left) };
-        let (next, cmd) = apply_mouse(ev, view, &page);
+        let (next, cmd) = apply_mouse(ev, view.clone(), &page);
         assert_eq!(next, view);
         assert!(matches!(cmd, Command::None));
     }
@@ -1711,9 +2068,9 @@ mod tests {
     #[test]
     fn apply_mouse_off_grid_coordinates_never_panic() {
         let page = build_page(r#"<a href="/x">l</a>"#, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
         let ev = MouseEvent { col: usize::MAX, row: usize::MAX, kind: MouseKind::Press(MouseButton::Left) };
-        let (_, cmd) = apply_mouse(ev, view, &page);
+        let (_, cmd) = apply_mouse(ev, view.clone(), &page);
         assert!(matches!(cmd, Command::None));
 
         // A huge column but an in-viewport row: hit_test must still just
@@ -1727,7 +2084,7 @@ mod tests {
     fn apply_mouse_right_and_middle_press_and_release_and_move_are_no_ops() {
         let html = r#"<a href="/x">link</a>"#;
         let page = build_page(html, 80, "http://example.com/");
-        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24 };
+        let view = ViewState { scroll_row: 0, focus: None, cols: 80, rows: 24, ..Default::default() };
         let (c, r, _, _) = page.focusables[0].rect_cells;
         for kind in [
             MouseKind::Press(MouseButton::Right),
