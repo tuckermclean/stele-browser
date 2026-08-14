@@ -426,9 +426,58 @@ fn is_inline_ish(n: &LayoutNode) -> bool {
         // reaching here (an orphan `<td>`, see `translate_any`) is routed
         // exactly like a plain Container, matching pre-table-layout-packet
         // behavior.
-        BoxContent::Container | BoxContent::TableCell { .. } => n.style.display == Display::Inline,
+        //
+        // An inline-display `Container`/`TableCell` is only inline-ish if it
+        // has no block-level descendant (block-in-inline resolution, CSS2.1
+        // §9.2.1.1 / CSS Display Level 3 §2.7) — see
+        // `contains_block_descendant`'s doc comment for why: without this,
+        // an inline wrapper (`<font>`, `<b>`, ...) around a block list
+        // (`<ol>`/`<li>`) gets folded whole into the inline formatting
+        // context by `flatten_inline`, silently dropping the list items'
+        // block-level line breaks (confirmed real-world breakage:
+        // http://68k.news/ wraps every news list in
+        // `<font size="4"><ol><li>...`).
+        BoxContent::Container | BoxContent::TableCell { .. } => {
+            n.style.display == Display::Inline && !contains_block_descendant(n, 0)
+        }
         BoxContent::Replaced { .. } => true,
     }
+}
+
+/// True if `n` (typically an inline-display container) contains a
+/// block-level box somewhere in its inline subtree — in which case CSS's
+/// "block-in-inline" resolution (CSS2.1 §9.2.1.1 / CSS Display Level 3 §2.7)
+/// means `n` can't be folded whole into one inline formatting context leaf:
+/// `<font>` wrapping an `<ol>` must still produce real block list-item
+/// boxes (each on its own line), not run every item together on one line
+/// the way folding `<font>`'s entire subtree into `flatten_inline` would.
+///
+/// A `Text` or `Replaced` child is an inline ATOM, never block-level —
+/// `<em><img></em>` must stay foldable into one inline run (the D14 fix
+/// this helper must not regress: see `flatten_inline`'s doc comment). Only
+/// a `Container`/`TableCell` child whose own `style.display` is anything
+/// other than `Inline` (`Block`, `Flex`, `Table`, `TableRow`, `TableCell`,
+/// `TableRowGroup`, ...) counts as block-level itself; an inline
+/// `Container` child is not itself block-level but IS recursed into — a
+/// block box can be nested arbitrarily deep inside a chain of inline
+/// wrappers (`<font><b><ol>...`).
+///
+/// `depth` mirrors `flatten_inline`/`translate_any`'s own cap (see
+/// [`DEPTH_CAP`]) — this is independent recursion (it never goes through
+/// `translate_any`), so it needs its own bound against a hostile/
+/// pathologically deep inline nest; past the cap it degrades gracefully
+/// (returns `false`, i.e. "not blockified") rather than risking a stack
+/// overflow.
+fn contains_block_descendant(n: &LayoutNode, depth: usize) -> bool {
+    if depth >= DEPTH_CAP {
+        return false;
+    }
+    n.children.iter().any(|child| match &child.content {
+        BoxContent::Container | BoxContent::TableCell { .. } => {
+            child.style.display != Display::Inline || contains_block_descendant(child, depth + 1)
+        }
+        BoxContent::Text(_) | BoxContent::Replaced { .. } => false,
+    })
 }
 
 /// Flatten a node's inline-level content (itself, if it's `Text` or

@@ -478,6 +478,32 @@ else
     sed 's/^/    /' /tmp/stele_a3m.diff
   fi
 
+  # A3n -- the block-in-inline packet's own tty golden: fixtures/
+  # block-in-inline.html, exercising CSS "block-in-inline" resolution -- a
+  # block-level `<ol>`/`<li>` nested inside an inline-display `<font>`
+  # wrapper must still render as separate stacked block boxes (each list
+  # item on its own line, with its own marker), not get folded whole into
+  # the inline formatting context and run together on one line. Confirmed
+  # real-world breakage: http://68k.news/ wraps every news list in
+  # `<font size="4"><ol><li>...`. Same blessing discipline as every other
+  # tty golden here.
+  GOLDEN_TTY_BLOCK_IN_INLINE="goldens/block-in-inline.txt"
+  FIXTURE_BLOCK_IN_INLINE="fixtures/block-in-inline.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3n: host binary still not found at $HOST_BIN"
+  elif ! out_block_in_inline="$("$HOST_BIN" --headless --dump-text "$FIXTURE_BLOCK_IN_INLINE" 2>/tmp/stele_a3n.err)"; then
+    bad "A3n: stele --headless --dump-text crashed on $FIXTURE_BLOCK_IN_INLINE"
+    sed 's/^/    /' /tmp/stele_a3n.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_block_in_inline" > "$GOLDEN_TTY_BLOCK_IN_INLINE"
+    pass "A3n: blessed block-in-inline tty golden -> $GOLDEN_TTY_BLOCK_IN_INLINE (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_BLOCK_IN_INLINE" <(printf '%s\n' "$out_block_in_inline") >/tmp/stele_a3n.diff 2>&1; then
+    pass "A3n: tty dump of $FIXTURE_BLOCK_IN_INLINE matches golden"
+  else
+    bad "A3n: tty dump of $FIXTURE_BLOCK_IN_INLINE differs from $GOLDEN_TTY_BLOCK_IN_INLINE"
+    sed 's/^/    /' /tmp/stele_a3n.diff
+  fi
+
   # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline

@@ -450,13 +450,7 @@ fn block_level_list_inside_an_inline_wrapper_is_not_folded_into_one_inline_leaf(
     // its block content), so NONE of p/font/ol/li1/li2 besides `p` itself
     // get their own Box fragment. After the fix: each of
     // p, font, ol, li1, li2 is its own stacked block box.
-    assert_eq!(
-        boxes.len(),
-        5,
-        "expected p+font+ol+li1+li2 as five separate Box fragments, got {}: {:#?}",
-        boxes.len(),
-        boxes
-    );
+    assert_eq!(boxes.len(), 5, "expected p+font+ol+li1+li2 as five separate Box fragments, got {}", boxes.len());
 
     let text_ys: Vec<f32> = fragments
         .iter()
