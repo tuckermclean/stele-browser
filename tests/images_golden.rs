@@ -1,12 +1,17 @@
 //! M4 golden: THE SCREENSHOT — the real fetch->parse->cascade->images
 //! pre-pass->box-tree->layout->raster->PNG pipeline run against
-//! `fixtures/images.html` (a PNG, a JPEG, a GIF, and an animated GIF, all in
-//! normal flow), asserted exact (by decoded RGBA pixels, not raw PNG bytes)
-//! against a checked-in golden image. This is a PROPOSED golden (brief §10
-//! blessing discipline, same as `tests/png_golden.rs`'s own `goldens/
-//! basic.png`) — an implementer never self-blesses; the orchestrator/
-//! reviewer visually inspects `goldens/images.png` and countersigns before
-//! it's trusted.
+//! `fixtures/images.html` (a PNG, a JPEG, a GIF, and an animated GIF in
+//! normal flow, plus — as of the M4 floats + inline images packet — a fifth
+//! `<img align=left>` that FLOATS with a wrapping paragraph, and a sixth
+//! non-floated `<img>` sitting inline between two words), asserted exact (by
+//! decoded RGBA pixels, not raw PNG bytes) against a checked-in golden
+//! image. This is a PROPOSED golden (brief §10 blessing discipline, same as
+//! `tests/png_golden.rs`'s own `goldens/basic.png`) — the implementer
+//! regenerates it (unavoidable: this packet's own code change alters how
+//! EVERY `<img>` in this fixture lays out, non-floated ones now sitting
+//! inline instead of breaking flow) but never self-*trusts* it; the
+//! orchestrator/reviewer visually inspects `goldens/images.png` and
+//! countersigns before it's trusted.
 //!
 //! Unlike `tests/png_golden.rs` (which reads its fixture via `include_str!`
 //! and never touches the filesystem), this test drives a REAL `file://`
@@ -97,14 +102,17 @@ fn golden_images_png_is_well_formed_and_nontrivial() {
 }
 
 /// Distinct from the pixel-exact golden comparison above: confirms the
-/// pre-pass really decoded all four `<img>`s (PNG/JPEG/GIF/animated GIF) —
-/// a regression that silently stopped decoding, re-blessed against an
-/// all-placeholder render, would slip past a pixel-exact check alone.
+/// pre-pass really decoded every `<img>` (the original PNG/JPEG/GIF/animated
+/// GIF, plus the M4 packet's floated `<img align=left>` and non-floated
+/// inline `<img>`, both reusing the already-decoded `images-red.png`/
+/// `images-blue.gif` fixture assets) — a regression that silently stopped
+/// decoding, re-blessed against an all-placeholder render, would slip past a
+/// pixel-exact check alone.
 #[test]
-fn all_four_images_actually_decode_not_fallen_back_to_placeholders() {
+fn all_images_actually_decode_not_fallen_back_to_placeholders() {
     let url = fixture_url();
     let html = fetch_fixture_html(&url);
     let dom_tree = dom::parser::parse(&html);
     let decoded = images::collect_images(&dom_tree, &url);
-    assert_eq!(decoded.len(), 4, "all four <img>s in fixtures/images.html should decode");
+    assert_eq!(decoded.len(), 6, "all six <img>s in fixtures/images.html should decode");
 }

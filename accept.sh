@@ -282,7 +282,9 @@ else
 
   # A3f — the images packet's own PNG golden (M4): THE SCREENSHOT.
   # fixtures/images.html has real <img src> elements resolved against sibling
-  # files on disk (a PNG, a JPEG, a GIF, an animated GIF), so — unlike A3e's
+  # files on disk (a PNG, a JPEG, a GIF, an animated GIF, plus — as of the M4
+  # floats + inline images packet — a floated `img align=left` with wrapping
+  # text and a non-floated inline `<img>`), so — unlike A3e's
   # fixtures/basic.html, which has none — this exercises the real image
   # fetch+decode pre-pass (images::collect_images) end to end, not just
   # layout/paint. Same blessing discipline, same byte-equality rationale as

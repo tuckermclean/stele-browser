@@ -404,6 +404,40 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M4 · floats + inline images — closes D14
+
+- The two image-flow features deferred from M2 (D14), bespoke in the inline
+  engine (taffy has no floats): (1) a non-floated `<img>` is now an INLINE ATOM
+  sitting in the line between text (was block-level; the D14 "grandchild
+  Replaced dropped" gap closed too); (2) `img align=left`/`right` FLOATS — the
+  image is pulled out of line flow, placed at the block's left/right edge, and
+  `inline::layout_runs` shortens/offsets every line that vertically overlaps
+  the float so text WRAPS around it and returns to full width below.
+- `box_tree` maps `<img align>` → `ComputedStyle.float` (presentational hint,
+  author CSS wins). No freeze needed — `float`/`clear` were already in
+  `ComputedStyle`.
+- **Golden `goldens/images.png` regenerated (800×495), orchestrator-VIEWED and
+  blessed:** 4 labeled images now inline with their labels, a left-floated 48px
+  square with text wrapping ~3 lines then returning to full width below it, and
+  a gif inline between "before"/"after". Real CSS float layout, rendered.
+- Loop: implementer (test-first `6ef82cb` red → `dc89310` green) → reviewer
+  (Spec ✅ Approved; no Critical, **no reachable panic or infinite loop** — the
+  line-breaker is a single bounded `for` pass, no `while`/retry construct; all
+  adversarial float shapes tested incl. 600 floated imgs through the full
+  pipeline; **1 inert Minor**) → fix round (`52a396b`) → orchestrator re-verify.
+    - **Minor (fixed, defense-in-depth):** the non-floated atom's paint height
+      escaped the `MAX_DIM` clamp its width got (a hostile `<img height=1e12>`
+      → 1e12-tall rect, inert only because frozen `blit` clips) — now clamped
+      at the source via `inline::clamp_dim`.
+- Totality bounds: `MAX_FLOATS=256`, `MAX_DIM=1e6`, per-line exclusion O(floats);
+  a zero-width float can't spin (first item on a fresh line always places →
+  guaranteed progress). Frozen paths empty-diff; no deps; no unsafe/JS. 327 lib
+  tests green. See D26.
+- **M4 nearly done:** foundation ✅ · images ✅ (screenshot) · floats+inline ✅.
+  NEXT: the fbdev (rustix) device backend — real Linux framebuffer output (not
+  CI-testable; the mem-Surface PNG goldens are the verification) — then M4
+  closes and M5 (dialect completeness) begins.
+
 ## 2026-08-14 — M4 · images — THE SCREENSHOT
 
 - `<img>` renders real pixels. Pipeline: `images::collect_images` (new
