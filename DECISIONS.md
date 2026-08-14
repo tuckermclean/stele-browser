@@ -19,6 +19,18 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — Wrapped-link highlight
+
+### D43 — highlight a focusable's actual per-line cells, not its bounding box
+`Focusable` carries `cell_spans` (one cell-rect per contributing fragment);
+`render_frame` paints the focus highlight over each span. `rect_cells` remains
+the union, still used for `hit_test` and first-visible-focus ordering (a
+bounding box is fine there — clicking anywhere in a wrapped link's box still
+follows it). **Why:** unioning per-line fragments into one rectangle and
+filling it lit up cells the link never occupied (the "whole paragraph selected"
+report), especially once block-in-inline lists (D44) made links wrap many
+lines. Internal to browser.rs; no frozen change.
+
 ## UI — Editable forms + responsive resize
 
 ### D41 — text-input editing lives in ViewState; submit overrides DOM values by NodeId

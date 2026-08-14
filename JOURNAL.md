@@ -426,6 +426,22 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-14 — UI-8 · fix: wrapped link highlighted its whole bounding box
+
+- **Bug (user-reported):** focusing a link whose text wraps across >1 terminal
+  row highlighted a solid rectangle of non-link cells — "selecting a link
+  selects the whole paragraph." Worst on link-dense pages where long links wrap
+  many lines.
+- **Root cause:** `extract_focusables` merged a link's per-line `Fragment`s with
+  `union_rect` into a single bounding-box `rect_cells`, and `render_frame`
+  filled that box solid. A link on rows 20 (cols 5..40) + 21 (cols 0..15) got
+  the union rows 20..21 × cols 0..40 highlighted.
+- **Fix:** `Focusable` gains `cell_spans: Vec<(c,r,w,h)>` — one rect per
+  contributing fragment (per line). `render_frame` highlights each span, not the
+  union. `rect_cells` stays as the bounding box for hit-testing + initial-focus
+  ordering (fine as a box). Single-line links: one span == old rect, no change.
+  browser.rs-only; no frozen type; no unsafe. 574 tests green. See D43.
+
 ## 2026-08-14 — UI-7 · editable forms + submit, responsive resize — the browser you can actually use
 
 - **Editable text inputs.** Focusing a plain `<input>` puts the shell in an
