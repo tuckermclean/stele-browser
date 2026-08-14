@@ -404,6 +404,28 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M5 · external `<link>` stylesheets
+
+- External CSS applies: `<link rel="stylesheet" href>` is fetched, parsed, and
+  cascaded (previously ignored — only inline `<style>`/`style=` worked). New
+  `stylesheets::collect_all_author_sheets(dom, base, viewport)` walks the DOM
+  ONCE, treating `<link>` and `<style>` as one document-ordered author-sheet
+  sequence (so a later `<style>` correctly overrides an earlier `<link>`).
+  Fetches hrefs (file://+http, driver-level like `images::collect_images`)
+  against the doc's FINAL url; `rel` matched case-insensitively among
+  space-separated tokens; a `<link media>` gates the whole sheet against the
+  viewport; `MAX_LINKS=32`; fetch/parse failures skip that sheet (no panic);
+  `@import` inside a fetched sheet stays ignored. Wired into
+  dump_text/dump_png/render_fb + frames (each frame resolves `<link>` against
+  its OWN url — `render_single_document` gained a `base_url`).
+- Golden `goldens/link-css.tty.txt` + `fixtures/link-css.{html,css}` (blessed):
+  external sheet applies + document-order precedence + a non-stylesheet
+  `rel=icon` link causing no failure. All existing goldens byte-identical.
+- Frozen sigs (`cascade`/`parse`/`ComputedStyle`/`layout`) untouched; no deps;
+  no unsafe. Rebased onto the interactive-provenance amendment (both had
+  touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
+  counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
+
 ## 2026-08-14 — UI-1 · interactive-provenance freeze amendment
 
 - The hook the interactive shell needs: `layout::Interactive { Link { href } |

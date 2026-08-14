@@ -3,6 +3,22 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M5 — External `<link>` CSS
+
+### D35 — external stylesheets fetched driver-level, unified doc order with `<style>`
+`<link rel=stylesheet>` was ignored. **Choice:** a new driver-level
+`stylesheets::collect_all_author_sheets` (not `style::author`, mirroring
+`images.rs`, since it does I/O) does ONE document-order DOM walk emitting both
+`<link>` (fetched) and `<style>` sheets interleaved — so cascade source order
+is correct across the two. Fetches against the doc's post-redirect `final_url`;
+`rel` case-insensitive multi-token; `<link media>` = whole-sheet viewport gate
+(distinct from in-CSS `@media`); `MAX_LINKS=32`; any failure skips that sheet;
+`@import` inside a fetched sheet stays ignored (no HTML recursion, no cycle).
+Applies on BOTH tty and png paths (author CSS affects `display` etc.). Frames
+resolve `<link>` against their own frame url. Revisit: `--stats` still counts
+only `<style>`-sourced ignored declarations (documented undercount); `@import`;
+`rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
+
 ## UI — Interactive provenance
 
 ### D34 — Fragment/LayoutNode carry interactive provenance (link href, controls)
