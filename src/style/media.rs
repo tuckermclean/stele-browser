@@ -127,11 +127,7 @@ impl MediaQuery {
     /// Does this query match a screen render at `viewport_width_px`? OR
     /// across every comma-separated item.
     pub(crate) fn matches(&self, viewport_width_px: f32) -> bool {
-        // STUB (RED): evaluation not yet implemented — see the M5 packet's
-        // red/green split. `MediaQuery::parse` above and `flatten_media`
-        // below are real; only the actual width comparison is pending.
-        let _ = viewport_width_px;
-        todo!("QueryItem::matches / MediaQuery::matches: real width evaluation lands in the GREEN commit")
+        self.items.iter().any(|item| item.matches(viewport_width_px))
     }
 }
 
@@ -235,27 +231,30 @@ fn parse_item(tokens: &[Token]) -> QueryItem {
         }
     }
 
-    // A recognized type keyword is followed by `and` iff more (feature)
-    // clauses follow; consume it so the feature loop starts clean.
-    if type_seen {
-        if let Some(Token::Ident(k)) = toks.get(i) {
-            if k.eq_ignore_ascii_case("and") {
-                i += 1;
-            }
-        }
-    }
-
+    // A recognized type keyword (or the implicit-`all` bare-feature case) is
+    // optionally followed by `and (<feature>)` clauses; the loop below
+    // consumes any `and` itself (uniformly, whether it's the one right
+    // after the type keyword or one joining two feature clauses), so no
+    // separate consumption happens here.
     let mut features = Vec::new();
     loop {
-        // Skip a stray `and` joining two feature clauses.
+        // Skip `and` token(s) joining the type/previous feature to the next
+        // feature clause — tracked so a DANGLING `and` (consumed here but
+        // with nothing recognizable following it, e.g. `"screen and"`) is
+        // caught below rather than silently treated as "no more features".
+        let mut consumed_and = false;
         while let Some(Token::Ident(k)) = toks.get(i) {
             if k.eq_ignore_ascii_case("and") {
                 i += 1;
+                consumed_and = true;
             } else {
                 break;
             }
         }
         if i >= len {
+            if consumed_and {
+                supported = false; // dangling `and` with nothing after it
+            }
             break;
         }
         if toks.get(i) != Some(&Token::LParen) {
