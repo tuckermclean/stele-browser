@@ -29,6 +29,7 @@ use std::rc::Rc;
 use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
 use crate::img::RgbaImage;
+use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, LayoutNode, Size};
 use crate::style::computed::{Display, Float};
 use crate::style::ComputedStyle;
@@ -99,6 +100,27 @@ fn build_node(
             if is_form_control(el) {
                 return build_form_control(dom, el, style);
             }
+            if is_br(el) {
+                // M6 hardening (kitchen-sink coverage found `<br>` was a
+                // total no-op — see JOURNAL/DECISIONS): synthesize a leaf
+                // carrying `layout::inline::LINE_BREAK_SENTINEL` as its
+                // `Text` payload, the same "leaf carrying a stand-in"
+                // pattern `build_form_control`/the details marker use above
+                // — `BoxContent` is frozen (no dedicated break variant), so
+                // the forced-break signal has to ride inside the one payload
+                // shape `Text` already offers. `layout::inline::tokenize`
+                // recognizes the sentinel and turns it into a forced line
+                // break instead of ordinary character data — see that
+                // module's doc comments for the full rationale/totality
+                // notes. `<br>` is a void element (`dom::parser`'s
+                // `VOID_ELEMENTS`), so it never has real children to lose by
+                // returning a childless leaf here.
+                return Some(LayoutNode {
+                    style,
+                    content: BoxContent::Text(LINE_BREAK_SENTINEL.to_string()),
+                    children: Vec::new(),
+                });
+            }
             if is_details(el) {
                 let node = if depth >= DEPTH_CAP {
                     // Same defensive fallback as the generic branch below:
@@ -133,6 +155,12 @@ fn build_node(
 /// now").
 fn is_replaced(el: &Element) -> bool {
     el.name.as_str() == "img"
+}
+
+/// `<br>` (M6 hardening) — see the `is_br` call site in `build_node` for the
+/// forced-line-break synthesis this gates.
+fn is_br(el: &Element) -> bool {
+    el.name.as_str() == "br"
 }
 
 /// Parse an `<img>`'s intrinsic size off its `width`/`height` attributes.

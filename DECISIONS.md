@@ -3,6 +3,26 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M6 — Hardening core
+
+### D32 — kitchen-sink coverage, mutation fuzz, `<br>` via sentinel, A2 hard gate
+Release hardening. `kitchen-sink.html` exercises the whole dialect in one page
+(A5 coverage golden, blessed). A hand-rolled deterministic mutation fuzz
+(`tests/fuzz_totality.rs`, seeded xorshift64*, ~4400 iters over HTML-mutation /
+random-blob / random-CSS / image-decode) drives the full pipeline asserting no
+panic — `cargo-fuzz` isn't in the image, so hand-rolled per brief §6. It found
+exactly one bug (`<br>` a no-op) and nothing else. **`<br>` fix:** `box_tree`
+rides a `LINE_BREAK_SENTINEL` (U+E000 PUA) inside the frozen `BoxContent::Text`,
+recognized by `inline` as a forced break — avoids a freeze amendment; tradeoff:
+literal U+E000 in real content misrenders as a break (cosmetic, never a panic);
+a `BoxContent::LineBreak` amendment is the clean alternative. A2 (2MB size) is
+now a hard gate (met with huge headroom, ~542KB). Known pre-existing gaps
+(documented, not regressions): list-item markers unimplemented; `<pre>`
+whitespace collapses. Revisit: list markers (next), the `<br>` sentinel→variant
+if it ever bites, the A5 speed budget (brief defines A5 as <50M instrs/<150ms —
+this packet's checks are coverage, not speed; speed instrumentation is a
+separate M6 item).
+
 ## M5 — Dialect completeness
 
 ### D31 — details/summary collapse, noscript shown, entities verified, --stats

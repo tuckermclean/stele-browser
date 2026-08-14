@@ -117,7 +117,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# A2 — size budget (≤ 2.0 MB stripped). Informational in M0; a hard gate in M6.
+# A2 — size budget (≤ 2.0 MB stripped). HARD GATE as of M6 (release
+# hardening — this is the milestone the header comment/build brief always
+# named as when A2 stops being informational and starts failing the build).
+# The i486 binary has stayed comfortably under budget since M4 (~542KB at
+# the time this gate flipped on, well under a third of the 2.0MB ceiling),
+# so this is expected to pass with room to spare — flipping it to a hard
+# `bad` (rather than `pend`) on overage is what actually makes A2 load-
+# bearing: a future packet that quietly bloats the binary (an accidental
+# heavy dependency, an unstripped debug build, ...) now fails acceptance
+# instead of sailing through with an ignored warning.
 # ---------------------------------------------------------------------------
 if [ "$TTY_ONLY" = 1 ]; then
   :
@@ -125,9 +134,9 @@ elif [ -f "$BIN" ]; then
   bytes=$(wc -c < "$BIN")
   note "size: ${bytes} bytes (budget ${SIZE_BUDGET_BYTES})"
   if [ "$bytes" -le "$SIZE_BUDGET_BYTES" ]; then
-    pass "A2: within size budget (informational until M6)"
+    pass "A2: within size budget (${bytes} <= ${SIZE_BUDGET_BYTES} bytes)"
   else
-    pend "A2: OVER budget — informational until M6 size pass"
+    bad "A2: OVER size budget (${bytes} > ${SIZE_BUDGET_BYTES} bytes)"
   fi
 fi
 
@@ -446,6 +455,68 @@ else
     bad "A3l: tty dump of $FIXTURE_ENTITIES differs from $GOLDEN_TTY_ENTITIES"
     sed 's/^/    /' /tmp/stele_a3l.diff
   fi
+
+  # ---------------------------------------------------------------------
+  # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
+  # (fixtures/kitchen-sink.html, "the everything page": headings, inline
+  # markup, lists, blockquote, pre, hr, br, a table with colspan/rowspan, a
+  # form, plain + floated images, author-CSS flexbox, details/summary
+  # open+closed, noscript, entities, and a small @media rule -- the WHOLE
+  # curated dialect in one document, a coverage benchmark + regression net,
+  # NOT an adversarial torture test -- soup.html/tests/fuzz_totality.rs are
+  # that). Two independent checks, same blessing discipline as every other
+  # golden here: A5a is the tty dump (real author-CSS pipeline, no image
+  # fetch -- matches --dump-text's own contract), A5b is the PNG dump (real
+  # author-CSS + real image fetch/decode pipeline -- matches --dump-png's).
+  # `tests/kitchen_sink_golden.rs` drives the exact same two pipelines
+  # in-process (Rust-level pixel/text assertions); this block is the
+  # independent end-to-end confirmation through the real compiled binary,
+  # same rationale as A3e/A3f/A3g's own such notes.
+  #
+  # NOTE for the record: the original build brief (`stele-build-brief.md`
+  # §0) defines "A5" as a first-paint SPEED budget over kitchen-sink.html
+  # (< 50M retired instructions under qemu-i386, or < 150ms host wall-clock)
+  # -- a performance regression fence, not a golden-render check. This M6
+  # packet's own brief explicitly directed "Wire accept.sh A5 (kitchen-sink
+  # tty + png golden checks)" instead, which is what's implemented here;
+  # flagged so the orchestrator can decide whether the speed-budget check
+  # belongs alongside this (as A5c, say) in a follow-up, since the two are
+  # not mutually exclusive and this packet did not implement the former.
+  # ---------------------------------------------------------------------
+  GOLDEN_TTY_KITCHEN_SINK="goldens/kitchen-sink.tty.txt"
+  FIXTURE_KITCHEN_SINK="fixtures/kitchen-sink.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5a: host binary still not found at $HOST_BIN"
+  elif ! out_kitchen_sink="$("$HOST_BIN" --headless --dump-text "$FIXTURE_KITCHEN_SINK" 2>/tmp/stele_a5a.err)"; then
+    bad "A5a: stele --headless --dump-text crashed on $FIXTURE_KITCHEN_SINK"
+    sed 's/^/    /' /tmp/stele_a5a.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_kitchen_sink" > "$GOLDEN_TTY_KITCHEN_SINK"
+    pass "A5a: blessed kitchen-sink tty golden -> $GOLDEN_TTY_KITCHEN_SINK (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_KITCHEN_SINK" <(printf '%s\n' "$out_kitchen_sink") >/tmp/stele_a5a.diff 2>&1; then
+    pass "A5a: tty dump of $FIXTURE_KITCHEN_SINK matches golden"
+  else
+    bad "A5a: tty dump of $FIXTURE_KITCHEN_SINK differs from $GOLDEN_TTY_KITCHEN_SINK"
+    sed 's/^/    /' /tmp/stele_a5a.diff
+  fi
+
+  GOLDEN_PNG_KITCHEN_SINK="goldens/kitchen-sink.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5b: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_KITCHEN_SINK" /tmp/stele_a5b.png 2>/tmp/stele_a5b.err; then
+    bad "A5b: stele --headless --dump-png crashed on $FIXTURE_KITCHEN_SINK"
+    sed 's/^/    /' /tmp/stele_a5b.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5b.png "$GOLDEN_PNG_KITCHEN_SINK"
+    pass "A5b: blessed kitchen-sink PNG golden -> $GOLDEN_PNG_KITCHEN_SINK (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_KITCHEN_SINK" ]; then
+    bad "A5b: no golden at $GOLDEN_PNG_KITCHEN_SINK to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_KITCHEN_SINK" /tmp/stele_a5b.png; then
+    pass "A5b: PNG dump of $FIXTURE_KITCHEN_SINK matches golden"
+  else
+    bad "A5b: PNG dump of $FIXTURE_KITCHEN_SINK differs from $GOLDEN_PNG_KITCHEN_SINK"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_KITCHEN_SINK") actual=$(wc -c < /tmp/stele_a5b.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
@@ -462,7 +533,6 @@ fi
 # ---------------------------------------------------------------------------
 # Not yet live — each flips on at the milestone that earns it.
 # ---------------------------------------------------------------------------
-pend "A5: first-paint speed budget over kitchen-sink.html — M5/M6"
 if [ -f src/dom/ast.rs ]; then
   # A6 covenant grep, live once the AST exists: no script variant may appear.
   if grep -i "script" src/dom/ast.rs >/tmp/stele_covenant 2>/dev/null; then
