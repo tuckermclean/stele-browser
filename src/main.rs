@@ -19,7 +19,7 @@ use stele::backend::tty;
 use stele::dom;
 use stele::fetch::file::FileFetcher;
 use stele::fetch::http1::Http1Client;
-use stele::fetch::{Fetch, Request, Url};
+use stele::fetch::{Fetch, Request, Response, Url};
 use stele::frames;
 use stele::layout::box_tree::build_box_tree;
 use stele::layout::{self, Size};
@@ -130,21 +130,25 @@ fn resolve_url(raw: &str) -> Url {
     Url::new(format!("file://{}", abs.display()))
 }
 
-/// Fetch `url`'s body over whichever of the two live schemes it names.
-/// Every other scheme (including `https`, which this build never serves —
-/// no TLS, ever, per the charter) is a clean `Err`, never a panic.
-fn fetch_body(url: &Url) -> Result<Vec<u8>, String> {
+/// Fetch `url` over whichever of the two live schemes it names, returning
+/// the full [`Response`] (not just the body) — `dump_png` needs
+/// `Response::final_url` (see its own doc comment: review finding,
+/// Important) to resolve document-relative `<img src>`s against the
+/// POST-redirect URL, not the request URL. Every other scheme (including
+/// `https`, which this build never serves — no TLS, ever, per the charter)
+/// is a clean `Err`, never a panic.
+fn fetch_response(url: &Url) -> Result<Response, String> {
     match url.scheme().as_str() {
-        "file" => FileFetcher::new()
-            .fetch(&Request::get(url.clone()))
-            .map(|r| r.body)
-            .map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new()
-            .fetch(&Request::get(url.clone()))
-            .map(|r| r.body)
-            .map_err(|e| format!("{e:?}")),
+        "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
+        "http" => Http1Client::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
         other => Err(format!("unsupported scheme: {other}")),
     }
+}
+
+/// `fetch_response`'s body only — `dump_text` has no use for `final_url`
+/// (it never fetches images), so it keeps this simpler shape.
+fn fetch_body(url: &Url) -> Result<Vec<u8>, String> {
+    fetch_response(url).map(|r| r.body)
 }
 
 /// Drive the full headless pipeline for `--dump-text`. Total: a fetch
@@ -209,11 +213,11 @@ fn blank_png() -> Vec<u8> {
 /// not this packet's job.
 fn dump_png(source: &str) -> Vec<u8> {
     let url = resolve_url(source);
-    let body = match fetch_body(&url) {
-        Ok(b) => b,
+    let response = match fetch_response(&url) {
+        Ok(r) => r,
         Err(_) => return blank_png(),
     };
-    let html = String::from_utf8_lossy(&body);
+    let html = String::from_utf8_lossy(&response.body);
     let dom_tree = dom::parser::parse(&html);
 
     if frames::find_frameset(&dom_tree).is_some() {
@@ -222,9 +226,13 @@ fn dump_png(source: &str) -> Vec<u8> {
 
     let styles = cascade::cascade(&dom_tree, &[]);
     // Pixels matter on this path: fetch+decode every <img src> up front
-    // (bounded by images::MAX_IMAGES) so build_box_tree can thread real
-    // pixel data into each Replaced box.
-    let images = stele::images::collect_images(&dom_tree, &url);
+    // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
+    // build_box_tree can thread real pixel data into each Replaced box.
+    // Resolved against `response.final_url` (review finding, Important),
+    // NOT the pre-redirect `url`: a document-relative <img src> must
+    // resolve against wherever the document actually ended up after any
+    // HTTP redirect, not where it was originally requested from.
+    let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
         return blank_png();
     };
@@ -412,6 +420,97 @@ mod tests {
         let decoder = png::Decoder::new(bytes);
         let reader = decoder.read_info().expect("dump_png must always produce a valid PNG");
         (reader.info().width, reader.info().height)
+    }
+
+    fn decode_png_pixels(bytes: &[u8]) -> Vec<u8> {
+        let decoder = png::Decoder::new(bytes);
+        let mut reader = decoder.read_info().expect("dump_png must always produce a valid PNG");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("valid PNG frame");
+        buf.truncate(info.buffer_size());
+        buf
+    }
+
+    /// A tiny one-shot HTTP fixture server (self-contained here rather than
+    /// reused from `tests/support` — that helper lives outside `src/` and is
+    /// out of reach for this bin crate's own `#[cfg(test)]` module) serving
+    /// exactly the routes the redirect regression test below needs: `/go`
+    /// 302-redirects to `/sub/page.html`, which references a RELATIVE `<img
+    /// src="pic.png">`; `/sub/pic.png` serves a tiny solid-red PNG. The
+    /// `/sub/` path segment is deliberate: resolving the relative `pic.png`
+    /// against the correct (post-redirect) base `/sub/page.html` lands on
+    /// `/sub/pic.png` (served, red); resolving it against the WRONG
+    /// (pre-redirect) base `/go` instead lands on `/pic.png` (deliberately
+    /// unserved here — a 404) — so this test actually distinguishes the two
+    /// bases, unlike a same-directory redirect would. Loops accepting
+    /// connections forever on a background thread; the test process exits
+    /// long before the OS needs the socket back.
+    fn spawn_redirect_image_server() -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect fixture server");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/");
+
+                let (status, extra_headers, content_type, body): (&str, Vec<(&str, String)>, &str, Vec<u8>) = match path {
+                    "/go" => ("302 Found", vec![("Location", "/sub/page.html".to_string())], "text/plain", Vec::new()),
+                    "/sub/page.html" => (
+                        "200 OK",
+                        Vec::new(),
+                        "text/html",
+                        b"<img src=\"pic.png\" width=\"2\" height=\"2\" alt=\"red\">".to_vec(),
+                    ),
+                    "/sub/pic.png" => {
+                        let s = MemSurface::new(2, 2, Color::rgb(200, 30, 30));
+                        ("200 OK", Vec::new(), "image/png", raster::encode_png(&s))
+                    }
+                    // Deliberately unserved: this is where the relative
+                    // `pic.png` would wrongly resolve to if collect_images
+                    // used the pre-redirect `/go` as its base URL.
+                    _ => ("404 Not Found", Vec::new(), "text/plain", b"not found".to_vec()),
+                };
+
+                let mut out = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                for (k, v) in &extra_headers {
+                    out.push_str(&format!("{k}: {v}\r\n"));
+                }
+                out.push_str("\r\n");
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        addr
+    }
+
+    /// Review finding (Important): `dump_png` used to resolve `<img src>`
+    /// against the PRE-redirect request URL (`fetch_body` discarded
+    /// `Response::final_url`), so a document reached via an HTTP redirect
+    /// had its document-relative image sources resolve against the wrong
+    /// base and 404 — a wrong (not a crashing) render. `/go` redirects to
+    /// `/page.html`, whose relative `pic.png` only resolves correctly
+    /// against the post-redirect URL; this must show the decoded red pixel,
+    /// not a bare placeholder box.
+    #[test]
+    fn dump_png_resolves_relative_img_src_against_the_post_redirect_final_url() {
+        let addr = spawn_redirect_image_server();
+        let bytes = dump_png(&format!("http://{addr}/go"));
+        let pixels = decode_png_pixels(&bytes);
+        assert!(
+            pixels.chunks(4).any(|p| p == [200, 30, 30, 255]),
+            "expected the redirected page's relative <img> to have decoded (red pixel present)"
+        );
     }
 
     #[test]

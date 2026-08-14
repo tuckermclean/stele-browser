@@ -38,16 +38,37 @@ use crate::fetch::http1::Http1Client;
 use crate::fetch::{Fetch, Request, Response, Url};
 use crate::img::{self, RgbaImage};
 
-/// Upper bound on how many `<img>` elements one `collect_images` call will
-/// fetch+decode. Past this many successfully-decoded images, every further
-/// `<img>` in the document is left out of the returned map (rendering as its
-/// ordinary intrinsic-size placeholder) rather than continuing to spend
-/// unbounded network+decode work on a hostile/pathological page (brief's
-/// "tens of thousands of `<img>`" scenario). 256 is far beyond any real
-/// document-web page's image count while keeping the worst case (256 fetches
-/// + decodes, each already bounded by the P4 decoders' own
-/// `MAX_DECODE_PIXELS` cap) a small, fixed constant.
+/// Upper bound on how many DISTINCT `<img src>` URLs one `collect_images`
+/// call will attempt to fetch+decode. Past this many attempts, every further
+/// *unseen* `src` is left undecoded (rendering as its ordinary intrinsic-size
+/// placeholder) rather than continuing to spend unbounded network+decode work
+/// on a hostile/pathological page (brief's "tens of thousands of `<img>`"
+/// scenario). Distinct because of dedup (see module docs): an `<img>` whose
+/// resolved `src` was already fetched+decoded (or already failed) earlier in
+/// the same walk is a cache hit, not a new attempt, and is never blocked by
+/// this cap. 256 is far beyond any real document-web page's *distinct* image
+/// count while keeping the worst case (256 fetches + decodes, each already
+/// bounded by the P4 decoders' own `MAX_DECODE_PIXELS` cap) a small, fixed
+/// constant.
 pub const MAX_IMAGES: usize = 256;
+
+/// Aggregate ceiling, in bytes, on the total decoded pixel data
+/// (`RgbaImage::pixels.len()`, summed over every DISTINCT successfully
+/// decoded image) one `collect_images` call will hold onto at once. Review
+/// finding (Critical): `MAX_IMAGES` bounds image COUNT and the P4 decoders'
+/// own `MAX_DECODE_PIXELS` bounds EACH decode (~244MiB at the cap), but
+/// neither alone bounds the AGGREGATE — up to `MAX_IMAGES` distinct images
+/// each near that per-image ceiling could total tens of GiB resident at
+/// once, and `panic = "abort"` gives no soft-landing from the resulting
+/// allocation failure. Once a decode would push the running total over this
+/// budget, it (and every further unseen `src`) is skipped for the rest of
+/// this `collect_images` call — see [`collect_images_bounded`]'s "budget
+/// exhausted" handling. 256 MiB: a 486-class machine has little RAM to
+/// begin with, and a single image already near `MAX_DECODE_PIXELS` (~244MiB)
+/// is close to this ceiling by itself — this is a coarse aggregate backstop
+/// against pathological *combinations* of images, not a tight per-page
+/// memory budget.
+pub const MAX_TOTAL_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Maximum DOM nesting depth this walk will descend into — mirrors
 /// `layout::box_tree::DEPTH_CAP`/`layout::block::DEPTH_CAP`/
@@ -62,43 +83,143 @@ const DEPTH_CAP: usize = 100;
 /// frame-0 pixels. Only ever called on the pixel (`--dump-png`) render path —
 /// `--dump-text` passes an empty map instead (see `main.rs`), since a tty
 /// dump never paints pixels and has no use for decoded image data.
+///
+/// Bounded by the real [`MAX_IMAGES`]/[`MAX_TOTAL_IMAGE_BYTES`] constants —
+/// see [`collect_images_bounded`] (the parameterized real implementation;
+/// this is a thin wrapper so tests can exercise the same dedup/budget logic
+/// against small, fast bounds instead of the real 256-image/256MiB ceiling).
 pub fn collect_images(dom: &Dom, base: &Url) -> HashMap<NodeId, Rc<RgbaImage>> {
+    collect_images_bounded(dom, base, MAX_IMAGES, MAX_TOTAL_IMAGE_BYTES)
+}
+
+/// Real implementation, parameterized over the two resource bounds so tests
+/// can exercise the same dedup/budget logic against small, fast bounds
+/// (`collect_images` is the thin wrapper callers use, always passing the
+/// real [`MAX_IMAGES`]/[`MAX_TOTAL_IMAGE_BYTES`] constants).
+///
+/// Dedup: `cache` is keyed by the RESOLVED `src` URL (as a `String` — `Url`
+/// has no `Hash` impl and is a frozen type this packet may not extend), and
+/// holds `Some(Rc<RgbaImage>)` for a successful decode or `None` for one
+/// that failed/was skipped — either way, a `src` seen once is never
+/// fetched+decoded again for the rest of this walk; every `<img>` sharing
+/// that `src` shares the SAME `Rc` (or the same "gave up" outcome). This is
+/// the Critical review fix: a page with `<img src="same-big.jpg">` repeated
+/// hundreds of times used to trigger one independent fetch+decode per
+/// occurrence (unbounded redundant network/CPU/memory); it now collapses to
+/// one.
+///
+/// `budget` tracks two running totals across the whole walk: how many
+/// DISTINCT `src`s have been attempted (`attempts`, gated by `max_images`)
+/// and how many total bytes are held by every successfully cached decode so
+/// far (`total_bytes`, gated by `max_total_bytes`). Once either bound is
+/// hit, `exhausted` latches `true` and every further UNSEEN `src` is skipped
+/// without even attempting a fetch — already-cached `src`s (dedup hits)
+/// remain fully usable regardless, since they cost no new attempt and no new
+/// bytes. This is the second half of the Critical fix: `MAX_IMAGES` alone
+/// bounds image COUNT and the P4 decoders' own `MAX_DECODE_PIXELS` bounds
+/// EACH decode, but neither bounds the AGGREGATE — many DISTINCT
+/// near-`MAX_DECODE_PIXELS` images could still total tens of GiB resident at
+/// once without this.
+fn collect_images_bounded(
+    dom: &Dom,
+    base: &Url,
+    max_images: usize,
+    max_total_bytes: usize,
+) -> HashMap<NodeId, Rc<RgbaImage>> {
     let mut out = HashMap::new();
     if dom.is_empty() {
         return out;
     }
-    walk(dom, dom.root(), base, &mut out, 0);
+    let mut cache: HashMap<String, Option<Rc<RgbaImage>>> = HashMap::new();
+    let mut budget = Budget { attempts: 0, total_bytes: 0, max_images, max_total_bytes, exhausted: false };
+    walk(dom, dom.root(), base, &mut out, &mut cache, &mut budget, 0);
     out
 }
 
-fn walk(dom: &Dom, id: NodeId, base: &Url, out: &mut HashMap<NodeId, Rc<RgbaImage>>, depth: usize) {
+/// Running resource-consumption state threaded through one [`collect_images_bounded`]
+/// walk — see that function's doc comment for the exact semantics of each
+/// field.
+struct Budget {
+    attempts: usize,
+    total_bytes: usize,
+    max_images: usize,
+    max_total_bytes: usize,
+    exhausted: bool,
+}
+
+fn walk(
+    dom: &Dom,
+    id: NodeId,
+    base: &Url,
+    out: &mut HashMap<NodeId, Rc<RgbaImage>>,
+    cache: &mut HashMap<String, Option<Rc<RgbaImage>>>,
+    budget: &mut Budget,
+    depth: usize,
+) {
     if depth >= DEPTH_CAP {
         return;
     }
     let Node::Element(el) = dom.node(id) else { return };
 
-    if el.name.as_str() == "img" && out.len() < MAX_IMAGES {
+    if el.name.as_str() == "img" {
         if let Some(src) = el.attrs.get("src") {
-            if let Some(image) = fetch_and_decode(base, src) {
-                out.insert(id, Rc::new(image));
+            let url = base.resolve(src);
+            let key = url.as_str().to_string();
+
+            let resolved = match cache.get(&key) {
+                // Dedup hit: this exact resolved URL was already attempted
+                // earlier in the walk (successfully or not) — reuse that
+                // outcome, no new fetch/decode, no new budget spend.
+                Some(cached) => cached.clone(),
+                // Unseen URL: only spend a new attempt if the walk hasn't
+                // exhausted its budget (count or bytes) yet.
+                None if !budget.exhausted && budget.attempts < budget.max_images => {
+                    budget.attempts += 1;
+                    let decoded = fetch_and_decode(&url).map(|image| {
+                        let size = image.pixels.len();
+                        (image, size)
+                    });
+                    let result = match decoded {
+                        Some((image, size)) if budget.total_bytes.saturating_add(size) <= budget.max_total_bytes => {
+                            budget.total_bytes += size;
+                            Some(Rc::new(image))
+                        }
+                        Some(_) => {
+                            // This decode alone (or combined with what's
+                            // already resident) would exceed the aggregate
+                            // budget: discard it, and stop attempting any
+                            // further UNSEEN src for the rest of this walk
+                            // (already-cached srcs remain usable).
+                            budget.exhausted = true;
+                            None
+                        }
+                        None => None, // fetch/decode failure, unrelated to budget
+                    };
+                    cache.insert(key, result.clone());
+                    result
+                }
+                None => None, // budget exhausted (count or bytes): skip without attempting
+            };
+
+            if let Some(rc) = resolved {
+                out.insert(id, rc);
             }
         }
     }
 
     for &child in &el.children {
-        walk(dom, child, base, out, depth + 1);
+        walk(dom, child, base, out, cache, budget, depth + 1);
     }
 }
 
-/// Resolve `src` against `base`, fetch it, and decode frame 0. `None` on any
-/// failure along the way (unresolvable/unsupported scheme, fetch error,
-/// unrecognized/malformed bytes, an empty frame list) — see module docs.
-/// Animated images (GIF) decode every frame; only the first is used for this
-/// static render, matching the packet brief ("animated GIF -> first frame;
-/// the ticking loop is a later/interactive concern").
-fn fetch_and_decode(base: &Url, src: &str) -> Option<RgbaImage> {
-    let url = base.resolve(src);
-    let response = fetch_response(&url).ok()?;
+/// Fetch `url` and decode frame 0. `None` on any failure along the way
+/// (fetch error, unsupported scheme, unrecognized/malformed bytes, an empty
+/// frame list) — see module docs. Animated images (GIF) decode every frame;
+/// only the first is used for this static render, matching the packet brief
+/// ("animated GIF -> first frame; the ticking loop is a later/interactive
+/// concern").
+fn fetch_and_decode(url: &Url) -> Option<RgbaImage> {
+    let response = fetch_response(url).ok()?;
     let content_type = response.header("content-type").map(|s| s.to_string());
     let frames = img::decode_bytes(&response.body, content_type.as_deref()).ok()?;
     frames.into_iter().next().map(|f| f.image)
@@ -140,20 +261,23 @@ mod tests {
     }
 
     fn find_img_id(d: &dom::Dom) -> NodeId {
-        fn walk(d: &dom::Dom, id: NodeId) -> Option<NodeId> {
+        find_all_img_ids(d).into_iter().next().expect("fixture should have an <img>")
+    }
+
+    fn find_all_img_ids(d: &dom::Dom) -> Vec<NodeId> {
+        fn walk(d: &dom::Dom, id: NodeId, out: &mut Vec<NodeId>) {
             if let Node::Element(el) = d.node(id) {
                 if el.name.as_str() == "img" {
-                    return Some(id);
+                    out.push(id);
                 }
                 for &c in &el.children {
-                    if let Some(found) = walk(d, c) {
-                        return Some(found);
-                    }
+                    walk(d, c, out);
                 }
             }
-            None
         }
-        walk(d, d.root()).expect("fixture should have an <img>")
+        let mut out = Vec::new();
+        walk(d, d.root(), &mut out);
+        out
     }
 
     #[test]
@@ -237,17 +361,97 @@ mod tests {
         assert!(images.is_empty());
     }
 
+    // ------------------------------------------------------ dedup + budget
+    //
+    // Review finding (Critical): MAX_IMAGES alone bounds image COUNT and the
+    // P4 decoders' own MAX_DECODE_PIXELS bounds EACH decode, but nothing
+    // bounded the AGGREGATE resident memory across many DISTINCT images, and
+    // a repeated identical `src` used to trigger one independent
+    // fetch+decode per occurrence (redundant network/CPU, and -- pre-dedup
+    // -- redundant memory too). These three tests pin the fix: (1) the same
+    // `src` referenced many times decodes exactly ONCE and is shared by
+    // `Rc` across every referencing `<img>`; (2) a tiny `max_images` bound
+    // still caps DISTINCT decode attempts (dedup doesn't defeat the count
+    // cap); (3) a tiny aggregate byte budget stops decoding further DISTINCT
+    // images once exhausted, while an already-cached (dedup) hit still
+    // resolves regardless.
+
     #[test]
-    fn image_count_is_capped_at_max_images() {
-        let png_url = write_temp_png("cap", 1, 1, Color::rgb(1, 2, 3));
+    fn repeated_src_decodes_once_and_is_shared_across_every_referencing_img() {
+        // Same `src`, referenced far more times than MAX_IMAGES would allow
+        // as independent attempts -- if this weren't deduped, the walk would
+        // cap out at MAX_IMAGES entries (the pre-fix behavior); with dedup,
+        // EVERY occurrence resolves (one real decode, shared by Rc).
+        let png_url = write_temp_png("repeated", 1, 1, Color::rgb(1, 2, 3));
         let mut html = String::new();
-        for _ in 0..(MAX_IMAGES + 20) {
+        let occurrences = MAX_IMAGES + 20;
+        for _ in 0..occurrences {
             html.push_str(&format!(r#"<img src="{}">"#, png_url.as_str()));
         }
         let d = dom::parser::parse(&html);
+        let img_ids = find_all_img_ids(&d);
+        assert_eq!(img_ids.len(), occurrences);
+
         let base = Url::new("file:///");
         let images = collect_images(&d, &base);
-        assert_eq!(images.len(), MAX_IMAGES, "must stop decoding past MAX_IMAGES");
+
+        assert_eq!(images.len(), occurrences, "every occurrence of the repeated src should decode, not just MAX_IMAGES of them");
+        let first = images.get(&img_ids[0]).expect("first occurrence should decode");
+        for id in &img_ids {
+            let rc = images.get(id).expect("every occurrence should decode");
+            assert!(Rc::ptr_eq(rc, first), "every occurrence of the same src should share ONE decoded Rc, not decode independently");
+        }
+    }
+
+    #[test]
+    fn distinct_images_beyond_max_images_are_skipped() {
+        // A tiny max_images bound (via the parameterized real
+        // implementation) still caps how many DISTINCT srcs get decoded --
+        // dedup collapses repeats to one attempt, but distinct URLs are
+        // still real, separate attempts subject to the count cap.
+        let urls: Vec<Url> = (0..5).map(|i| write_temp_png(&format!("distinct-cap-{i}"), 1, 1, Color::rgb(1, 2, 3))).collect();
+        let html: String = urls.iter().map(|u| format!(r#"<img src="{}">"#, u.as_str())).collect();
+        let d = dom::parser::parse(&html);
+        let base = Url::new("file:///");
+
+        let images = collect_images_bounded(&d, &base, 2, MAX_TOTAL_IMAGE_BYTES);
+        assert_eq!(images.len(), 2, "must stop attempting new distinct srcs past max_images");
+    }
+
+    #[test]
+    fn distinct_images_beyond_the_aggregate_byte_budget_are_skipped_and_cached_hits_still_work() {
+        // Each 2x2 RGBA image decodes to exactly 16 bytes of pixels. A
+        // budget of 16 fits exactly one distinct image; a second, DISTINCT
+        // image would push the running total over budget and must be
+        // skipped (rendering as its ordinary placeholder) -- and, per the
+        // review finding, decoding must STOP there: a third distinct image
+        // is skipped too, even though nothing has checked whether it alone
+        // would individually fit. A later repeat of the FIRST (already
+        // budgeted, cached) src must still resolve -- exhaustion blocks new
+        // attempts, not cache hits.
+        let fits = write_temp_png("budget-fits", 2, 2, Color::rgb(9, 9, 9));
+        let too_big_1 = write_temp_png("budget-over-1", 2, 2, Color::rgb(8, 8, 8));
+        let too_big_2 = write_temp_png("budget-over-2", 2, 2, Color::rgb(7, 7, 7));
+        let html = format!(
+            r#"<img src="{}"><img src="{}"><img src="{}"><img src="{}">"#,
+            fits.as_str(),
+            too_big_1.as_str(),
+            too_big_2.as_str(),
+            fits.as_str(), // repeat of the first, already-cached src
+        );
+        let d = dom::parser::parse(&html);
+        let img_ids = find_all_img_ids(&d);
+        assert_eq!(img_ids.len(), 4);
+        let base = Url::new("file:///");
+
+        let one_image_bytes = 2 * 2 * 4; // RgbaImage::pixels.len() for a 2x2 RGBA image
+        let images = collect_images_bounded(&d, &base, MAX_IMAGES, one_image_bytes);
+
+        assert!(images.get(&img_ids[0]).is_some(), "the first (budget-fitting) image should decode");
+        assert!(images.get(&img_ids[1]).is_none(), "the second (over-budget) distinct image must be skipped");
+        assert!(images.get(&img_ids[2]).is_none(), "decoding must stop after budget exhaustion, not just skip the one over-budget image");
+        let repeat = images.get(&img_ids[3]).expect("a repeat of an already-cached, under-budget src must still resolve");
+        assert!(Rc::ptr_eq(repeat, images.get(&img_ids[0]).unwrap()), "the repeat should share the cached Rc, not re-decode");
     }
 
     #[test]

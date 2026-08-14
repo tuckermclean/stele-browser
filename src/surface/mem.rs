@@ -592,6 +592,30 @@ mod tests {
         assert_eq!(s.bytes().len(), 4 * 4 * 4);
     }
 
+    /// Review finding (Minor, quick test gap): `blit`'s `image.pixels.get(idx
+    /// ..idx + 4)` guard against a `RgbaImage` whose `pixels` buffer is
+    /// shorter than `width * height * 4` implies (a malformed/truncated
+    /// decode result reaching `blit` -- unreachable via the real P4
+    /// decoders/`images::collect_images` today, but `blit` is a `Surface`
+    /// trait method or a hostile future caller could still construct one)
+    /// was correct but untested. Pins: out-of-range source pixels are
+    /// silently skipped (destination stays background), never a panic.
+    #[test]
+    fn blit_with_a_truncated_pixel_buffer_skips_out_of_range_pixels_without_panicking() {
+        // A 2x2 image claims 16 bytes of pixels (2*2*4) but only carries 4
+        // (one real pixel, opaque black, at index 0). Blit 1:1 into a 2x2
+        // surface: only the (0,0) source pixel is in-bounds; the other
+        // three destination pixels have no backing source data and must
+        // stay background rather than reading past the buffer's end.
+        let img = crate::img::RgbaImage { width: 2, height: 2, pixels: vec![0, 0, 0, 255] };
+        let mut s = MemSurface::new(2, 2, Color::WHITE);
+        s.blit(Rect { x: 0, y: 0, w: 2, h: 2 }, &img); // must not panic
+        assert_eq!(px(&s, 0, 0), (0, 0, 0, 255), "the one in-bounds source pixel should still paint");
+        assert_eq!(px(&s, 1, 0), (255, 255, 255, 255), "out-of-range source pixel must be skipped, not read OOB");
+        assert_eq!(px(&s, 0, 1), (255, 255, 255, 255), "out-of-range source pixel must be skipped, not read OOB");
+        assert_eq!(px(&s, 1, 1), (255, 255, 255, 255), "out-of-range source pixel must be skipped, not read OOB");
+    }
+
     #[test]
     fn draw_text_zero_alpha_color_is_a_no_op() {
         let mut s = MemSurface::new(20, 20, Color::WHITE);

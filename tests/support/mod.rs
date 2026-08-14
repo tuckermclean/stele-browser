@@ -258,6 +258,19 @@ fn route(req: &RawRequest) -> (u16, &'static str, Vec<(String, String)>, Vec<u8>
         );
     }
 
+    if path == "/redirect-to-images" {
+        // Used by the images-packet's final-url regression test: redirects
+        // into the /fixtures/ subtree, so a correct base URL for resolving
+        // this document's own relative <img src>s is the POST-redirect
+        // path (/fixtures/images.html), not this pre-redirect one.
+        return (
+            302,
+            "Found",
+            vec![("Location".to_string(), "/fixtures/images.html".to_string())],
+            Vec::new(),
+        );
+    }
+
     if path == "/echo-method" {
         let ct = req.header("content-type").unwrap_or("<none>");
         let body = format!(
