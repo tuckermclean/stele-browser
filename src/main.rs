@@ -25,7 +25,7 @@ use stele::fetch::{Fetch, Request, Response, Url};
 use stele::frames;
 use stele::layout::box_tree::build_box_tree;
 use stele::layout::{self, Size};
-use stele::style::cascade;
+use stele::style::{self, cascade};
 use stele::surface::{Color, MemSurface};
 
 /// Default terminal width in character cells for `--dump-text` when
@@ -194,7 +194,13 @@ fn dump_text(source: &str, cols: usize) -> String {
         return frames::render(&url, &dom_tree, frameset_id, cols).to_text();
     }
 
-    let styles = cascade::cascade(&dom_tree, &[]);
+    // M5: feed cascade real author sheets (every inline <style> block,
+    // in document order — see style::author's own doc comment for why
+    // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
+    // extra wiring: cascade reads it straight off each Element it already
+    // walks.
+    let author_sheets = style::collect_author_sheets(&dom_tree);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
     // A tty dump never paints pixels, so skip the image fetch+decode
     // pre-pass entirely (an empty map — every <img> stays its `[alt]`-style
     // placeholder) rather than paying needless network/decode cost.
@@ -241,7 +247,13 @@ fn dump_png(source: &str) -> Vec<u8> {
         return blank_png();
     }
 
-    let styles = cascade::cascade(&dom_tree, &[]);
+    // M5: feed cascade real author sheets (every inline <style> block,
+    // in document order — see style::author's own doc comment for why
+    // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
+    // extra wiring: cascade reads it straight off each Element it already
+    // walks.
+    let author_sheets = style::collect_author_sheets(&dom_tree);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
     // Pixels matter on this path: fetch+decode every <img src> up front
     // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
     // build_box_tree can thread real pixel data into each Replaced box.
@@ -314,7 +326,13 @@ fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
         return Err("frameset documents are not supported by --render-fb".to_string());
     }
 
-    let styles = cascade::cascade(&dom_tree, &[]);
+    // M5: feed cascade real author sheets (every inline <style> block,
+    // in document order — see style::author's own doc comment for why
+    // <link rel=stylesheet> is out of scope here). Inline `style=` needs no
+    // extra wiring: cascade reads it straight off each Element it already
+    // walks.
+    let author_sheets = style::collect_author_sheets(&dom_tree);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
         return Err("empty document (nothing to render)".to_string());

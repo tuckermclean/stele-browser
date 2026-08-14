@@ -136,6 +136,7 @@ use crate::fetch::{Fetch, Request, Url};
 use crate::layout::box_tree::build_box_tree;
 use crate::layout::{self, Fragment, FragmentKind, Point, Rect, Size};
 use crate::style::cascade;
+use crate::style::collect_author_sheets;
 use crate::style::ComputedStyle;
 
 /// Maximum nesting depth for framesets/frames (a top-level frameset counts
@@ -389,7 +390,11 @@ fn render_frame(
 /// drives for a top-level document — over an already-fetched-and-parsed
 /// `dom`, producing that frame's own [`TextGrid`] at `cols` cells wide.
 fn render_single_document(dom: &Dom, cols: usize) -> TextGrid {
-    let styles = cascade::cascade(dom, &[]);
+    // M5: same author-CSS wiring as main.rs's own single-document pipeline
+    // — each frame gets its own <style> blocks/inline style= applied, not
+    // just the UA sheet.
+    let author_sheets = collect_author_sheets(dom);
+    let styles = cascade::cascade(dom, &author_sheets);
     // Frames render to a tty text grid, never pixels — no fetch/decode work
     // for images here (mirrors main.rs's own `dump_text` scope), so an
     // empty images map is always correct.

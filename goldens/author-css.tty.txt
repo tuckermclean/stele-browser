@@ -1,0 +1,8 @@
+
+
+ Visible: styled only by the UA sheet.
+
+
+ Visible again: this paragraph also matches the author rule above, but its
+ inline style="display:block" outranks it, so it shows anyway (inline beats
+ author).
