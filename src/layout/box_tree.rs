@@ -277,6 +277,97 @@ mod tests {
     }
 
     #[test]
+    fn table_cell_maps_to_box_content_table_cell_with_spans() {
+        let d = dom::parser::parse(
+            r#"<table><tr><td colspan="2" rowspan="3">x</td><td>y</td></tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+
+        fn find_cells<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
+            if matches!(node.content, BoxContent::TableCell { .. }) {
+                out.push(node);
+            }
+            for c in &node.children {
+                find_cells(c, out);
+            }
+        }
+        let mut cells = Vec::new();
+        find_cells(&root, &mut cells);
+        assert_eq!(cells.len(), 2, "expected two table cells");
+
+        match cells[0].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 2);
+                assert_eq!(rowspan, 3);
+            }
+            _ => unreachable!(),
+        }
+        // The cell's children (its text content) are still built underneath
+        // it, exactly as a Container's would be.
+        assert!(find_text(cells[0], "x").is_some());
+
+        match cells[1].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1, "missing colspan defaults to 1");
+                assert_eq!(rowspan, 1, "missing rowspan defaults to 1");
+            }
+            _ => unreachable!(),
+        }
+        assert!(find_text(cells[1], "y").is_some());
+    }
+
+    #[test]
+    fn table_cell_span_parsing_defaults_and_clamps() {
+        let d = dom::parser::parse(
+            r#"<table><tr>
+                <td colspan="0" rowspan="0">a</td>
+                <td colspan="abc" rowspan="xyz">b</td>
+                <td colspan="99999" rowspan="99999">c</td>
+            </tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles).expect("root present");
+
+        fn find_cells<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
+            if matches!(node.content, BoxContent::TableCell { .. }) {
+                out.push(node);
+            }
+            for c in &node.children {
+                find_cells(c, out);
+            }
+        }
+        let mut cells = Vec::new();
+        find_cells(&root, &mut cells);
+        assert_eq!(cells.len(), 3);
+
+        // colspan="0"/rowspan="0" -> min 1, never 0.
+        match cells[0].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1);
+                assert_eq!(rowspan, 1);
+            }
+            _ => unreachable!(),
+        }
+        // Unparseable -> default 1.
+        match cells[1].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1);
+                assert_eq!(rowspan, 1);
+            }
+            _ => unreachable!(),
+        }
+        // Absurdly large -> clamped (colspan <= 1000, rowspan <= 65534).
+        match cells[2].content {
+            BoxContent::TableCell { colspan, rowspan } => {
+                assert_eq!(colspan, 1000);
+                assert_eq!(rowspan, 65534);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn display_none_root_yields_none() {
         let d = dom::parser::parse("<html><body>x</body></html>");
         let sheet = parser::parse("html { display: none; }");
