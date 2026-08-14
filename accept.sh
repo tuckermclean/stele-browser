@@ -220,6 +220,29 @@ else
     bad "A3c: tty dump of $FIXTURE_FORMS differs from $GOLDEN_TTY_FORMS"
     sed 's/^/    /' /tmp/stele_a3c.diff
   fi
+
+  # A3d — the frames packet's own tty golden (fixtures/frames.html): a
+  # <frameset> document, so this exercises the frames.rs recursive
+  # fetch->parse->cascade->layout->tty composite path (each <frame src>
+  # is its own real file:// fetch of a sibling fixture), not just the
+  # single-document pipeline the other A3* checks drive. Same blessing
+  # discipline, same independent block.
+  GOLDEN_TTY_FRAMES="goldens/frames.tty.txt"
+  FIXTURE_FRAMES="fixtures/frames.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3d: host binary still not found at $HOST_BIN"
+  elif ! out_frames="$("$HOST_BIN" --headless --dump-text "$FIXTURE_FRAMES" 2>/tmp/stele_a3d.err)"; then
+    bad "A3d: stele --headless --dump-text crashed on $FIXTURE_FRAMES"
+    sed 's/^/    /' /tmp/stele_a3d.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_frames" > "$GOLDEN_TTY_FRAMES"
+    pass "A3d: blessed frames tty golden -> $GOLDEN_TTY_FRAMES (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_FRAMES" <(printf '%s\n' "$out_frames") >/tmp/stele_a3d.diff 2>&1; then
+    pass "A3d: tty dump of $FIXTURE_FRAMES matches golden"
+  else
+    bad "A3d: tty dump of $FIXTURE_FRAMES differs from $GOLDEN_TTY_FRAMES"
+    sed 's/^/    /' /tmp/stele_a3d.diff
+  fi
 fi
 pend "A3: mem-Surface PNG goldens — P9/M4"
 

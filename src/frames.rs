@@ -158,14 +158,7 @@ const SUBDOC_VIEWPORT_HEIGHT: f32 = 100_000.0;
 /// found, the document should be routed through [`render`] instead of the
 /// ordinary single-document pipeline. `None` means "render normally,
 /// unchanged path" per the packet brief.
-pub fn find_frameset(_dom: &Dom) -> Option<NodeId> {
-    // RED: not yet implemented (test-first) — real body lands in the paired
-    // GREEN commit.
-    None
-}
-
-#[allow(dead_code)]
-fn find_frameset_impl(dom: &Dom) -> Option<NodeId> {
+pub fn find_frameset(dom: &Dom) -> Option<NodeId> {
     if dom.is_empty() {
         return None;
     }
@@ -205,14 +198,7 @@ struct FrameCtx {
 /// wide (matching `--cols`/the top-level pipeline's own width parameter).
 /// Total: never panics regardless of how malformed the frameset markup,
 /// `rows`/`cols` attributes, or any fetched child document is.
-pub fn render(_base_url: &Url, _dom: &Dom, _frameset_id: NodeId, cols: usize) -> TextGrid {
-    // RED: not yet implemented (test-first) — real body lands in the paired
-    // GREEN commit.
-    TextGrid::blank(cols, 1)
-}
-
-#[allow(dead_code)]
-fn render_impl(base_url: &Url, dom: &Dom, frameset_id: NodeId, cols: usize) -> TextGrid {
+pub fn render(base_url: &Url, dom: &Dom, frameset_id: NodeId, cols: usize) -> TextGrid {
     let width_px = cols as f32 * CELL_W;
     let height_px = DEFAULT_FRAMESET_VIEWPORT_ROWS as f32 * CELL_H;
     let mut ctx = FrameCtx { budget: MAX_TOTAL_FRAMES, visited: vec![base_url.as_str().to_string()] };
@@ -489,14 +475,7 @@ fn parse_track_token(tok: &str) -> Track {
 /// zero/negative region as "nothing to draw" before this is even reached,
 /// but this function holds that guarantee independently since it's the
 /// unit that's directly tested.
-fn compute_track_extents(spec: Option<&str>, _total_px: f32) -> Vec<f32> {
-    // RED: not yet implemented (test-first) — real body lands in the paired
-    // GREEN commit.
-    vec![0.0; parse_track_spec(spec).len()]
-}
-
-#[allow(dead_code)]
-fn compute_track_extents_impl(spec: Option<&str>, total_px: f32) -> Vec<f32> {
+fn compute_track_extents(spec: Option<&str>, total_px: f32) -> Vec<f32> {
     let tracks = parse_track_spec(spec);
     let total = if total_px.is_finite() && total_px > 0.0 { total_px } else { 0.0 };
     if total == 0.0 {

@@ -111,10 +111,13 @@ impl TextGrid {
     /// ultimately attacker/document-controlled, same as `--cols`); either
     /// dimension being `0` yields an empty grid, matching `render`'s own
     /// `cols == 0` / `rows_needed == 0` short-circuits.
-    pub fn blank(_cols: usize, _rows: usize) -> Self {
-        // RED: not yet implemented (frames packet, test-first) — real body
-        // lands in the paired GREEN commit.
-        TextGrid { rows: Vec::new() }
+    pub fn blank(cols: usize, rows: usize) -> Self {
+        if cols == 0 || rows == 0 {
+            return TextGrid { rows: Vec::new() };
+        }
+        let cols = cols.min(MAX_GRID_COLS);
+        let rows = rows.min(MAX_GRID_ROWS);
+        TextGrid { rows: vec![vec![' '; cols]; rows] }
     }
 
     /// This grid's row count (its rendered/content-driven height in cells).
@@ -130,13 +133,7 @@ impl TextGrid {
     /// not something exceptional). Later writes at the same cell (e.g. two
     /// overlapping `blit` calls) win over earlier ones, mirroring `render`'s
     /// own "paint order wins ties" rule.
-    pub fn blit(&mut self, _other: &TextGrid, _col_off: usize, _row_off: usize) {
-        // RED: not yet implemented (frames packet, test-first) — real body
-        // lands in the paired GREEN commit.
-    }
-
-    #[allow(dead_code)]
-    fn blit_unused(&mut self, other: &TextGrid, col_off: usize, row_off: usize) {
+    pub fn blit(&mut self, other: &TextGrid, col_off: usize, row_off: usize) {
         for (r, src_row) in other.rows.iter().enumerate() {
             let dst_r = row_off + r;
             let Some(dst_row) = self.rows.get_mut(dst_r) else { break };
