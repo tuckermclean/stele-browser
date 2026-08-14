@@ -11,16 +11,25 @@
 //!
 //! ## Split: testable core vs. untestable-in-CI device I/O
 //!
-//! There is no framebuffer device in CI (`/dev/fb0` absent on the runner, and
-//! so is `/sys/class/graphics/fb0` — verified by hand against this repo's own
-//! CI sandbox). So:
+//! Whether a real framebuffer device exists in CI is NOT something this
+//! module (or its tests) may assume either way: some CI/build containers do
+//! have `/sys/class/graphics/fb0` (from a virtual/host-passthrough fb), some
+//! don't, and neither should be load-bearing for a test's pass/fail. So:
 //! - [`parse_fb_info`] (geometry parsing) and [`convert_to_fb_bytes`] (pixel
-//!   conversion) are pure functions, unit-tested thoroughly below.
-//! - [`read_fb_info`] and [`write_to_device`] are the thin, un-mockable
-//!   device-touching shims. They're still exercised in CI, just via their
-//!   *error* path: calling them against the real (absent) default paths
-//!   proves totality (`Err`, never a panic) precisely because the device
-//!   isn't there.
+//!   conversion) are pure functions, unit-tested thoroughly below — no I/O
+//!   at all.
+//! - [`read_fb_info_from`] and [`write_to_device`] are the thin
+//!   path-parameterized device-touching shims: every test below drives them
+//!   against either a scratch temp directory/file THIS test creates (for the
+//!   `Ok` path) or a path built from a fresh `TempDir`-style unique name that
+//!   is guaranteed to not exist in ANY environment (for the `Err` path) —
+//!   never the real `/sys/class/graphics/fb0` or `/dev/fb0`. [`read_fb_info`]
+//!   and the `--render-fb` CLI path (`src/main.rs`) are the zero-argument
+//!   production entry points that close over the real default paths; they
+//!   have no dedicated unit test of their own (there is nothing to assert
+//!   about their `Result` that isn't purely a function of whatever hardware
+//!   happens to be present), but they're a one-line delegation to the
+//!   parameterized, thoroughly-tested functions below.
 //!
 //! ## Assumed on-device pixel layouts
 //!
@@ -35,6 +44,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 
 use crate::surface::MemSurface;
 
@@ -117,17 +127,31 @@ fn parse_u32_field(s: &str, field: &str) -> Result<u32, FbError> {
 
 /// Read+parse `{sysfs_dir}/virtual_size`, `{sysfs_dir}/bits_per_pixel`,
 /// `{sysfs_dir}/stride` into an [`FbInfo`]. Total: a missing/unreadable
-/// directory (no framebuffer driver loaded — the CI-normal case) or garbage
-/// contents is a clean `Err`, never a panic.
-pub fn read_fb_info(sysfs_dir: &str) -> Result<FbInfo, FbError> {
+/// directory (no framebuffer driver loaded) or garbage contents is a clean
+/// `Err`, never a panic.
+///
+/// The parameterized, unit-tested core: callers that want the real system
+/// framebuffer's geometry go through [`read_fb_info`] instead, which is
+/// this function closed over [`DEFAULT_SYSFS_DIR`].
+pub fn read_fb_info_from(sysfs_dir: &Path) -> Result<FbInfo, FbError> {
     let read = |name: &str| -> Result<String, FbError> {
-        let path = format!("{sysfs_dir}/{name}");
-        std::fs::read_to_string(&path).map_err(|e| FbError::Io(format!("{path}: {e}")))
+        let path = sysfs_dir.join(name);
+        std::fs::read_to_string(&path).map_err(|e| FbError::Io(format!("{}: {e}", path.display())))
     };
     let virtual_size = read("virtual_size")?;
     let bpp = read("bits_per_pixel")?;
     let stride = read("stride")?;
     parse_fb_info(&virtual_size, &bpp, &stride)
+}
+
+/// The real system framebuffer's geometry — [`read_fb_info_from`] closed
+/// over [`DEFAULT_SYSFS_DIR`]. Not itself unit-tested (there's no
+/// environment-independent assertion to make about a call that reads
+/// whatever real sysfs happens to contain, or not contain, on this
+/// particular machine); [`read_fb_info_from`] carries the real test
+/// coverage.
+pub fn read_fb_info() -> Result<FbInfo, FbError> {
+    read_fb_info_from(Path::new(DEFAULT_SYSFS_DIR))
 }
 
 #[inline]
@@ -215,31 +239,35 @@ pub fn convert_to_fb_bytes(surface_rgba: &[u8], surf_w: u32, surf_h: u32, info: 
 /// Write `bytes` (already device-formatted, e.g. by [`convert_to_fb_bytes`])
 /// to `device_path` in full, from offset 0. Total: an absent device, a
 /// permission-denied open, or a short/failed write is a clean
-/// `Err(FbError::Io(_))`, never a panic — this is precisely the path that
-/// can't be exercised for real in CI (no `/dev/fb0` on the runner), so its
-/// only CI coverage is this same error path, deliberately.
+/// `Err(FbError::Io(_))`, never a panic.
+///
+/// Parameterized by `device_path` for the same reason [`read_fb_info_from`]
+/// is: it lets tests drive the real `Ok`/`Err` code paths deterministically
+/// against a scratch file, rather than depending on whether the real
+/// `/dev/fb0` happens to exist (or be writable) on whatever machine the
+/// test suite runs on.
 ///
 /// No `mmap`; this is a one-shot "paint and exit" render, not a compositor,
 /// so there's no need for the speed (or the `unsafe`) an `mmap`'d
 /// framebuffer would bring — and no restore-on-exit either, for the same
 /// reason (nothing owns the screen afterward to hand it back to).
-pub fn write_to_device(bytes: &[u8], device_path: &str) -> Result<(), FbError> {
+pub fn write_to_device(device_path: &Path, bytes: &[u8]) -> Result<(), FbError> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(device_path)
-        .map_err(|e| FbError::Io(format!("{device_path}: {e}")))?;
-    file.write_all(bytes).map_err(|e| FbError::Io(format!("{device_path}: write failed: {e}")))
+        .map_err(|e| FbError::Io(format!("{}: {e}", device_path.display())))?;
+    file.write_all(bytes).map_err(|e| FbError::Io(format!("{}: write failed: {e}", device_path.display())))
 }
 
 /// The end-to-end fbdev output path: read geometry from `sysfs_dir`, convert
 /// `surface`'s pixels to the device's layout, and write them to
 /// `device_path`. Total: any failure at any stage (geometry unreadable,
 /// unsupported bpp, device unwritable) is a clean `Err`, never a panic.
-pub fn render_to_device(surface: &MemSurface, sysfs_dir: &str, device_path: &str) -> Result<(), FbError> {
-    let info = read_fb_info(sysfs_dir)?;
+pub fn render_to_device(surface: &MemSurface, sysfs_dir: &Path, device_path: &Path) -> Result<(), FbError> {
+    let info = read_fb_info_from(sysfs_dir)?;
     let (w, h) = crate::surface::Surface::size(surface);
     let bytes = convert_to_fb_bytes(surface.bytes(), w, h, info)?;
-    write_to_device(&bytes, device_path)
+    write_to_device(device_path, &bytes)
 }
 
 #[cfg(test)]
@@ -289,33 +317,73 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------- read_fb_info (I/O)
+    // -------------------------------------------------- read_fb_info_from (I/O)
+    //
+    // None of these tests may depend on whether the REAL `/sys/class/graphics/
+    // fb0` exists on the host running them -- some CI/build containers have a
+    // real (or passed-through) fb0, some don't, and a test's pass/fail can't
+    // be a function of that. Every test below drives `read_fb_info_from`
+    // against either a scratch temp directory this test itself creates (for
+    // the `Ok` path) or a freshly-minted, guaranteed-nonexistent path (for
+    // the `Err` path) -- never `DEFAULT_SYSFS_DIR`.
 
-    #[test]
-    fn read_fb_info_on_a_missing_sysfs_dir_is_a_clean_err_not_a_panic() {
-        // The real default path -- absent in this sandbox and in CI (no fb
-        // driver loaded on the runner), which is exactly the case this
-        // packet must degrade cleanly on.
-        let result = read_fb_info(DEFAULT_SYSFS_DIR);
-        assert!(result.is_err(), "expected Err since {DEFAULT_SYSFS_DIR} has no fb driver in this environment");
+    /// A path this test can be certain doesn't exist: process-id- and
+    /// nanosecond-timestamp-qualified, under the OS temp dir, never created.
+    /// Deterministic regardless of host/CI environment -- unlike a
+    /// hardcoded-looking "/nonexistent-xyz" guess, this can't collide with a
+    /// real path some container image happens to ship.
+    fn guaranteed_absent_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("stele-fb-absent-{tag}-{}-{nanos}", std::process::id()))
     }
 
     #[test]
-    fn read_fb_info_on_an_explicitly_bogus_dir_is_a_clean_err() {
-        let result = read_fb_info("/nonexistent-sysfs-dir-xyz/fb0");
-        assert!(result.is_err());
+    fn read_fb_info_from_on_a_guaranteed_absent_dir_is_a_clean_err_not_a_panic() {
+        let dir = guaranteed_absent_path("sysfs-dir");
+        let result = read_fb_info_from(&dir);
+        assert!(result.is_err(), "expected Err: {} was never created", dir.display());
     }
 
     #[test]
-    fn read_fb_info_reads_real_files_from_a_tmp_dir() {
-        let dir = std::env::temp_dir().join(format!("stele-fb-test-{}-a", std::process::id()));
+    fn read_fb_info_from_reads_real_files_from_a_tmp_dir() {
+        let dir = guaranteed_absent_path("sysfs-ok");
         std::fs::create_dir_all(&dir).expect("create tmp sysfs dir");
         std::fs::write(dir.join("virtual_size"), "640,480\n").unwrap();
         std::fs::write(dir.join("bits_per_pixel"), "16\n").unwrap();
         std::fs::write(dir.join("stride"), "1280\n").unwrap();
 
-        let info = read_fb_info(dir.to_str().unwrap()).expect("well-formed tmp sysfs dir parses");
+        let info = read_fb_info_from(&dir).expect("well-formed tmp sysfs dir parses");
         assert_eq!(info, FbInfo { width: 640, height: 480, bpp: 16, stride: 1280 });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_fb_info_from_a_tmp_dir_with_a_missing_file_is_a_clean_err() {
+        // virtual_size present, bits_per_pixel/stride missing entirely.
+        let dir = guaranteed_absent_path("sysfs-missing-file");
+        std::fs::create_dir_all(&dir).expect("create tmp sysfs dir");
+        std::fs::write(dir.join("virtual_size"), "640,480\n").unwrap();
+
+        let result = read_fb_info_from(&dir);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_fb_info_from_a_tmp_dir_with_garbage_contents_is_a_clean_err() {
+        let dir = guaranteed_absent_path("sysfs-garbage");
+        std::fs::create_dir_all(&dir).expect("create tmp sysfs dir");
+        std::fs::write(dir.join("virtual_size"), "not-a-size\n").unwrap();
+        std::fs::write(dir.join("bits_per_pixel"), "32\n").unwrap();
+        std::fs::write(dir.join("stride"), "4096\n").unwrap();
+
+        let result = read_fb_info_from(&dir);
+        assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -448,42 +516,87 @@ mod tests {
     }
 
     // ------------------------------------------------------------- totality
+    //
+    // Same rule as above: never touch the real DEFAULT_DEVICE_PATH. The `Ok`
+    // path is now positively testable too, against a scratch file.
 
     #[test]
-    fn write_to_device_on_the_real_default_device_path_is_a_clean_err_not_a_panic() {
-        // /dev/fb0 is absent in this sandbox and in CI -- exactly the case
-        // this function must degrade cleanly on.
-        let result = write_to_device(&[0u8; 16], DEFAULT_DEVICE_PATH);
-        assert!(result.is_err(), "expected Err since {DEFAULT_DEVICE_PATH} doesn't exist in this environment");
+    fn write_to_device_on_a_guaranteed_absent_path_is_a_clean_err_not_a_panic() {
+        let path = guaranteed_absent_path("device-parent-missing").join("fb0");
+        let result = write_to_device(&path, &[0u8; 16]);
+        assert!(result.is_err(), "expected Err: {} has no writable parent dir", path.display());
     }
 
     #[test]
-    fn write_to_device_on_an_explicitly_bogus_path_is_a_clean_err() {
-        let result = write_to_device(&[0u8; 16], "/nonexistent-dir-xyz/fb0");
-        assert!(result.is_err());
+    fn write_to_device_to_a_writable_tmp_file_succeeds_and_writes_the_exact_bytes() {
+        let path = guaranteed_absent_path("device-ok");
+        // OpenOptions::write(true) alone doesn't create the file -- give it
+        // one to open, mirroring a real device node that pre-exists.
+        std::fs::write(&path, []).expect("create scratch device file");
+
+        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33];
+        let result = write_to_device(&path, &bytes);
+        assert!(result.is_ok(), "{result:?}");
+
+        let on_disk = std::fs::read(&path).expect("scratch device file should exist");
+        assert_eq!(on_disk, bytes);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn render_to_device_with_absent_sysfs_and_device_is_a_clean_err_not_a_panic() {
+    fn render_to_device_with_guaranteed_absent_sysfs_and_device_is_a_clean_err_not_a_panic() {
         let surface = MemSurface::new(4, 4, Color::WHITE);
-        let result = render_to_device(&surface, DEFAULT_SYSFS_DIR, DEFAULT_DEVICE_PATH);
+        let sysfs_dir = guaranteed_absent_path("render-sysfs");
+        let device_path = guaranteed_absent_path("render-device");
+        let result = render_to_device(&surface, &sysfs_dir, &device_path);
         assert!(result.is_err());
     }
 
     #[test]
     fn render_to_device_with_real_geometry_but_absent_device_is_a_clean_err() {
         // Geometry parses fine (tmp sysfs dir), but the device write still
-        // fails cleanly since there's no real /dev/fb0 in this environment.
-        let dir = std::env::temp_dir().join(format!("stele-fb-test-{}-b", std::process::id()));
+        // fails cleanly since the device path is guaranteed to not exist.
+        let dir = guaranteed_absent_path("render-sysfs-ok");
         std::fs::create_dir_all(&dir).expect("create tmp sysfs dir");
         std::fs::write(dir.join("virtual_size"), "4,4").unwrap();
         std::fs::write(dir.join("bits_per_pixel"), "32").unwrap();
         std::fs::write(dir.join("stride"), "16").unwrap();
 
         let surface = MemSurface::new(4, 4, Color::WHITE);
-        let result = render_to_device(&surface, dir.to_str().unwrap(), "/nonexistent-dir-xyz/fb0");
+        let device_path = guaranteed_absent_path("render-device-absent");
+        let result = render_to_device(&surface, &dir, &device_path);
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_to_device_end_to_end_with_tmp_sysfs_and_a_writable_tmp_device_succeeds() {
+        // The full Ok path, all the way through convert+write, against
+        // nothing but scratch files -- no real hardware needed or assumed.
+        let dir = guaranteed_absent_path("render-e2e-sysfs");
+        std::fs::create_dir_all(&dir).expect("create tmp sysfs dir");
+        std::fs::write(dir.join("virtual_size"), "2,2").unwrap();
+        std::fs::write(dir.join("bits_per_pixel"), "32").unwrap();
+        std::fs::write(dir.join("stride"), "8").unwrap();
+
+        let device_path = guaranteed_absent_path("render-e2e-device");
+        std::fs::write(&device_path, []).expect("create scratch device file");
+
+        let surface = swatch_2x2();
+        let result = render_to_device(&surface, &dir, &device_path);
+        assert!(result.is_ok(), "{result:?}");
+
+        let on_disk = std::fs::read(&device_path).expect("scratch device file should exist");
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0, 0, 255, 0,   0, 255, 0, 0,
+            255, 0, 0, 0,   255, 255, 255, 0,
+        ];
+        assert_eq!(on_disk, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&device_path);
     }
 }

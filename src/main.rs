@@ -13,6 +13,7 @@
 //! program that runs code shipped by the wire (charter C3).
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use stele::backend::fb;
 use stele::backend::raster;
@@ -343,21 +344,26 @@ fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
     Ok(surface)
 }
 
-/// `--render-fb <src>`'s CLI-facing driver: render `source` to a
-/// `MemSurface` sized to the real framebuffer's width (read from
-/// `backend::fb::DEFAULT_SYSFS_DIR`; falls back to [`DEFAULT_FB_WIDTH`] and
-/// reports the geometry error to stderr if sysfs is unreadable -- e.g. no fb
-/// driver loaded), convert it to the device's own pixel layout, and write it
-/// to `backend::fb::DEFAULT_DEVICE_PATH`.
+/// `--render-fb <src>`'s pipeline, parameterized by the sysfs geometry
+/// directory and device node path: render `source` to a `MemSurface` sized
+/// to the framebuffer's width (read from `sysfs_dir`; falls back to
+/// [`DEFAULT_FB_WIDTH`] and reports the geometry error to stderr if sysfs is
+/// unreadable -- e.g. no fb driver loaded), convert it to the device's own
+/// pixel layout, and write it to `device_path`.
 ///
 /// Total: every failure mode (fetch error, empty/frameset document,
 /// unreadable framebuffer geometry, unsupported `bits_per_pixel`, an absent
-/// or unwritable `/dev/fb0`) is a clean `Err(String)`, never a panic --
-/// this is the path brief calls out as un-integration-testable in CI (no
-/// `/dev/fb0` on the runner), so its device-facing half is only ever
-/// exercised via this same error path there.
-fn render_fb(source: &str) -> Result<(), String> {
-    let fb_info = fb::read_fb_info(fb::DEFAULT_SYSFS_DIR);
+/// or unwritable device) is a clean `Err(String)`, never a panic.
+///
+/// Parameterized (rather than hardcoding `backend::fb::DEFAULT_SYSFS_DIR`/
+/// `DEFAULT_DEVICE_PATH` here) so tests can drive the full pipeline against
+/// scratch paths deterministically -- whether the REAL `/sys/class/graphics/
+/// fb0` and `/dev/fb0` exist on the host running the test suite must never
+/// change a test's pass/fail (some CI/build containers do have a real or
+/// passed-through fb0, some don't). [`render_fb`] is this closed over the
+/// real defaults, for [`main`] to call.
+fn render_fb_to(source: &str, sysfs_dir: &Path, device_path: &Path) -> Result<(), String> {
+    let fb_info = fb::read_fb_info_from(sysfs_dir);
     let width = match &fb_info {
         Ok(info) => info.width,
         Err(e) => {
@@ -370,7 +376,20 @@ fn render_fb(source: &str) -> Result<(), String> {
     let info = fb_info.map_err(|e| e.to_string())?;
     let (surf_w, surf_h) = stele::surface::Surface::size(&surface);
     let bytes = fb::convert_to_fb_bytes(surface.bytes(), surf_w, surf_h, info).map_err(|e| e.to_string())?;
-    fb::write_to_device(&bytes, fb::DEFAULT_DEVICE_PATH).map_err(|e| e.to_string())
+    fb::write_to_device(device_path, &bytes).map_err(|e| e.to_string())
+}
+
+/// `--render-fb <src>`'s CLI-facing driver: [`render_fb_to`] closed over the
+/// real `backend::fb::DEFAULT_SYSFS_DIR`/`DEFAULT_DEVICE_PATH`. Not itself
+/// unit-tested for the same reason `backend::fb::read_fb_info`/
+/// `write_to_device`'s zero-argument forms aren't: there's no
+/// environment-independent assertion to make about a call that touches
+/// whatever real hardware happens to be present, or not, on this machine --
+/// [`render_fb_to`] carries the real test coverage. This is the path the
+/// brief calls out as un-integration-testable in CI (no `/dev/fb0`
+/// guaranteed on any given runner).
+fn render_fb(source: &str) -> Result<(), String> {
+    render_fb_to(source, Path::new(fb::DEFAULT_SYSFS_DIR), Path::new(fb::DEFAULT_DEVICE_PATH))
 }
 
 fn main() {
@@ -685,16 +704,56 @@ mod tests {
         assert_eq!(a.render_fb, None);
     }
 
-    /// The core of the totality contract this packet exists to prove:
-    /// there is no `/dev/fb0` (and no `/sys/class/graphics/fb0`) in this
-    /// sandbox, mirroring the CI runner exactly. `render_fb` must still
-    /// degrade to a clean `Err`, never a panic/abort, even though it drives
-    /// the full fetch->parse->cascade->box-tree->layout->paint pipeline
-    /// before ever touching the (absent) device.
+    /// A path this test can be certain doesn't exist, regardless of host/CI
+    /// environment (mirrors `backend::fb::tests::guaranteed_absent_path`;
+    /// duplicated here rather than shared since it's test-only and this is
+    /// a separate crate target from the lib).
+    fn guaranteed_absent_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("stele-render-fb-absent-{tag}-{}-{nanos}", std::process::id()))
+    }
+
+    /// The core of the totality contract this packet exists to prove: with
+    /// NO real framebuffer sysfs geometry or device node available (a
+    /// guaranteed-absent scratch path, not the real `/sys/class/graphics/
+    /// fb0`/`/dev/fb0` -- whether those exist on the host running this test
+    /// must never change its pass/fail), `render_fb_to` still degrades to a
+    /// clean `Err`, never a panic/abort, even though it drives the full
+    /// fetch->parse->cascade->box-tree->layout->paint pipeline first.
     #[test]
-    fn render_fb_on_a_real_document_with_no_framebuffer_device_is_a_clean_err() {
-        let result = render_fb("fixtures/basic.html");
-        assert!(result.is_err(), "expected Err: no /dev/fb0 in this environment");
+    fn render_fb_to_with_guaranteed_absent_sysfs_and_device_is_a_clean_err_not_a_panic() {
+        let sysfs_dir = guaranteed_absent_path("sysfs");
+        let device_path = guaranteed_absent_path("device");
+        let result = render_fb_to("fixtures/basic.html", &sysfs_dir, &device_path);
+        assert!(result.is_err());
+    }
+
+    /// The positive end-to-end path: a real fixture, real (scratch) sysfs
+    /// geometry, and a real (scratch, writable) device file -- the whole
+    /// --render-fb pipeline actually succeeds and writes bytes, with no
+    /// real hardware anywhere in the loop.
+    #[test]
+    fn render_fb_to_with_real_tmp_geometry_and_a_writable_tmp_device_succeeds() {
+        let sysfs_dir = guaranteed_absent_path("sysfs-ok");
+        std::fs::create_dir_all(&sysfs_dir).expect("create tmp sysfs dir");
+        std::fs::write(sysfs_dir.join("virtual_size"), "64,64").unwrap();
+        std::fs::write(sysfs_dir.join("bits_per_pixel"), "32").unwrap();
+        std::fs::write(sysfs_dir.join("stride"), "256").unwrap(); // 64px * 4B, no padding
+
+        let device_path = guaranteed_absent_path("device-ok");
+        std::fs::write(&device_path, []).expect("create scratch device file");
+
+        let result = render_fb_to("fixtures/basic.html", &sysfs_dir, &device_path);
+        assert!(result.is_ok(), "{result:?}");
+
+        let on_disk = std::fs::read(&device_path).expect("scratch device file should exist");
+        assert_eq!(on_disk.len(), 64 * 256, "expected exactly height*stride bytes written");
+
+        let _ = std::fs::remove_dir_all(&sysfs_dir);
+        let _ = std::fs::remove_file(&device_path);
     }
 
     #[test]
