@@ -112,15 +112,38 @@ pub const MAX_LINKS: usize = 32;
 /// Total: an empty DOM returns an empty `Vec`; every per-`<link>` failure
 /// mode (bad `href`, fetch error, non-CSS response, budget exhaustion) skips
 /// just that sheet — see module docs' Totality section.
-#[allow(unused_variables)]
 pub fn collect_all_author_sheets(dom: &Dom, base: &Url, viewport_width_px: f32) -> Vec<Stylesheet> {
-    // RED (m5-link-css): `<link>` fetching not implemented yet -- this stub
-    // only picks up inline <style> blocks (the pre-existing M5 behavior),
-    // same as `style::collect_author_sheets_for_viewport`. Every test below
-    // that exercises an ACTUAL `<link rel=stylesheet>` fetch is expected to
-    // fail against this stub; see the follow-up commit for the real
-    // implementation.
-    style::collect_author_sheets_for_viewport(dom, viewport_width_px)
+    let mut sheets = Vec::new();
+    if dom.is_empty() {
+        return sheets;
+    }
+    let mut link_fetches = 0usize;
+
+    // Same explicit-stack, document-order, non-recursive walk
+    // `style::author::collect_author_sheets` uses — see that function's own
+    // doc comment for why (deep-DOM safety without a depth counter).
+    let mut stack: Vec<NodeId> = vec![dom.root()];
+    while let Some(id) = stack.pop() {
+        let Node::Element(el) = dom.node(id) else {
+            continue;
+        };
+        match el.name.as_str() {
+            "style" => {
+                let css = style_text(dom, id);
+                sheets.push(style::parse_and_flatten(&css, viewport_width_px));
+            }
+            "link" => {
+                if let Some(sheet) = collect_link_sheet(el, base, viewport_width_px, &mut link_fetches) {
+                    sheets.push(sheet);
+                }
+            }
+            _ => {}
+        }
+        for &child in el.children.iter().rev() {
+            stack.push(child);
+        }
+    }
+    sheets
 }
 
 /// Handle one `<link>` element: gate on `rel`/`media`, then (if it passes
