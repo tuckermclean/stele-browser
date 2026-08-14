@@ -18,6 +18,7 @@ use std::path::Path;
 use stele::backend::fb;
 use stele::backend::raster;
 use stele::backend::tty;
+use stele::browser;
 use stele::dom;
 use stele::fetch::file::FileFetcher;
 use stele::fetch::http1::Http1Client;
@@ -75,11 +76,18 @@ struct Args {
     /// [`print_stats`]'s doc comment. Only consulted alongside `--dump-text`/
     /// `--dump-png`, per the packet brief.
     stats: bool,
+    /// packet/shell-keyboard: the first bare (non-`--flag`) argument, e.g.
+    /// `stele fixtures/basic.html` or `stele http://example.com/` — when
+    /// `headless` is `false` and this is `Some`, `main` launches the
+    /// interactive shell on it (see [`run_browser`]) instead of falling
+    /// back to the M0 hello. Not consulted at all in `--headless` mode
+    /// (those paths read `dump_text`/`dump_png`/`render_fb` directly).
+    source: Option<String>,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS, stats: false }
+        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS, stats: false, source: None }
     }
 }
 
@@ -125,7 +133,18 @@ fn parse_args(argv: &[String]) -> Args {
                 }
             }
             "--stats" => out.stats = true,
-            _ => {}
+            other => {
+                // packet/shell-keyboard: the first bare token (doesn't start
+                // with `--`) is the interactive-mode source. Only the FIRST
+                // one is captured — `stele fixtures/basic.html extra-noise`
+                // still launches on `fixtures/basic.html` rather than
+                // silently overwriting it with `extra-noise`, matching this
+                // function's overall "ignore anything past what's
+                // recognized" posture.
+                if out.source.is_none() && !other.starts_with("--") {
+                    out.source = Some(other.to_string());
+                }
+            }
         }
         i += 1;
     }
@@ -528,6 +547,199 @@ fn render_fb(source: &str) -> Result<(), String> {
     render_fb_to(source, Path::new(fb::DEFAULT_SYSFS_DIR), Path::new(fb::DEFAULT_DEVICE_PATH))
 }
 
+// ---------------------------------------------------------------------------
+// packet/shell-keyboard: the interactive shell. `stele::browser` (P7) owns
+// every actual DECISION (scroll/focus/key-parsing/history/frame rendering) —
+// pure and unit-tested there. What lives here is deliberately thin and NOT
+// unit-tested (the packet brief's own split: "this is NOT
+// end-to-end CI-testable" — no terminal in CI): raw-mode termios, terminal
+// size, the blocking read/draw loop, and gluing `stele::browser::Page`
+// together from the SAME fetch->parse->cascade->box-tree->layout pipeline
+// `dump_text`/`dump_png` already drive (see `build_page_from_dom`'s doc
+// comment for why it doesn't just reuse `dump_text` itself).
+// ---------------------------------------------------------------------------
+
+/// Build a [`browser::Page`] from an already-fetched+parsed `dom_tree`,
+/// mirroring `dump_text`'s own cascade->box-tree->layout steps exactly
+/// (same author-sheet collection, same viewport-width-from-cols convention)
+/// but keeping `dom_tree`/`styles`/`fragments` alive long enough to hand all
+/// three to `browser::Page::build` — `dump_text` can't be reused directly
+/// here since it throws those away and returns only the final rendered
+/// string. `final_url` is the document's OWN url (post-redirect, when
+/// fetched) — both the base `<link>`/`<img>`/`<a href>` resolution uses AND
+/// the `Page`'s own `url` field (what `Enter`-on-link resolves against,
+/// what the status line prints).
+fn build_page_from_dom(dom_tree: dom::Dom, final_url: &Url, cols: usize) -> browser::Page {
+    let viewport_width = cols as f32 * 8.0;
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, final_url, viewport_width);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
+    let fragments = match build_box_tree(&dom_tree, &styles, &HashMap::new()) {
+        Some(root) => layout::layout(&root, Size { w: viewport_width, h: HEADLESS_VIEWPORT_HEIGHT }),
+        None => Vec::new(),
+    };
+    browser::Page::build(dom_tree, &styles, &fragments, cols, final_url.clone())
+}
+
+/// A minimal, always-buildable [`browser::Page`] reporting a load failure —
+/// goes through the SAME real pipeline as any other page (not a hand-built
+/// `Fragment` list) so it behaves identically in the shell (scrollable,
+/// has a status line, etc.). Used whenever a fetch/submit fails: the shell
+/// must never crash or hang on a bad URL/network error, just show something
+/// and stay driveable (Backspace still works to get back out).
+fn error_page(url: &Url, message: &str, cols: usize) -> browser::Page {
+    let html = format!("<p>Could not load {}</p><p>{}</p>", url.as_str(), message);
+    let dom_tree = dom::parser::parse(&html);
+    build_page_from_dom(dom_tree, url, cols)
+}
+
+/// Fetch + parse `url` into a [`browser::Page`] at `cols` columns; a fetch
+/// error degrades to [`error_page`] rather than propagating — matching
+/// `dump_text`/`dump_png`'s own "never a panic, never an unhandled `Err`
+/// bubbling up to `main`" totality contract, just with a visible on-screen
+/// error instead of a blank string.
+fn load_page(url: &Url, cols: usize) -> browser::Page {
+    match fetch_response(url) {
+        Ok(response) => {
+            let html = String::from_utf8_lossy(&response.body);
+            let dom_tree = dom::parser::parse(&html);
+            build_page_from_dom(dom_tree, &response.final_url, cols)
+        }
+        Err(e) => error_page(url, &e, cols),
+    }
+}
+
+/// Dispatch a form-submission [`Request`] (`browser::Command::Submit`) over
+/// whichever of the two live schemes it names — same scheme dispatch as
+/// [`fetch_response`], just over a caller-built `Request` (method/body
+/// already set by `form::serialize_submit`) instead of a fresh `GET`.
+fn fetch_request(req: &Request) -> Result<Response, String> {
+    match req.url.scheme().as_str() {
+        "file" => FileFetcher::new().fetch(req).map_err(|e| format!("{e:?}")),
+        "http" => Http1Client::new().fetch(req).map_err(|e| format!("{e:?}")),
+        other => Err(format!("unsupported scheme: {other}")),
+    }
+}
+
+/// Query the real terminal size via `TIOCGWINSZ` (`rustix::termios::
+/// tcgetwinsize`), falling back to 80x24 (brief's own named fallback) when
+/// stdout isn't a tty, the ioctl fails, or reports a degenerate `0x0` (some
+/// pty setups do this before the first resize event).
+fn terminal_size() -> (usize, usize) {
+    match rustix::termios::tcgetwinsize(std::io::stdout()) {
+        Ok(ws) if ws.ws_col > 0 && ws.ws_row > 0 => (ws.ws_col as usize, ws.ws_row as usize),
+        _ => (80, 24),
+    }
+}
+
+/// The interactive shell's raw-mode read/draw loop -- see this module's own
+/// section doc comment for the pure/thin split. NOT unit-tested (brief:
+/// "this is NOT end-to-end CI-testable — no terminal in CI"); manually
+/// driven by a human (see the packet report for exact steps).
+///
+/// Raw mode clears THREE local-mode flags, not just the two the brief names
+/// (`ICANON`, `ECHO`): also `ISIG`. Without `ISIG` off, Ctrl-C would be
+/// consumed by the tty driver as `SIGINT` (killing the process outside our
+/// own control flow, skipping the termios restore below) instead of
+/// arriving as a literal `0x03` byte on stdin -- which is exactly what
+/// `browser::Key::CtrlC` (the packet's own "Ctrl-C -> Quit" key) needs to
+/// see. This is a minimal, deliberate raw mode, NOT `Termios::make_raw`'s
+/// full `cfmakeraw` (which also disables `OPOST`): output post-processing
+/// stays ON, so a bare `\n` in `render_frame`'s output still becomes `\r\n`
+/// on the wire -- turning it off would stair-step every drawn line one
+/// column further right each row.
+///
+/// Totality caveat (brief, and worth repeating here): `panic = "abort"`
+/// means an actual panic anywhere in this loop skips the termios restore
+/// below entirely (no unwind, no `Drop`, no cleanup) and leaves the user's
+/// terminal in raw mode. Every function this loop calls is written to be
+/// total (see each one's own doc comment), so a NORMAL quit (`q`/Ctrl-C)
+/// always restores cleanly -- but there is, by construction of
+/// `panic = "abort"`, no safety net for a genuine bug that panics anyway.
+fn run_browser(source: &str) {
+    use std::io::{Read, Write};
+    use rustix::termios::{LocalModes, OptionalActions};
+
+    let orig_termios = match rustix::termios::tcgetattr(std::io::stdin()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("stele: stdin is not a terminal ({e}); the interactive shell needs a real tty");
+            return;
+        }
+    };
+    let mut raw = orig_termios.clone();
+    raw.local_modes.remove(LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG);
+    if let Err(e) = rustix::termios::tcsetattr(std::io::stdin(), OptionalActions::Now, &raw) {
+        eprintln!("stele: failed to enter raw mode ({e})");
+        return;
+    }
+
+    let (cols, rows) = terminal_size();
+    let content_rows = rows.saturating_sub(1).max(1);
+
+    let mut history = browser::History::new(resolve_url(source));
+    let mut page = load_page(history.current(), cols);
+    let mut view = browser::ViewState::initial(&page, cols, content_rows);
+    let mut parser = browser::KeyParser::new();
+
+    print!("\x1b[?25l"); // hide cursor
+    let _ = std::io::stdout().flush();
+
+    let mut buf = [0u8; 256];
+    'outer: loop {
+        let frame = browser::render_frame(&page, &view);
+        print!("\x1b[H\x1b[2J{frame}");
+        let _ = std::io::stdout().flush();
+
+        // Blocking read is fine for keyboard-only c1 (brief: "no poll
+        // needed yet") -- the loop simply waits for the next keypress.
+        let n = match std::io::stdin().read(&mut buf) {
+            Ok(0) | Err(_) => break, // EOF or a read error: exit cleanly, restore below still runs
+            Ok(n) => n,
+        };
+
+        for key in parser.feed(&buf[..n]) {
+            let (next_view, cmd) = browser::apply_key(key, view, &page);
+            view = next_view;
+            match cmd {
+                browser::Command::None => {}
+                browser::Command::Navigate(url) => {
+                    history.navigate(url.clone());
+                    page = load_page(&url, cols);
+                    view = browser::ViewState::initial(&page, cols, content_rows);
+                }
+                browser::Command::Submit(req) => {
+                    let target = req.url.clone();
+                    page = match fetch_request(&req) {
+                        Ok(response) => {
+                            let html = String::from_utf8_lossy(&response.body);
+                            let dom_tree = dom::parser::parse(&html);
+                            history.navigate(response.final_url.clone());
+                            build_page_from_dom(dom_tree, &response.final_url, cols)
+                        }
+                        Err(e) => error_page(&target, &e, cols),
+                    };
+                    view = browser::ViewState::initial(&page, cols, content_rows);
+                }
+                browser::Command::Back => {
+                    if history.back() {
+                        page = load_page(history.current(), cols);
+                        view = browser::ViewState::initial(&page, cols, content_rows);
+                    }
+                }
+                browser::Command::Reload => {
+                    page = load_page(history.current(), cols);
+                    view = browser::ViewState::initial(&page, cols, content_rows);
+                }
+                browser::Command::Quit => break 'outer,
+            }
+        }
+    }
+
+    let _ = rustix::termios::tcsetattr(std::io::stdin(), OptionalActions::Now, &orig_termios);
+    print!("\x1b[?25h\x1b[0m\n");
+    let _ = std::io::stdout().flush();
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
@@ -565,6 +777,15 @@ fn main() {
             return;
         }
         eprintln!("stele: --headless requires --dump-text <path-or-url>, --dump-png <path-or-url> <out.png>, or --render-fb <path-or-url>");
+        return;
+    }
+
+    // packet/shell-keyboard: `stele <path-or-url>` with no `--headless` and
+    // no dump flag launches the interactive shell. `--headless`'s own
+    // branches above already returned, so reaching here with a `source`
+    // unambiguously means "plain interactive invocation".
+    if let Some(source) = args.source {
+        run_browser(&source);
         return;
     }
 

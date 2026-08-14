@@ -23,7 +23,7 @@ path = "src/main.rs"
 gif = "0.13"
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
-rustix = { version = "1.1.4", default-features = false, features = ["termios"] }
+rustix = { version = "1.1.4", default-features = false, features = ["termios", "std"] }
 # Trimmed to what block.rs/inline.rs actually use (charter §158: block flow
 # = degenerate column flex + flexbox; no CSS grid, no taffy-side floats —
 # floats are bespoke inline work, M4; no CSS calc() in the dialect). Default
