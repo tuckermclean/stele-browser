@@ -56,25 +56,124 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment]) {
 }
 
 fn paint_box(surface: &mut dyn Surface, rect: &LayoutRect, style: &ComputedStyle) {
-    todo!("M4 Part 3: fill background + borders")
+    let prect = to_pixel_rect(rect);
+    if style.background_color.a != 0 {
+        surface.fill_rect(prect, style.background_color);
+    }
+
+    let top = border_px(&style.border.top);
+    let right = border_px(&style.border.right);
+    let bottom = border_px(&style.border.bottom);
+    let left = border_px(&style.border.left);
+
+    if let Some((w, color)) = top {
+        surface.fill_rect(PixelRect { x: prect.x, y: prect.y, w: prect.w, h: w }, color);
+    }
+    if let Some((w, color)) = bottom {
+        let h = w.min(prect.h);
+        let y = prect.y + prect.h as i32 - h as i32;
+        surface.fill_rect(PixelRect { x: prect.x, y, w: prect.w, h }, color);
+    }
+    if let Some((w, color)) = left {
+        surface.fill_rect(PixelRect { x: prect.x, y: prect.y, w, h: prect.h }, color);
+    }
+    if let Some((w, color)) = right {
+        let w2 = w.min(prect.w);
+        let x = prect.x + prect.w as i32 - w2 as i32;
+        surface.fill_rect(PixelRect { x, y: prect.y, w: w2, h: prect.h }, color);
+    }
+}
+
+/// `Some((pixel_width, color))` for a border edge that should actually
+/// paint: `style == Solid` (brief §4: only `solid` is honored in v0 — see
+/// `BorderStyle`'s own doc comment) and a `width` that rounds to `>= 1px`.
+/// `None` (no fill_rect call at all) for `BorderStyle::None`, a non-finite/
+/// negative width, or a sub-half-pixel width that rounds down to `0`.
+fn border_px(side: &BorderSide) -> Option<(u32, Color)> {
+    if side.style != BorderStyle::Solid {
+        return None;
+    }
+    if !side.width.is_finite() || side.width <= 0.0 {
+        return None;
+    }
+    let w = side.width.round().clamp(0.0, MAX_COORD) as u32;
+    if w == 0 {
+        return None;
+    }
+    Some((w, side.color))
 }
 
 fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline: f32, style: &ComputedStyle) {
-    todo!("M4 Part 3: build and draw a TextRun from the fragment")
+    if text.is_empty() {
+        return;
+    }
+    let x = to_i32(finite_or(rect.origin.x, 0.0));
+    let top_y = finite_or(rect.origin.y, 0.0);
+    let bl = finite_or(baseline, 0.0);
+    let baseline_px = to_i32(top_y + bl);
+    let run = TextRun { text, x, baseline: baseline_px, size_px: style.font_size, color: style.color };
+    surface.draw_text(&run);
+}
+
+/// Bound on any single pixel-space coordinate/dimension this module
+/// produces, well inside `i32`/`u32` range even after the small arithmetic
+/// (`x + w`, `y + h`) `fill_rect`/border placement does on it — see
+/// [`to_pixel_rect`]'s doc comment.
+const MAX_COORD: f32 = 1_000_000.0;
+
+fn finite_or(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
+}
+
+fn to_i32(v: f32) -> i32 {
+    finite_or(v, 0.0).clamp(-MAX_COORD, MAX_COORD) as i32
 }
 
 /// Convert a continuous layout-space `LayoutRect` (`f32` origin/size, may be
 /// non-finite/negative/huge — document-controlled) into a `Surface`-space
 /// pixel `Rect`, clamped to a bounded, cast-safe range. See module docs.
 fn to_pixel_rect(rect: &LayoutRect) -> PixelRect {
-    todo!("M4 Part 3: clamp a layout rect into pixel space")
+    let x = to_i32(rect.origin.x);
+    let y = to_i32(rect.origin.y);
+    let w = finite_or(rect.size.w, 0.0).clamp(0.0, MAX_COORD) as u32;
+    let h = finite_or(rect.size.h, 0.0).clamp(0.0, MAX_COORD) as u32;
+    PixelRect { x, y, w, h }
 }
 
 /// Encode `surface`'s RGBA8 pixels as PNG bytes (M4 Part 4). Deterministic
 /// (no timestamp/text chunks — just `IHDR`/`IDAT`/`IEND`). See module docs
 /// for the zero-dimension fallback.
 pub fn encode_png(surface: &MemSurface) -> Vec<u8> {
-    todo!("M4 Part 4: encode via the png crate")
+    let (w, h) = surface.size();
+    if w == 0 || h == 0 {
+        // A zero-dimension IHDR is invalid PNG; degrade to a single blank
+        // white pixel rather than handing the `png` crate a rejected
+        // dimension (or, worse, panicking on it).
+        return encode_png_unchecked(&MemSurface::new(1, 1, Color::WHITE));
+    }
+    encode_png_unchecked(surface)
+}
+
+fn encode_png_unchecked(surface: &MemSurface) -> Vec<u8> {
+    let (w, h) = surface.size();
+    let mut buf = Vec::new();
+    let mut encoder = png::Encoder::new(&mut buf, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    if let Ok(mut writer) = encoder.write_header() {
+        // Both `write_header` and `write_image_data` are fallible only for
+        // I/O errors or a size mismatch; writing into a `Vec<u8>` with
+        // exactly `w * h * 4` bytes (MemSurface's own invariant) can't hit
+        // either in practice. Degrading to whatever bytes were written so
+        // far (rather than unwrapping) keeps this function panic-free
+        // regardless.
+        let _ = writer.write_image_data(surface.bytes());
+    }
+    buf
 }
 
 #[cfg(test)]
@@ -263,7 +362,7 @@ mod tests {
         let bytes = encode_png(&s); // must not panic
         assert!(!bytes.is_empty());
         let decoder = png::Decoder::new(bytes.as_slice());
-        let mut reader = decoder.read_info().expect("valid PNG even for the zero-dim fallback");
+        let reader = decoder.read_info().expect("valid PNG even for the zero-dim fallback");
         assert!(reader.info().width >= 1);
         assert!(reader.info().height >= 1);
     }
