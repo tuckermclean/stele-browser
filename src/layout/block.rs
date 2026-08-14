@@ -1123,3 +1123,105 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_node(s: &str) -> LayoutNode {
+        LayoutNode { style: ComputedStyle::default(), content: BoxContent::Text(s.to_string()), children: Vec::new(), interactive: None }
+    }
+
+    fn block_style() -> ComputedStyle {
+        ComputedStyle { display: Display::Block, ..ComputedStyle::default() }
+    }
+
+    /// CSS's initial `display` value is `inline` (`ComputedStyle::default()`
+    /// already carries it — see `computed.rs`'s `impl Default`), matching a
+    /// real `<font>`/`<em>`/`<b>` element with no UA/author override.
+    fn inline_style() -> ComputedStyle {
+        ComputedStyle::default()
+    }
+
+    fn container(style: ComputedStyle, children: Vec<LayoutNode>) -> LayoutNode {
+        LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    }
+
+    fn replaced(style: ComputedStyle) -> LayoutNode {
+        LayoutNode {
+            style,
+            content: BoxContent::Replaced { intrinsic: Size { w: 10.0, h: 10.0 }, image: None },
+            children: Vec::new(),
+            interactive: None,
+        }
+    }
+
+    #[test]
+    fn contains_block_descendant_true_for_inline_wrapping_a_block_list() {
+        // <font><ol><li>a</li></ol></font> -- the exact 68k.news shape.
+        let li = container(block_style(), vec![text_node("a")]);
+        let ol = container(block_style(), vec![li]);
+        let font = container(inline_style(), vec![ol]);
+        assert!(contains_block_descendant(&font, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_true_through_a_chain_of_inline_wrappers() {
+        // <font><b><ol><li>a</li></ol></b></font> -- the block descendant is
+        // two inline levels down, not a direct child.
+        let li = container(block_style(), vec![text_node("a")]);
+        let ol = container(block_style(), vec![li]);
+        let b = container(inline_style(), vec![ol]);
+        let font = container(inline_style(), vec![b]);
+        assert!(contains_block_descendant(&font, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_false_for_inline_wrapping_only_text() {
+        // <em>hello</em>
+        let em = container(inline_style(), vec![text_node("hello")]);
+        assert!(!contains_block_descendant(&em, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_false_for_inline_wrapping_a_replaced_atom() {
+        // <em><img></em> -- a Replaced element is an inline atom, never
+        // block-level, regardless of nesting (D14 regression guard).
+        let em = container(inline_style(), vec![replaced(inline_style())]);
+        assert!(!contains_block_descendant(&em, 0));
+    }
+
+    #[test]
+    fn contains_block_descendant_false_for_a_leaf_inline_container() {
+        let em = container(inline_style(), Vec::new());
+        assert!(!contains_block_descendant(&em, 0));
+    }
+
+    #[test]
+    fn is_inline_ish_false_for_inline_container_with_a_block_descendant() {
+        let li = container(block_style(), vec![text_node("a")]);
+        let ol = container(block_style(), vec![li]);
+        let font = container(inline_style(), vec![ol]);
+        assert!(!is_inline_ish(&font), "an inline container holding a block box must not be folded into an IFC leaf");
+    }
+
+    #[test]
+    fn is_inline_ish_true_for_inline_container_with_only_text() {
+        let em = container(inline_style(), vec![text_node("hello")]);
+        assert!(is_inline_ish(&em));
+    }
+
+    /// D14 regression guard: `<em><img></em>` (an inline container wrapping
+    /// a non-block `Replaced` atom) must still fold into one inline run.
+    #[test]
+    fn is_inline_ish_true_for_inline_container_wrapping_a_replaced_atom() {
+        let em = container(inline_style(), vec![replaced(inline_style())]);
+        assert!(is_inline_ish(&em), "em wrapping an img must stay inline-ish (D14)");
+    }
+
+    #[test]
+    fn is_inline_ish_false_for_a_block_container() {
+        let div = container(block_style(), vec![text_node("hello")]);
+        assert!(!is_inline_ish(&div));
+    }
+}
