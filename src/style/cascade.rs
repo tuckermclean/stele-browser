@@ -342,6 +342,22 @@ mod tests {
     }
 
     #[test]
+    fn table_elements_get_table_display_values_from_ua_sheet() {
+        let d = dom::parser::parse(
+            "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>x</td></tr></tbody></table>",
+        );
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "table")].display, Display::Table);
+        assert_eq!(styles[find(&d, "thead")].display, Display::TableRowGroup);
+        assert_eq!(styles[find(&d, "tbody")].display, Display::TableRowGroup);
+        for tr in find_all(&d, "tr") {
+            assert_eq!(styles[tr].display, Display::TableRow);
+        }
+        assert_eq!(styles[find(&d, "th")].display, Display::TableCell);
+        assert_eq!(styles[find(&d, "td")].display, Display::TableCell);
+    }
+
+    #[test]
     fn child_inherits_color_and_font_family_from_parent() {
         let d = dom::parser::parse(r#"<div><span>x</span></div>"#);
         let sheet = parser::parse("div { color: green; font-family: monospace; }");

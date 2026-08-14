@@ -844,6 +844,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_table_display_values() {
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table"), &mut d));
+        assert_eq!(d.display, Some(Display::Table));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table-row"), &mut d));
+        assert_eq!(d.display, Some(Display::TableRow));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table-cell"), &mut d));
+        assert_eq!(d.display, Some(Display::TableCell));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("table-row-group"), &mut d));
+        assert_eq!(d.display, Some(Display::TableRowGroup));
+
+        // Case-insensitive, like the other display keywords.
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("TABLE-CELL"), &mut d));
+        assert_eq!(d.display, Some(Display::TableCell));
+    }
+
+    #[test]
+    fn unknown_display_value_is_still_ignored() {
+        // Charter C2: an unrecognized value must not apply, and must not be
+        // confused with any table variant.
+        let mut d = Declarations::default();
+        assert!(!apply_property("display", &toks("table-column"), &mut d));
+        assert_eq!(d.display, None);
+    }
+
+    #[test]
     fn unparseable_color_is_not_applied() {
         let mut d = Declarations::default();
         assert!(!apply_property("color", &toks("bogus"), &mut d));
