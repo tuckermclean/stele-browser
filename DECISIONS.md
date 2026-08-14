@@ -19,6 +19,25 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## UI — Mouse (gpm + xterm)
+
+### D38 — first-class mouse via bespoke gpm socket + xterm SGR
+Mouse works on a bare Linux console (the 486 target, via **gpm**) and in
+terminal emulators (xterm SGR). **gpm choice:** speak the protocol directly
+over a `std` `UnixStream` to `/dev/gpmctl` — NO libgpm, no FFI, no `unsafe`
+(charter "own the wire" ethos). Exact wire: `Gpm_Connect` 16B
+(eventMask/defaultMask/minMod/maxMod u16 + pid/vc i32), `Gpm_Event` 28B
+(buttons/modifiers u8, vc u16, dx/dy/x/y i16, type/clicks/margin i32, wdx/wdy
+i16) — LE, size-checked. VC from `/proc/self/fd/0` (`/dev/ttyN`→N, else `0`
+best-effort). **Auto-detect:** gpm if `/dev/gpmctl` connects, else enable xterm
+SGR (`\e[?1000h\e[?1006h`), never both; restored on quit. **Behavior:** left
+click → `hit_test`(viewport→page via scroll) → `enter_command` (follow/submit,
+same as Enter); wheel = 3 lines; right/middle/release/move = no-op. rustix
+`"event"` feature added for `poll(2)`; cross-builds + runs on i486 (CI). Pure
+parsing/`apply_mouse` unit-tested; the socket+poll loop is manual (no gpm in
+CI). Revisit: VC fallback if a real gpmd rejects `vc:0`; hover-highlight;
+form-field editing.
+
 ## UI — Interactive shell (keyboard)
 
 ### D37 — the interactive terminal browser; rustix for raw mode
