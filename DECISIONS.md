@@ -3,6 +3,30 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M4 — Images
+
+### D25 — image pipeline: Replaced carries the decoded image; bounded fetch/decode
+`<img>` rendering wires the P4 decoders into the render path. Choices:
+- **Freeze amendment:** `BoxContent::Replaced` gains `image: Option<Rc<RgbaImage>>`
+  — the seam so a decoded image reaches the frozen `FragmentKind::Image`. `Rc`
+  (single-threaded) so `LayoutNode` clones during layout don't copy pixel
+  buffers; `block::emit` clones the inner `RgbaImage` once into the fragment
+  (forced by the frozen by-value `Image { image }`). `None` → placeholder, no
+  behavior change (`basic.png` byte-identical).
+- **Driver-level pre-pass with I/O:** `images::collect_images(dom, final_url)`
+  fetches+decodes each `<img src>` (frame 0 of animated GIF) — decode gated to
+  the `--dump-png` path (tty passes an empty map, no fetch). Base is the
+  document's FINAL (post-redirect) URL, not the request URL.
+- **Bounded against image bombs:** `MAX_IMAGES=256` (count) + dedup decodes by
+  resolved URL (repeated `src` decodes once, shared `Rc`) + `MAX_TOTAL_IMAGE_BYTES
+  =256MiB` aggregate-resident budget (halt decoding past it → placeholders).
+  Together these bound both the same-src-×N and distinct-huge-images attacks
+  (the P4 `MAX_DECODE_PIXELS` bounds each single decode). Every fetch/decode
+  failure → skip → placeholder, never a panic. `blit` is fully clipped (i64
+  edge math, bounds-checked source reads, zero-size guards). Revisit: animated
+  GIF ticking (interactive), image caching across documents, real image-button
+  coordinates — all later.
+
 ## M4 — Pixel foundation
 
 ### D24 — embedded PD bitmap font; raster painter; bounded pixel paths
