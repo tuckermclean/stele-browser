@@ -107,8 +107,10 @@ fn parse_args(argv: &[String]) -> Args {
                 }
             }
             "--render-fb" => {
-                // RED stub: not yet implemented.
                 i += 1;
+                if let Some(v) = argv.get(i) {
+                    out.render_fb = Some(v.clone());
+                }
             }
             "--cols" => {
                 i += 1;
@@ -301,9 +303,44 @@ fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
 /// the way there's a trivial 1x1 blank PNG to encode, and the CLI layer
 /// ([`render_fb`]) reports whichever of these `Err`s comes back rather than
 /// silently painting nothing.
-fn render_fb_surface(_source: &str, _width: u32) -> Result<MemSurface, String> {
-    // RED stub: not yet implemented.
-    Err("not yet implemented".to_string())
+fn render_fb_surface(source: &str, width: u32) -> Result<MemSurface, String> {
+    let url = resolve_url(source);
+    let response = fetch_response(&url)?;
+    let html = String::from_utf8_lossy(&response.body);
+    let dom_tree = dom::parser::parse(&html);
+
+    if frames::find_frameset(&dom_tree).is_some() {
+        return Err("frameset documents are not supported by --render-fb".to_string());
+    }
+
+    let styles = cascade::cascade(&dom_tree, &[]);
+    let images = stele::images::collect_images(&dom_tree, &response.final_url);
+    let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
+        return Err("empty document (nothing to render)".to_string());
+    };
+
+    let viewport = Size { w: width as f32, h: HEADLESS_VIEWPORT_HEIGHT };
+    let fragments = layout::layout(&root, viewport);
+
+    // Content-driven height -- same derivation as dump_png's own (see its
+    // doc comment for the full rationale).
+    let mut content_bottom = 0.0f32;
+    for f in &fragments {
+        let y = f.rect.origin.y;
+        let h = f.rect.size.h;
+        if y.is_finite() && h.is_finite() {
+            content_bottom = content_bottom.max(y + h);
+        }
+    }
+    let height = if content_bottom.is_finite() && content_bottom > 0.0 {
+        (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT)
+    } else {
+        1
+    };
+
+    let mut surface = MemSurface::new(width, height, Color::WHITE);
+    raster::paint(&mut surface, &fragments);
+    Ok(surface)
 }
 
 /// `--render-fb <src>`'s CLI-facing driver: render `source` to a
