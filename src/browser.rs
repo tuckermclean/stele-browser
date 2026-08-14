@@ -72,9 +72,24 @@ pub struct ControlNode {
 #[derive(Debug, Clone)]
 pub struct Focusable {
     /// `(col, row, width, height)` in screen cells — a bounding box over
-    /// every merged fragment's own cell rect (see [`extract_focusables`]'s
-    /// doc comment for the multi-line-link caveat this implies).
+    /// every merged fragment's own cell rect. Still used for hit-testing
+    /// ([`Page::hit_test`]) and initial-focus ordering (`rect_cells.1 <
+    /// rows`) — a rectangular hit-test region is fine (clicking anywhere in
+    /// a wrapped link's box still follows it). For PAINTING the focus
+    /// highlight, see [`cell_spans`](Focusable::cell_spans) instead — this
+    /// bounding box can cover cells the link's text never actually occupies
+    /// (a multi-line link's first/last lines rarely span the same columns).
     pub rect_cells: (usize, usize, usize, usize),
+    /// One `(col, row, width, height)` cell rect per contributing fragment
+    /// (i.e. per source line) — see [`extract_focusables`]. A single-line
+    /// link has exactly one entry, equal to `rect_cells`. Used by
+    /// `render_frame` to highlight exactly the cells the link's text
+    /// occupies, instead of painting the full `rect_cells` bounding box
+    /// (which, for a wrapped link, would also highlight non-link cells —
+    /// the "whole paragraph looks selected" bug). Bounded by the number of
+    /// fragments merged into this focusable, itself bounded by the
+    /// (already-capped) fragment/grid size — no unbounded growth.
+    pub cell_spans: Vec<(usize, usize, usize, usize)>,
     pub interactive: Interactive,
     pub control_node: Option<ControlNode>,
 }
@@ -187,10 +202,11 @@ fn extract_focusables(fragments: &[Fragment], cols: usize) -> Vec<Focusable> {
         if let Some(last) = out.last_mut() {
             if same_interactive(&last.interactive, interactive) {
                 last.rect_cells = union_rect(last.rect_cells, rect);
+                last.cell_spans.push(rect);
                 continue;
             }
         }
-        out.push(Focusable { rect_cells: rect, interactive: interactive.clone(), control_node: None });
+        out.push(Focusable { rect_cells: rect, cell_spans: vec![rect], interactive: interactive.clone(), control_node: None });
     }
     out
 }
@@ -1354,7 +1370,15 @@ pub fn render_frame(page: &Page, view: &ViewState) -> String {
     let mut window = page.grid.window(view.scroll_row, view.rows);
     if let Some(idx) = view.focus {
         if let Some(f) = page.focusables.get(idx) {
-            highlight(&mut window, f.rect_cells, view.scroll_row, view.rows);
+            // Highlight each per-line span, NOT the merged `rect_cells`
+            // bounding box -- a wrapped link's highlight must track the
+            // cells its text actually occupies on each line (see
+            // `Focusable::cell_spans`'s doc comment). A single-line link's
+            // `cell_spans` has exactly one entry equal to `rect_cells`, so
+            // this is a no-op behavior change for the common case.
+            for span in &f.cell_spans {
+                highlight(&mut window, *span, view.scroll_row, view.rows);
+            }
         }
     }
     draw_text_fields(&mut window, page, view);
