@@ -3,6 +3,39 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## M3 — Frames
+
+### D23 — framesets as a driver-level recursive render; bounded against frame bombs
+`<frameset>` support lives ABOVE the single-document pipeline (`src/frames.rs` +
+main.rs routing), reusing `layout()`/`tty::render` per frame — no frozen-type
+change. Choices:
+- **`<frame>` is void.** Added `"frame"` to the parser's `VOID_ELEMENTS`
+  (implementation, not frozen `ast.rs`): real 1996 framesets write
+  `<frame src=x>` with no end tag, and without this they mis-nest into a
+  single cell. `<frameset>` stays a container.
+- **Track sizing:** fixed-px tracks first, then percentages of the remainder,
+  then star (`*`/`2*`) split the rest by weight; absent attr = one 100% track;
+  malformed → `1*`. Cell units reuse the tty 8×16 cell. Column width is
+  load-bearing (bounds wrapping); a frame taller than its row track CLIPS at
+  the boundary (faithful to a frame's fixed scrollable viewport), rather than
+  growing the row.
+- **Incremental compositing:** the viewport canvas is sized from track math
+  alone, then each cell is rendered → blitted → dropped, so peak memory is the
+  bounded canvas + one in-flight child, not all `MAX_TOTAL_FRAMES` grids at
+  once.
+- **Frame-bomb bounds:** `MAX_FRAME_DEPTH=6`, `MAX_TOTAL_FRAMES=128` (a single
+  global budget threaded by `&mut` through the recursion), `MAX_TRACKS_PER_DIMENSION=32`,
+  `MAX_TRACK_VALUE` clamp, and a same-URL-on-fetch-path cycle check. The cycle
+  check compares `Url::as_str()` without percent-decoding or case-folding, so
+  `a%2ehtml`/`A.html` could evade it — but `MAX_FRAME_DEPTH` is an
+  UNCONDITIONAL backstop, so no evasion can produce a hang, only bounded
+  redundant work. Revisit: wire real URL normalization into `fetch::Url` (a
+  broader concern) if a fixture needs it.
+- **`<noframes>` never rendered** (Stele renders real frames); frame
+  `scrolling`/`noresize`/`marginwidth`/`frameborder` ignored (v0). No
+  separator/border drawn between frames (same reasoning as `Box` fragments
+  painting nothing in tty).
+
 ## M3 — Forms
 
 ### D22 — form submit as a pure serializer; controls render as tty text placeholders

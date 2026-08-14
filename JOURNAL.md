@@ -404,6 +404,45 @@ Append-only running log. Newest at the bottom.
   (no multipart), checkbox/radio absent value → `on`, placeholder glyph
   conventions. See D22. **M3 forms DONE.** NEXT: frames (last M3 feature).
 
+## 2026-08-14 — M3 · frames (frameset viewports) — M3 COMPLETE
+
+- `frames` module: a driver-level feature ABOVE the single-document pipeline
+  (no frozen-type change). Detect a `<frameset>` document, partition the
+  viewport per `rows`/`cols` (fixed px → percent-of-remainder → star split),
+  and recursively render each `<frame src>` as an INDEPENDENT sub-document
+  (its own fetch→parse→cascade→layout→`tty::render`), compositing the
+  sub-grids into the viewport via new additive `TextGrid::blank`/`blit`. main.rs
+  routes frameset docs here; normal docs unchanged. `<noframes>` never rendered
+  (we render real frames).
+- Loop: implementer (test-first `9174993` red → `107f2d1` green) → reviewer
+  (Spec ✅; **golden COUNTERSIGNED** — geometry re-derived programmatically;
+  totality bounds all traced & confirmed; **1 blocking + 1 important + minors**)
+  → fix round 1 (`68b4f29`) → scoped re-review (orchestrator: void fix + golden
+  byte-identical + frozen clean).
+    - **Blocking (fixed):** `<frame>` wasn't in the parser's `VOID_ELEMENTS`,
+      so real framesets (`<frame src=x>` with NO close tag) collapsed to one
+      cell — the feature was hollow on authentic markup despite passing its own
+      golden (the fixture had been bent to non-real `</frame>` syntax). Fix:
+      added `"frame"` to `VOID_ELEMENTS` (parser impl, not frozen `ast.rs`) +
+      test; fixture rewritten to real void syntax; golden regenerated
+      byte-identical (parsing changed, geometry didn't).
+    - **Important (fixed):** all N frame sub-grids were held before
+      compositing (content-driven height → each up to `MAX_GRID_ROWS` tall) →
+      wide-bomb memory blowup. Fix: incremental compositing (render→blit→drop
+      per cell); canvas sized from track math; peak memory = canvas + one
+      in-flight child. Content taller than its track now clips at the frame
+      boundary (faithful to frame viewport/scroll semantics).
+    - **Minor (fixed):** added real cross-document A→B→A cycle fixtures + test
+      (proves totality end-to-end via the file:// fetch path).
+- Frame-bomb totality (all verified): `MAX_FRAME_DEPTH=6`, `MAX_TOTAL_FRAMES=128`
+  (global budget threaded by &mut, not per-level), `MAX_TRACKS_PER_DIMENSION=32`,
+  same-URL-on-path cycle check with `MAX_FRAME_DEPTH` as an unconditional
+  backstop. 248 lib tests green; frozen types empty-diff; no deps; no unsafe.
+  See D23.
+- **M3 COMPLETE** (tables · forms · frames). Milestones M0–M3 done. NEXT: **M4**
+  — fb backend (fbdev via rustix) + mem-Surface pixel goldens + wire the image
+  decoders + animated GIF + `img align=left` float layout → THE SCREENSHOT.
+
 ## 2026-08-13 — Hardening · recursion totality (cascade + parser)
 
 - Surfaced while building P7: the P6 unbounded-recursion crash class had a
