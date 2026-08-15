@@ -132,7 +132,7 @@
 //! to spare for an attacker- or user-inflated grid.
 
 use crate::layout::{Fragment, FragmentKind};
-use crate::style::computed::{BorderSide, BorderStyle, ComputedStyle, Display};
+use crate::style::computed::{BorderCollapse, BorderSide, BorderStyle, ComputedStyle, Display};
 use crate::surface::Color;
 
 /// `pub(crate)`, not just private: the frames packet (`crate::frames`)
@@ -582,7 +582,34 @@ fn draw_table_grid_lines(rows: &mut [Vec<Cell>], fragment: &Fragment, style: &Co
         return; // degenerate (zero-cell) span: nothing to draw
     }
     let last_row = row_end - 1;
-    let last_col = col_end - 1;
+    // packet/collapse-geometry: for a COLLAPSED table only, the RIGHT/bottom
+    // rule's own tty column is the far grid-line index itself (`col_end`),
+    // NOT one column inside it (`col_end - 1`, every other case's -- and
+    // this function's own pre-packet -- convention) -- matching how `left`'s
+    // rule already lands directly AT `col_start` with no offset. A collapsed
+    // cell now keeps its full 4-side border and is positioned (see
+    // `layout::block`'s own "packet/collapse-geometry" doc section) to
+    // OVERLAP its neighbor by one border-width, a deliberate sub-pixel nudge
+    // that makes `cell_index` round BOTH a cell's own far edge and its
+    // neighbor's near edge to the exact SAME tty column/row -- but only if
+    // this side's own rule lands on that shared column too, not the column
+    // just before it. `style.border_collapse` is reliable here even for a
+    // CELL fragment (normally not inherited, so a bare cell would read
+    // `Separate` regardless of its table) because `box_tree::build_node`
+    // stamps every cell's own field to match its table's resolved value
+    // specifically so this gate can see it -- see that stamp's own doc
+    // comment. A `Separate` table (the CSS default -- cells kept visually
+    // apart by `border-spacing`/`cellspacing`, e.g. `table-spacing.html`)
+    // MUST NOT get this treatment: two cells separated by a real gap would
+    // otherwise appear to visually merge at a shared column that isn't
+    // actually shared. Trade-off for the collapsed case: an ISOLATED
+    // collapsed box with no neighbor to coincide with (e.g. a lone table
+    // with a border and a single cell) renders its right/bottom rule one
+    // tty column/row past its exact pixel width (see
+    // `fully_bordered_table_box_draws_all_four_grid_sides_with_corners`'s
+    // own doc comment) -- a harmless sub-cell-rounding artifact, not a
+    // misplacement of any real content.
+    let last_col = if style.border_collapse == BorderCollapse::Collapse { col_end } else { col_end - 1 };
 
     if top {
         if let Some(r) = rows.get_mut(row_start) {
@@ -1085,11 +1112,40 @@ mod tests {
         let border = Edges::all(solid(dark));
         // 24px wide (3 cells) x 48px tall (3 cells): a small closed
         // rectangle with a real interior row between top and bottom.
-        let fragments = vec![table_box_fragment(Display::Table, 0.0, 0.0, 24.0, 48.0, border)];
+        // `border_collapse: Collapse` (NOT `table_box_fragment`'s default
+        // `Separate`) -- packet/collapse-geometry gates the "rule lands AT
+        // the far grid-line column" convention this test exercises on
+        // collapse mode specifically (see `draw_table_grid_lines`'s own doc
+        // comment); a `<table border>`'s own frame box IS collapsed by
+        // default (the presentational hint), which is the real shape this
+        // test represents.
+        let fragments = vec![Fragment {
+            rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 24.0, h: 48.0 } },
+            kind: FragmentKind::Box {
+                style: ComputedStyle { display: Display::Table, border, border_collapse: BorderCollapse::Collapse, ..ComputedStyle::default() },
+            },
+            interactive: None,
+        }];
         let grid = render(&fragments, 10);
-        assert_eq!(grid.row_text(0).trim_end(), "┌─┐", "top row: both corners + top rule");
-        assert_eq!(grid.row_text(1).trim_end(), "│ │", "middle row: left/right rules, blank interior");
-        assert_eq!(grid.row_text(2).trim_end(), "└─┘", "bottom row: both corners + bottom rule");
+        // packet/collapse-geometry: the right/bottom rule now lands AT the
+        // box's own far grid-line column (`col_end`/`row_end`), not one
+        // column/row INSIDE it (`col_end - 1`) -- so a `border-collapse`
+        // cell's shared boundary (which now sits fractionally past its
+        // neighbor's own edge, a deliberate sub-pixel overlap -- see
+        // `layout::block`'s own "packet/collapse-geometry" doc section)
+        // lands on the SAME tty column as its neighbor's opposite edge,
+        // instead of the adjacent-but-different column the old `col_end - 1`
+        // convention produced (visually a doubled "┐┌"-style seam -- see
+        // `tests/kitchen_sink_golden.rs`'s golden for the before/after).
+        // The one-time cost: an ISOLATED box with no neighbor to coincide
+        // with (like this test's own 24px = exactly-3-tty-cell box) now
+        // renders one tty column/row past its exact pixel width -- an
+        // acceptable sub-cell-rounding artifact, not a correctness bug (no
+        // real content is misplaced, just the rule line's own visual
+        // extent).
+        assert_eq!(grid.row_text(0).trim_end(), "┌──┐", "top row: both corners + top rule");
+        assert_eq!(grid.row_text(1).trim_end(), "│  │", "middle row: left/right rules, blank interior");
+        assert_eq!(grid.row_text(2).trim_end(), "└──┘", "bottom row: both corners + bottom rule");
     }
 
     #[test]
