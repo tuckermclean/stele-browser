@@ -524,9 +524,13 @@ fn line_exclusion(y: f32, floats: &[PositionedFloat], available_width: f32) -> (
 /// further left/off-line by a negative shift. Both inputs arrive already
 /// finite/non-negative (`avail` from [`line_exclusion`], `content` from
 /// [`clamp_dim`]-derived word widths), so no NaN/inf seam here.
-fn align_offset(_text_align: TextAlign, _avail: f32, _content: f32) -> f32 {
-    // RED-state stub: not yet implemented.
-    0.0
+fn align_offset(text_align: TextAlign, avail: f32, content: f32) -> f32 {
+    let raw = match text_align {
+        TextAlign::Center => (avail - content) / 2.0,
+        TextAlign::Right => avail - content,
+        TextAlign::Left | TextAlign::Justify => 0.0,
+    };
+    raw.max(0.0)
 }
 
 /// Shift every fragment already accumulated for the line about to close by

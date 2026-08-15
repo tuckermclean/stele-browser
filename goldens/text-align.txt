@@ -1,1 +1,7 @@
-PLACEHOLDER — regenerated once text-align is implemented; not yet blessed.
+
+                                Centered heading
+
+                                                                  Right aligned
+
+
+ Left as usual
