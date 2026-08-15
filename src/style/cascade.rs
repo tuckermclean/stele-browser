@@ -731,4 +731,113 @@ mod tests {
         }
         assert_eq!(styles[deepest].color, Color::rgb(0, 128, 0));
     }
+
+    // ---- packet/presentational-attrs: presentational-hint cascade tier ----
+    //
+    // Vintage HTML presentational attributes (`<font color/size>`, `bgcolor`,
+    // `align`, `<body text>`) must fold in as a real cascade tier -- UA <
+    // presentational hints < author CSS < inline `style=` -- so they
+    // participate in inheritance/override correctly instead of being patched
+    // onto `ComputedStyle` after the cascade has already run.
+
+    #[test]
+    fn font_color_attribute_sets_computed_color() {
+        let d = dom::parser::parse(r#"<font color="red">text</font>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn presentational_hint_overrides_inherited_color_but_plain_sibling_still_inherits() {
+        // The key inheritance-correctness case the cascade-tier approach
+        // fixes vs. post-cascade mutation: the <font>'s own hint must beat
+        // the inherited blue, while a plain <span> sibling with no hint of
+        // its own still inherits blue from the div normally.
+        let d = dom::parser::parse(r#"<div style="color:blue"><font color="red">x</font><span>y</span></div>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(255, 0, 0), "hint beats inherited color");
+        assert_eq!(styles[find(&d, "span")].color, Color::rgb(0, 0, 255), "plain sibling still inherits from the div");
+    }
+
+    #[test]
+    fn author_css_beats_presentational_hint() {
+        let d = dom::parser::parse(r#"<font color="red">x</font>"#);
+        let sheet = parser::parse("font { color: green; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn inline_style_beats_presentational_hint_too() {
+        let d = dom::parser::parse(r#"<font color="red" style="color:green">x</font>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn bgcolor_variants_agree_and_do_not_inherit() {
+        for val in ["#ffcc00", "ffcc00", "yellow"] {
+            let html = format!(r#"<div bgcolor="{val}"><span>x</span></div>"#);
+            let d = dom::parser::parse(&html);
+            let styles = cascade(&d, &[]);
+            assert_eq!(styles[find(&d, "div")].background_color, Color::rgb(0xff, 0xcc, 0x00), "bgcolor={val}");
+            assert_eq!(styles[find(&d, "span")].background_color, Color::TRANSPARENT, "bgcolor must not inherit");
+        }
+    }
+
+    #[test]
+    fn font_size_attribute_scale_absolute_and_relative() {
+        let cases = [("1", 10.0_f32), ("7", 48.0), ("+1", 18.0), ("-1", 13.0)];
+        for (attr, px) in cases {
+            let html = format!(r#"<font size="{attr}">a</font>"#);
+            let d = dom::parser::parse(&html);
+            let styles = cascade(&d, &[]);
+            assert_eq!(styles[find(&d, "font")].font_size, px, "size={attr}");
+        }
+    }
+
+    #[test]
+    fn align_center_sets_text_align_on_block_elements() {
+        let d = dom::parser::parse(r#"<p align="center">x</p>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "p")].text_align, TextAlign::Center);
+
+        let d = dom::parser::parse(r#"<div align="center">x</div>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "div")].text_align, TextAlign::Center);
+
+        let d = dom::parser::parse(r#"<table><tr><td align="center">x</td></tr></table>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "td")].text_align, TextAlign::Center);
+    }
+
+    #[test]
+    fn img_align_does_not_set_text_align_stays_left_default() {
+        // <img align> stays float-only (box_tree::apply_align_float_hint,
+        // unchanged by this packet); the presentational-hint tier must not
+        // ALSO set text-align for <img>.
+        let d = dom::parser::parse(r#"<img src="x.png" align="left">"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "img")].text_align, TextAlign::Left);
+    }
+
+    #[test]
+    fn body_text_attribute_sets_color_and_inherits_to_descendants() {
+        let d = dom::parser::parse(r##"<body text="#333333"><p>x</p></body>"##);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "body")].color, Color::rgb(0x33, 0x33, 0x33));
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(0x33, 0x33, 0x33));
+    }
+
+    #[test]
+    fn presentational_hints_do_not_disturb_pre_existing_cascade_behavior() {
+        // A belt-and-suspenders re-check (alongside every earlier test in
+        // this module still passing unchanged) that adding the new tier
+        // didn't disturb ordinary author-vs-UA precedence for an element with
+        // no presentational attributes at all.
+        let d = dom::parser::parse("<span>x</span>");
+        let sheet = parser::parse("span { display: block; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "span")].display, Display::Block);
+    }
 }
