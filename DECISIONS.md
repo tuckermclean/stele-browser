@@ -19,6 +19,23 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Style — Presentational attributes
+
+### D47 — HTML presentational attributes fold into the cascade as a middle tier
+`resolve_declarations` gained a three-tier precedence: **UA < presentational-hint
+< author** (`tier: u8` replacing `is_author: bool`; inline `style=""` still
+highest). `value::presentational_hints(tag, attrs)` maps `bgcolor`→background-color,
+`<font color>`→color, `<font size>`→font-size (HTML4 1–7 scale + `±N`),
+block `align=`→text-align, `<body text>`→color. **Why a cascade tier, not
+post-cascade mutation** (the `apply_align_float_hint` style): inherited
+properties (`color`) demand it — a `<font color>` inside an already-colored
+ancestor must override the inherited value, which only works if the hint
+participates in the cascade/inheritance rather than checking "is the computed
+value still default?" after the fact. Hints correctly lose to author CSS + inline
+style, beat UA. `<img align>` stays float-only (box_tree, unchanged). Frozen
+types untouched. Deferred: `<body link/vlink/alink>`, `<table border>`,
+cellpadding/cellspacing, `<td width/valign/nowrap>`, `<font face>`.
+
 ## Rendering — <hr> horizontal rule
 
 ### D46 — <hr> is a top-border rule; tty draws a rule only for a sole-top border
