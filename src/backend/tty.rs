@@ -843,13 +843,17 @@ mod tests {
 
     #[test]
     fn full_four_side_solid_border_draws_no_tty_rule_regression_guard() {
-        // Coordinator-directed narrowing: a box bordered on ALL FOUR sides
-        // (a real `<table>` cell / bordered flex child shape, both present
-        // in fixtures/kitchen-sink.html via `border: 1px solid ...`) must
-        // draw NOTHING in tty -- a lone top tick with no matching sides/
-        // bottom (tty still draws none of those) reads as a glitch, not a
-        // border. The pixel/fb backend paints all four edges correctly on
-        // its own regardless.
+        // Coordinator-directed narrowing: a NON-TABLE box bordered on ALL
+        // FOUR sides (a bordered flex child shape, a real case in
+        // `fixtures/kitchen-sink.html` via `border: 1px solid ...`) must
+        // draw NOTHING in tty from `draw_top_border_rule` -- a lone top tick
+        // with no matching sides/bottom (tty still draws none of those, for
+        // non-table boxes) reads as a glitch, not a border. The pixel/fb
+        // backend paints all four edges correctly on its own regardless.
+        // (A `Display::Table`/`Display::TableCell` box with the SAME border
+        // shape DOES now draw a real grid -- see `draw_table_grid_lines`'s
+        // own tests below; this fragment stays plain `ComputedStyle::
+        // default()` display (`Inline`), so it's unaffected by that.)
         use crate::style::computed::{BorderSide, BorderStyle, Edges};
         let dark = Color::rgb(0x33, 0x33, 0x33);
         let side = BorderSide { width: 1.0, style: BorderStyle::Solid, color: dark };
@@ -860,6 +864,100 @@ mod tests {
         }];
         let grid = render(&fragments, 10);
         assert_eq!(grid.row_text(0).trim_end(), "", "a fully-bordered box must draw no tty rule line");
+    }
+
+    // ------------------------------------------- table grid lines (packet/border-collapse follow-up)
+
+    fn table_box_fragment(
+        display: Display,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        border: crate::style::computed::Edges<BorderSide>,
+    ) -> Fragment {
+        Fragment {
+            rect: Rect { origin: Point { x, y }, size: Size { w, h } },
+            kind: FragmentKind::Box { style: ComputedStyle { display, border, ..ComputedStyle::default() } },
+            interactive: None,
+        }
+    }
+
+    fn solid(color: Color) -> BorderSide {
+        BorderSide { width: 1.0, style: BorderStyle::Solid, color }
+    }
+
+    #[test]
+    fn bordered_table_cell_draws_box_drawing_grid_lines() {
+        use crate::style::computed::Edges;
+        let gray = Color::rgb(0x80, 0x80, 0x80);
+        // A collapsed cell's own shape (packet/border-collapse dedup): top +
+        // left solid, right/bottom None. 24px wide (3 cols) x 32px tall (2
+        // rows), so there's a second row to prove the left rule continues
+        // down the cell, not just at the corner.
+        let border = Edges { top: solid(gray), left: solid(gray), right: BorderSide::default(), bottom: BorderSide::default() };
+        let fragments = vec![table_box_fragment(Display::TableCell, 0.0, 0.0, 24.0, 32.0, border)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "┌──", "top row: corner + top rule");
+        assert_eq!(grid.cell_at(1, 0).ch, '│', "left column carries the vertical rule on row 1 too");
+        for col in 0..3 {
+            assert_eq!(grid.cell_at(0, col).fg, gray, "col {col} top border color");
+        }
+    }
+
+    #[test]
+    fn fully_bordered_table_box_draws_all_four_grid_sides_with_corners() {
+        use crate::style::computed::Edges;
+        let dark = Color::rgb(0x33, 0x33, 0x33);
+        let border = Edges::all(solid(dark));
+        // 24px wide (3 cells) x 48px tall (3 cells): a small closed
+        // rectangle with a real interior row between top and bottom.
+        let fragments = vec![table_box_fragment(Display::Table, 0.0, 0.0, 24.0, 48.0, border)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "┌─┐", "top row: both corners + top rule");
+        assert_eq!(grid.row_text(1).trim_end(), "│ │", "middle row: left/right rules, blank interior");
+        assert_eq!(grid.row_text(2).trim_end(), "└─┘", "bottom row: both corners + bottom rule");
+    }
+
+    #[test]
+    fn unbordered_table_cell_draws_no_grid_chars() {
+        // A plain `<table>` with no `border`/CSS borders: the cell's border
+        // stays the CSS default (`BorderStyle::None` on every side), so this
+        // must render exactly as before -- text only, no grid chars at all.
+        use crate::style::computed::Edges;
+        let fragments = vec![
+            table_box_fragment(Display::TableCell, 0.0, 0.0, 24.0, 16.0, Edges::all(BorderSide::default())),
+            text_fragment(0.0, 0.0, 16.0, 16.0, "hi"),
+        ];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "hi", "no border at all should draw no grid characters");
+    }
+
+    #[test]
+    fn non_table_box_with_a_table_like_border_still_draws_no_grid_chars() {
+        // Scope guard: the SAME top+left border shape as the collapsed-cell
+        // test above, but on a plain (non-table) box -- must draw nothing,
+        // exactly `full_four_side_solid_border_draws_no_tty_rule_regression_
+        // guard`'s sibling case for the new grid-lines path specifically.
+        use crate::style::computed::Edges;
+        let gray = Color::rgb(0x80, 0x80, 0x80);
+        let border = Edges { top: solid(gray), left: solid(gray), right: BorderSide::default(), bottom: BorderSide::default() };
+        let fragments = vec![table_box_fragment(Display::Block, 0.0, 0.0, 24.0, 16.0, border)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "", "non-table box must draw no grid characters");
+    }
+
+    #[test]
+    fn table_grid_lines_do_not_disturb_the_hr_sole_top_rule() {
+        // hr's own shape (sole solid top border, non-table display) still
+        // goes through `draw_top_border_rule` only -- unaffected by the new
+        // table-grid path.
+        use crate::style::computed::BorderSide as Side;
+        let gray = Color::rgb(0x80, 0x80, 0x80);
+        let border = Side { width: 1.0, style: BorderStyle::Solid, color: gray };
+        let fragments = vec![box_fragment_top_border(0.0, 0.0, 24.0, 0.0, border)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "───", "hr's plain rule line must still render, unaffected by table grid lines");
     }
 
     #[test]
