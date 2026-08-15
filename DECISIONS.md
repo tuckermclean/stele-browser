@@ -19,6 +19,18 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Rendering — <table border>
+
+### D48 — <table border=N> stamps table + cell borders in box_tree
+Post-cascade (like the `float` align hint; `border` is not inherited): a
+`<table border=N>` gets an `Npx` solid gray outer border, and each descendant
+`<td>`/`<th>` a `1px` solid gray border, via a DEPTH_CAP-bounded subtree walk
+that stops at nested tables (inner `border` attr governs inner cells). Gated so
+author CSS wins per-box. Done in box_tree (not the cascade) because it needs the
+table→cell tree relationship, which `ElementInfo`/the cascade don't carry.
+Renders in pixel/fb; tty draws no 4-side borders (v0). Follow-ups (D49):
+`cellpadding`/`cellspacing`.
+
 ## Style — Presentational attributes
 
 ### D47 — HTML presentational attributes fold into the cascade as a middle tier
