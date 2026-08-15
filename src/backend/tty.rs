@@ -43,19 +43,27 @@
 //! - `Box` fragments (a block box's background/border) render their
 //!   `background_color` as cell `bg` (see "Color" below). Borders are still
 //!   mostly out of scope in text mode — a full cell-accurate box-drawing
-//!   pass (four sides, corners) is deferred rather than half-done — with ONE
-//!   narrow exception (packet/hr-rule): a box whose top border is `Solid`,
-//!   `>= 1px`, AND whose OWN right/bottom/left are not ALSO a `Solid`/`>=
-//!   1px` border draws a `'─'` (U+2500) rule across the box's own width, in
-//!   the border color, via `draw_top_border_rule`. This exists specifically
-//!   so `<hr>` (a zero-content-height box with only `border-top` set in the
-//!   UA sheet, `style::ua::UA_CSS`) shows as a visible horizontal line
-//!   instead of blank space. The "sole solid side" gate matters: a box
-//!   bordered on all four sides (e.g. a `<table>` cell or a bordered flex
-//!   child, both real cases in `fixtures/kitchen-sink.html`) draws NOTHING
-//!   here — a lone top tick with no matching sides/bottom would look like a
-//!   glitch, not a border, and that box's real border still paints
-//!   correctly in the pixel/fb backend either way.
+//!   pass (four sides, corners) for ARBITRARY boxes is deferred rather than
+//!   half-done — with TWO narrow exceptions:
+//!     - (packet/hr-rule) a box whose top border is `Solid`, `>= 1px`, AND
+//!       whose OWN right/bottom/left are not ALSO a `Solid`/`>= 1px` border
+//!       draws a `'─'` (U+2500) rule across the box's own width, in the
+//!       border color, via `draw_top_border_rule`. This exists specifically
+//!       so `<hr>` (a zero-content-height box with only `border-top` set in
+//!       the UA sheet, `style::ua::UA_CSS`) shows as a visible horizontal
+//!       line instead of blank space. The "sole solid side" gate matters: a
+//!       box bordered on all four sides (e.g. a bordered flex child) draws
+//!       NOTHING here — a lone top tick with no matching sides/bottom would
+//!       look like a glitch, not a border, and that box's real border still
+//!       paints correctly in the pixel/fb backend either way.
+//!     - (packet/border-collapse follow-up) a `Display::Table`/
+//!       `Display::TableCell` box with ANY solid border side draws real
+//!       box-drawing grid lines (`'─'`/`'│'`, plus simple `┌┐└┘` corners) via
+//!       `draw_table_grid_lines` — see that function's own doc comment. This
+//!       is what turns a bordered/collapsed table into a readable ruled grid
+//!       in tty mode instead of unseparated cell text (`"Widget4"`). Scoped
+//!       tightly to table/cell boxes only — an ordinary bordered `<div>` or a
+//!       bordered flex child still draws nothing here, same as before.
 //! - **Paint order wins ties**: fragments are drawn in slice order (already
 //!   paint order per `layout::layout`'s contract), each write overwriting
 //!   whatever a prior fragment left in the same cell.
@@ -124,7 +132,7 @@
 //! to spare for an attacker- or user-inflated grid.
 
 use crate::layout::{Fragment, FragmentKind};
-use crate::style::computed::{BorderSide, BorderStyle, ComputedStyle};
+use crate::style::computed::{BorderSide, BorderStyle, ComputedStyle, Display};
 use crate::surface::Color;
 
 /// `pub(crate)`, not just private: the frames packet (`crate::frames`)
@@ -394,6 +402,7 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
             FragmentKind::Box { style } => {
                 fill_box(&mut rows, f, style.background_color, cols);
                 draw_top_border_rule(&mut rows, f, style, cols);
+                draw_table_grid_lines(&mut rows, f, style, cols);
             }
         }
     }
@@ -470,6 +479,170 @@ fn draw_top_border_rule(rows: &mut [Vec<Cell>], fragment: &Fragment, style: &Com
     for cell in row_cells.iter_mut().skip(col_start).take(col_end - col_start) {
         cell.ch = '─';
         cell.fg = top.color;
+    }
+}
+
+/// Draw box-drawing GRID lines (`'─'`/`'│'`, with simple L-corner glyphs
+/// `┌┐└┘` where two adjacent solid sides meet) for a TABLE or TABLE-CELL
+/// box's own solid border sides (coordinator-directed follow-up to the
+/// `border-collapse` packet: the sole-top-border rule (`draw_top_border_rule`)
+/// deliberately declines a fully-bordered box, which used to leave collapsed/
+/// separate bordered tables showing NO visual separation at all in tty mode —
+/// e.g. adjacent cell text reading as `"Widget4"` once `border-collapse`
+/// dropped border-spacing to 0 between cells with no border lines to fill the
+/// gap).
+///
+/// SCOPE: gated on `style.display` being `Display::Table` or
+/// `Display::TableCell` ONLY — every other box (an ordinary bordered `<div>`,
+/// a bordered flex child, `<hr>`'s sole-top rule) is completely unaffected;
+/// `draw_top_border_rule` right above still owns that territory exactly as
+/// before. An unbordered table/cell (no solid side at all) also draws
+/// nothing here, so a plain `<table>` with no `border`/CSS borders renders
+/// exactly as it did before this function existed.
+///
+/// Each side is drawn independently along its own edge (top/bottom → `─`
+/// across the full width, left/right → `│` down the full height) in that
+/// side's OWN border color; a corner cell where two adjacent sides are BOTH
+/// solid is then overwritten with the matching L-corner glyph. This is a
+/// deliberately simple, PER-BOX approximation, not full multi-box junction
+/// resolution (real box-drawing would want `┬`/`┴`/`├`/`┤`/`┼` wherever a
+/// junction is shared by three or four cells, not just two) — readability is
+/// the bar here, not pixel-perfect box art, and paint order (later fragments
+/// overwrite earlier ones, the same rule this whole module already follows)
+/// means a specific cell's own corner glyph naturally wins over whatever a
+/// neighboring box's line left in that same tty cell. For the uniform-border
+/// tables this packet targets (a `<table border>` stamp, or `td { border:
+/// 1px solid } table { border-collapse: collapse }`), the result reads as a
+/// clean grid; a table with genuinely non-uniform per-cell borders may show
+/// a visually rougher (but still legible) join — out of scope, same follow-up
+/// note as the layout-side dedup step's own doc comment
+/// (`layout::box_tree::apply_border_collapse`).
+///
+/// The START index uses the SAME rounding `cell_index` (and therefore
+/// `fill_box`/`draw_top_border_rule`) already use, so a box's own top-left
+/// grid line still lines up with where its own content/other fragments land.
+/// The END index is a CEILING, not `cell_index`'s round-to-nearest: a
+/// padded table cell's real pixel height (e.g. `6px padding + 16px line +
+/// 6px padding` = 28px, not a clean multiple of `CELL_H`) would otherwise
+/// round its END down to the SAME row as its START (`round(28/16) = round
+/// (1.75) = 2`, only one row past start, when the cell visually needs a
+/// full two-row span to show both a top rule row's worth of content AND its
+/// own bottom rule without the two colliding) -- `fill_box`'s own round-
+/// based end is fine for a background fill (a slightly short fill is
+/// invisible), but a border's END edge is a whole separate LINE of
+/// characters that must land on its OWN row, not silently merge into the
+/// start row. Ceiling (always rounding UP) guarantees the span is never
+/// narrower than the real content, at the cost of occasionally being one
+/// row/col more generous than the tightest possible fit -- a harmless
+/// over-approximation for grid lines specifically (unlike a background
+/// fill, where over-filling would visibly bleed color into a neighbor).
+fn span_end(start_px: f32, size_px: f32, cell: f32, start_idx: usize) -> usize {
+    let end_px = start_px + nonneg(size_px);
+    if !end_px.is_finite() || cell <= 0.0 {
+        return start_idx + 1;
+    }
+    let end = (end_px / cell).ceil();
+    if end < 0.0 || !end.is_finite() {
+        return start_idx + 1;
+    }
+    (end as usize).max(start_idx + 1)
+}
+
+fn draw_table_grid_lines(rows: &mut [Vec<Cell>], fragment: &Fragment, style: &ComputedStyle, cols: usize) {
+    if !matches!(style.display, Display::Table | Display::TableCell) {
+        return;
+    }
+    let is_solid = |side: BorderSide| side.style == BorderStyle::Solid && side.width >= 1.0;
+    let top = is_solid(style.border.top);
+    let right = is_solid(style.border.right);
+    let bottom = is_solid(style.border.bottom);
+    let left = is_solid(style.border.left);
+    if !(top || right || bottom || left) {
+        // Unbordered table/cell: draw nothing at all -- a plain `<table>`
+        // with no visible border renders exactly as plain text, same as
+        // before this function existed.
+        return;
+    }
+
+    // Rows use the generous `span_end` (see its own doc comment: a padded
+    // cell's real height easily rounds down to a too-short row span, which
+    // would silently drop its own bottom border row). Columns stay on the
+    // ORIGINAL round-based `cell_index` `fill_box`/`draw_top_border_rule`
+    // already use: unlike rows, a table's columns are typically many cells
+    // wide relative to `CELL_W`, so this squashing risk is far smaller, and
+    // (empirically, see the packet report) a generous ceiling on columns
+    // instead makes ADJACENT cells' rects overlap by a column, which then
+    // lets one cell's later paint silently erase its neighbor's corner/
+    // vertical-bar characters — worse than the squashing it would fix.
+    let row_start = cell_index(fragment.rect.origin.y, CELL_H);
+    let row_end = span_end(fragment.rect.origin.y, fragment.rect.size.h, CELL_H, row_start);
+    let col_start = cell_index(fragment.rect.origin.x, CELL_W).min(cols);
+    let col_end = cell_index(fragment.rect.origin.x + nonneg(fragment.rect.size.w), CELL_W).min(cols).max(col_start);
+    if row_end <= row_start || col_end <= col_start {
+        return; // degenerate (zero-cell) span: nothing to draw
+    }
+    let last_row = row_end - 1;
+    let last_col = col_end - 1;
+
+    if top {
+        if let Some(r) = rows.get_mut(row_start) {
+            for c in r.iter_mut().take(col_end).skip(col_start) {
+                c.ch = '─';
+                c.fg = style.border.top.color;
+            }
+        }
+    }
+    if bottom && last_row != row_start {
+        if let Some(r) = rows.get_mut(last_row) {
+            for c in r.iter_mut().take(col_end).skip(col_start) {
+                c.ch = '─';
+                c.fg = style.border.bottom.color;
+            }
+        }
+    }
+    if left {
+        for r in rows.iter_mut().take(row_end).skip(row_start) {
+            if let Some(c) = r.get_mut(col_start) {
+                c.ch = '│';
+                c.fg = style.border.left.color;
+            }
+        }
+    }
+    if right && last_col != col_start {
+        for r in rows.iter_mut().take(row_end).skip(row_start) {
+            if let Some(c) = r.get_mut(last_col) {
+                c.ch = '│';
+                c.fg = style.border.right.color;
+            }
+        }
+    }
+
+    // Corners: only where BOTH sides meeting there are solid -- see this
+    // function's own doc comment on why this is a per-box approximation,
+    // not full junction resolution.
+    set_grid_ch(rows, row_start, col_start, '┌', style.border.top.color, top && left);
+    set_grid_ch(rows, row_start, last_col, '┐', style.border.top.color, top && right && last_col != col_start);
+    set_grid_ch(rows, last_row, col_start, '└', style.border.bottom.color, bottom && left && last_row != row_start);
+    set_grid_ch(
+        rows,
+        last_row,
+        last_col,
+        '┘',
+        style.border.bottom.color,
+        bottom && right && last_row != row_start && last_col != col_start,
+    );
+}
+
+/// Overwrite one cell's `ch`/`fg` iff `condition` holds and `(row, col)` is
+/// in bounds -- the shared totality-safe write `draw_table_grid_lines`'s
+/// four corner calls funnel through.
+fn set_grid_ch(rows: &mut [Vec<Cell>], row: usize, col: usize, ch: char, fg: Color, condition: bool) {
+    if !condition {
+        return;
+    }
+    if let Some(c) = rows.get_mut(row).and_then(|r| r.get_mut(col)) {
+        c.ch = ch;
+        c.fg = fg;
     }
 }
 

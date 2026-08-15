@@ -11,10 +11,14 @@
 //!
 //! Mirrors `tests/hr_rule_golden.rs`'s own conventions exactly — this
 //! fixture has no author CSS, no images, nothing that needs a real `file://`
-//! fetch. The tty half is expected to show ONLY the cell text with no ruled
-//! lines: the tty backend deliberately draws no 4-side borders (see
-//! `backend::tty`'s own module docs) — `<table border>` is a pixel/fb-only
-//! rendering, same as any other 4-side `border` in this dialect.
+//! fetch. `<table border="1">` (no `cellspacing`) now resolves to
+//! `border-collapse: collapse` (packet/border-collapse), and the tty half
+//! shows a real box-drawing grid (`─`/`│`, `┌┐└┘` corners) around the table
+//! frame and every cell (packet/border-collapse follow-up,
+//! `backend::tty::draw_table_grid_lines`) — a readable ruled grid, not the
+//! old "cell text only, no ruled lines" rendering (ordinary non-table
+//! 4-side-bordered boxes still draw no tty rule at all, unchanged; see
+//! `backend::tty`'s own module docs).
 
 use std::collections::HashMap;
 
@@ -84,17 +88,20 @@ fn table_border_fixture_tty_dump_matches_golden() {
 }
 
 #[test]
-fn table_border_tty_dump_shows_only_cell_text_no_ruled_lines() {
-    // Structural guard independent of the exact-match golden above: the tty
-    // backend deliberately draws no 4-side borders (see `backend::tty`'s
-    // module docs) — `<table border>` is pixel/fb-only rendering here, so
-    // the tty dump should show the header + data cells and nothing else.
+fn table_border_tty_dump_shows_a_ruled_grid_around_every_cell() {
+    // Structural guard independent of the exact-match golden above: packet/
+    // border-collapse's tty follow-up draws a real box-drawing grid for a
+    // bordered table/cell (`backend::tty::draw_table_grid_lines`), so the
+    // dump should show the header + data cells AND rule characters framing
+    // them -- the opposite of the old "no ruled lines at all" behavior this
+    // test used to assert.
     let actual = dump_tty(TABLE_BORDER_HTML, COLS);
     assert!(actual.contains("Item"));
     assert!(actual.contains("Qty"));
     assert!(actual.contains("Widget"));
     assert!(actual.contains("Gadget"));
-    assert!(!actual.contains('\u{2500}'), "tty backend should draw no rule characters for a 4-side-bordered table");
+    assert!(actual.contains('\u{2500}'), "tty backend should draw '─' rule characters for a bordered/collapsed table");
+    assert!(actual.contains('\u{2502}'), "tty backend should draw '│' rule characters for a bordered/collapsed table");
 }
 
 #[test]
