@@ -356,6 +356,21 @@ pub fn encode_map_window(window: u32) -> Vec<u8> {
     out
 }
 
+/// Encode a `SetInputFocus` request (opcode 42) directing keyboard focus to
+/// `window`, `revert-to = Parent`, `time = CurrentTime`. Xfbdev/kdrive runs
+/// with NO window manager, so a freshly-mapped window never receives keyboard
+/// focus on its own — without this, KeyPress events (including `q`/Escape)
+/// never reach us and the only way out is a reboot. 12 bytes; length = 3.
+pub fn encode_set_input_focus(window: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    out.push(42); // opcode: SetInputFocus
+    out.push(2); // revert-to = RevertToParent
+    out.extend_from_slice(&3u16.to_le_bytes());
+    out.extend_from_slice(&window.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // time = CurrentTime
+    out
+}
+
 /// Encode a `CreateGC` request (opcode 55) with an empty value-mask — this
 /// client never needs anything but the drawable's defaults (`PutImage`
 /// ignores GC foreground/background entirely).
@@ -707,6 +722,12 @@ impl XConnection {
         self.send(&encode_map_window(window))
     }
 
+    /// Give keyboard focus to `window` — required under a WM-less server
+    /// (Xfbdev) so KeyPress events (q/Escape/scroll keys) actually arrive.
+    pub fn set_input_focus(&mut self, window: u32) -> Result<(), String> {
+        self.send(&encode_set_input_focus(window))
+    }
+
     pub fn create_gc(&mut self, drawable: u32) -> Result<u32, String> {
         let cid = self.ids.next();
         self.send(&encode_create_gc(cid, drawable))?;
@@ -1045,6 +1066,15 @@ mod tests {
         assert_eq!(&out[32..36], &0u32.to_le_bytes()); // back-pixel value
         assert_eq!(&out[36..40], &WINDOW_EVENT_MASK.to_le_bytes()); // event-mask value
         assert_eq!(out.len(), 40);
+    }
+
+    #[test]
+    fn encode_set_input_focus_produces_correct_bytes() {
+        // opcode 42, revert-to Parent (2), length 3, window, CurrentTime (0)
+        assert_eq!(
+            encode_set_input_focus(0x0140_0001),
+            vec![42, 2, 3, 0, 0x01, 0x00, 0x40, 0x01, 0, 0, 0, 0]
+        );
     }
 
     #[test]

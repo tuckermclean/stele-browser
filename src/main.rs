@@ -802,6 +802,13 @@ fn run_x11(source: &str) {
         }
     };
 
+    // No window manager under Xfbdev, so nothing else will hand us keyboard
+    // focus — do it ourselves, or q/Escape/scroll keys never arrive and the
+    // only escape from the mapped window is a reboot. Best-effort.
+    if let Err(e) = conn.set_input_focus(window) {
+        eprintln!("stele: --x11: SetInputFocus failed: {e}");
+    }
+
     // Best-effort: a server that fails GetKeyboardMapping still gets a
     // working (mouse-only) shell rather than a hard exit.
     let (keysyms_per_keycode, keysyms) = conn.get_keyboard_mapping().unwrap_or_else(|e| {
