@@ -253,6 +253,15 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
             left: resolve_lp(d.padding.left, font_size, default.padding.left),
         },
         border: resolve_border(d.border, d.border_top, font_size),
+        // packet/table-spacing: non-inherited ("own") resolution -- see
+        // `ComputedStyle::border_spacing_x/y`'s own doc comment for why.
+        // `raw_to_px` is safe here because `value::apply_property`/
+        // `presentational_hints` never produce a `RawLength::Percent` for
+        // this field (border-spacing has no percentage form in CSS, and the
+        // parser rejects `%` tokens outright) -- so there's no percent case
+        // silently collapsing to 0 in practice.
+        border_spacing_x: d.border_spacing_x.map(|l| raw_to_px(l, font_size)).unwrap_or(default.border_spacing_x),
+        border_spacing_y: d.border_spacing_y.map(|l| raw_to_px(l, font_size)).unwrap_or(default.border_spacing_y),
         float: own!(float),
         clear: own!(clear),
 
@@ -857,6 +866,46 @@ mod tests {
         let styles = cascade(&d, &[]);
         assert_eq!(styles[find(&d, "body")].color, Color::rgb(0x33, 0x33, 0x33));
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(0x33, 0x33, 0x33));
+    }
+
+    // ---- packet/table-spacing: `border-spacing` / `cellspacing="N"` ----
+
+    #[test]
+    fn table_with_no_cellspacing_or_css_keeps_the_default_border_spacing() {
+        let d = dom::parser::parse("<table><tr><td>x</td></tr></table>");
+        let styles = cascade(&d, &[]);
+        let table = &styles[find(&d, "table")];
+        assert_eq!(table.border_spacing_x, 8.0, "default preserved: no golden churn");
+        assert_eq!(table.border_spacing_y, 0.0, "default preserved: no golden churn");
+    }
+
+    #[test]
+    fn css_border_spacing_property_resolves_onto_the_table() {
+        let d = dom::parser::parse("<table><tr><td>x</td></tr></table>");
+        let sheet = parser::parse("table { border-spacing: 4px 2px; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let table = &styles[find(&d, "table")];
+        assert_eq!(table.border_spacing_x, 4.0);
+        assert_eq!(table.border_spacing_y, 2.0);
+    }
+
+    #[test]
+    fn table_cellspacing_attribute_resolves_onto_the_table_style() {
+        let d = dom::parser::parse(r#"<table cellspacing="6"><tr><td>x</td></tr></table>"#);
+        let styles = cascade(&d, &[]);
+        let table = &styles[find(&d, "table")];
+        assert_eq!(table.border_spacing_x, 6.0);
+        assert_eq!(table.border_spacing_y, 6.0);
+    }
+
+    #[test]
+    fn css_border_spacing_beats_cellspacing_attribute() {
+        let d = dom::parser::parse(r#"<table cellspacing="6"><tr><td>x</td></tr></table>"#);
+        let sheet = parser::parse("table { border-spacing: 12px; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let table = &styles[find(&d, "table")];
+        assert_eq!(table.border_spacing_x, 12.0, "author CSS wins over the presentational hint");
+        assert_eq!(table.border_spacing_y, 12.0);
     }
 
     #[test]

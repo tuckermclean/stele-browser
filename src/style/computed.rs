@@ -254,6 +254,31 @@ pub struct ComputedStyle {
     pub margin: Edges<LengthPercentageAuto>,
     pub padding: Edges<LengthPercentage>,
     pub border: Edges<BorderSide>,
+    /// `border-spacing` (FREEZE AMENDMENT, packet/table-spacing): CSS
+    /// `border-spacing: <length-x> <length-y>?` — the gap the bespoke table
+    /// solver (`layout::table::solve_table`) inserts *between* adjacent
+    /// columns (`x`) and rows (`y`). This is the ONLY change this packet
+    /// makes to the otherwise-frozen `ComputedStyle`: two `f32` fields,
+    /// nothing else touched.
+    ///
+    /// Defaults are EXACTLY the pre-existing `layout::block::
+    /// BORDER_SPACING_X/Y` constants (`8.0`/`0.0`) this packet replaces —
+    /// see `ComputedStyle::default` below — so every existing table with no
+    /// `border-spacing`/`cellspacing` of its own resolves to the identical
+    /// numeric spacing it always has, and therefore renders byte-identically
+    /// (no golden churn). `layout::block::compute_table_cache_entry` reads
+    /// these straight off the table's own `LayoutNode.style` instead of the
+    /// old module-private constants.
+    ///
+    /// Not inherited: real CSS `border-spacing` DOES inherit, but only a
+    /// `Display::Table` box's own style is ever consulted by the solver (a
+    /// descendant picking up an ancestor's `border-spacing` is otherwise
+    /// unobservable in this engine), so `cascade::resolve` resolves this as
+    /// a plain non-inherited ("own") box property — the simplest correct
+    /// choice, documented here per the packet brief rather than left
+    /// implicit.
+    pub border_spacing_x: f32,
+    pub border_spacing_y: f32,
     pub float: Float,
     pub clear: Clear,
 
@@ -292,6 +317,11 @@ impl Default for ComputedStyle {
             margin: Edges::all(LengthPercentageAuto::Px(0.0)),
             padding: Edges::all(LengthPercentage::Px(0.0)),
             border: Edges::all(BorderSide::default()),
+            // Freeze amendment defaults (packet/table-spacing) — MUST match
+            // the pre-existing `layout::block::BORDER_SPACING_X/Y` constants
+            // exactly (8.0/0.0), see the field doc comment above.
+            border_spacing_x: 8.0,
+            border_spacing_y: 0.0,
             float: Float::None,
             clear: Clear::None,
 
@@ -322,5 +352,10 @@ mod tests {
         assert_eq!(s.flex_shrink, 1.0);
         assert_eq!(s.flex_grow, 0.0);
         assert_eq!(s.margin.top, LengthPercentageAuto::Px(0.0));
+        // packet/table-spacing freeze amendment: defaults MUST match the
+        // pre-existing `layout::block::BORDER_SPACING_X/Y` constants exactly
+        // (8.0/0.0), so no existing table's rendering shifts.
+        assert_eq!(s.border_spacing_x, 8.0);
+        assert_eq!(s.border_spacing_y, 0.0);
     }
 }

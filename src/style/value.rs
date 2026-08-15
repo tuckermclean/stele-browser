@@ -126,6 +126,16 @@ pub(crate) struct Declarations {
     /// /`-left` (out of scope -- only `<hr>`'s UA rule needs a single-side
     /// border today); add them the same way if a future packet needs them.
     pub border_top: Option<BorderRaw>,
+    /// `border-spacing: <length-x> <length-y>?` (packet/table-spacing,
+    /// `ComputedStyle`'s own freeze-amendment doc comment has the full
+    /// rationale). Two independent fields (not an `EdgesRaw`-style pair —
+    /// there's no "4 sides" here, just x/y) so `overlay`'s `ov!` macro can
+    /// treat them exactly like every other `Copy` field. `None` means
+    /// "this declaration didn't set it" -- NOT "zero"; `cascade::resolve`
+    /// falls back to `ComputedStyle::default`'s `8.0`/`0.0` the same way
+    /// every other `own!`-resolved field does.
+    pub border_spacing_x: Option<RawLength>,
+    pub border_spacing_y: Option<RawLength>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
 
@@ -170,6 +180,8 @@ impl Declarations {
         ov!(height);
         ov!(border);
         ov!(border_top);
+        ov!(border_spacing_x);
+        ov!(border_spacing_y);
         ov!(float);
         ov!(clear);
         ov!(flex_direction);
@@ -1223,6 +1235,34 @@ mod tests {
         assert!(d.border_top.is_none());
     }
 
+    // ---- packet/table-spacing: `border-spacing` shorthand ----
+
+    #[test]
+    fn border_spacing_one_value_sets_both_axes() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-spacing", &toks("4px"), &mut d));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(4.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(4.0)));
+    }
+
+    #[test]
+    fn border_spacing_two_values_set_x_then_y() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-spacing", &toks("4px 2px"), &mut d));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(4.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(2.0)));
+    }
+
+    #[test]
+    fn border_spacing_rejects_percent_and_garbage_and_too_many_values() {
+        for bad in ["10%", "not-a-length", "4px 2px 1px", ""] {
+            let mut d = Declarations::default();
+            assert!(!apply_property("border-spacing", &toks(bad), &mut d), "expected {bad:?} to be rejected");
+            assert_eq!(d.border_spacing_x, None);
+            assert_eq!(d.border_spacing_y, None);
+        }
+    }
+
     #[test]
     fn unknown_property_is_not_applied() {
         let mut d = Declarations::default();
@@ -1599,5 +1639,37 @@ mod tests {
         );
         assert_eq!(d.color, None);
         assert_eq!(d.font_size, None);
+    }
+
+    // ---- packet/table-spacing: `cellspacing="N"` -> border-spacing hint ----
+
+    #[test]
+    fn table_cellspacing_sets_both_border_spacing_axes() {
+        let d = presentational_hints("table", &attrs(&[("cellspacing", "6")]));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(6.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(6.0)));
+    }
+
+    #[test]
+    fn table_cellspacing_zero_is_a_valid_explicit_value() {
+        let d = presentational_hints("table", &attrs(&[("cellspacing", "0")]));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(0.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(0.0)));
+    }
+
+    #[test]
+    fn cellspacing_on_a_non_table_element_is_ignored() {
+        let d = presentational_hints("div", &attrs(&[("cellspacing", "6")]));
+        assert_eq!(d.border_spacing_x, None);
+        assert_eq!(d.border_spacing_y, None);
+    }
+
+    #[test]
+    fn cellspacing_garbage_or_negative_is_ignored_never_panics() {
+        for v in ["abc", "-5", "", "1.5", "99999999999999999999"] {
+            let d = presentational_hints("table", &attrs(&[("cellspacing", v)]));
+            assert_eq!(d.border_spacing_x, None, "cellspacing={v:?}");
+            assert_eq!(d.border_spacing_y, None, "cellspacing={v:?}");
+        }
     }
 }
