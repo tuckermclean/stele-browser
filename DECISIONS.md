@@ -19,6 +19,22 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Layout — text-align
+
+### D45 — text-align applied in the inline engine; <center> maps to it
+`inline.rs` offsets each finalized line by an alignment delta derived from the
+containing block's inherited `text_align` (Center = half the free space, Right =
+all of it, clamped ≥ 0, added on top of float-exclusion offset). UA sheet maps
+the presentational `<center>` element to `text-align: center`. Justify is
+treated as Left in v0. **Why:** real hand-authored/vintage pages center headers
+and nav via `<center>`/`text-align` (68k.news); ignoring it rendered everything
+flush-left. **Invariants:** `max_width` and line content-width are unchanged, so
+shrink-to-fit and flex item sizing are unaffected; left-aligned content (the
+default) is byte-identical. **Rebless:** flex-polite.png footer now centers
+(the fixture always declared `text-align:center`; the golden had encoded the old
+ignored behavior). Attribute form (`align="center"` on block elements) not yet
+mapped — follow-up.
+
 ## Layout — Block-in-inline
 
 ### D44 — an inline box containing a block descendant is not folded into an IFC
