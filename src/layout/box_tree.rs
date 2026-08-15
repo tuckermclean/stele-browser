@@ -31,7 +31,9 @@ use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, Interactive, LayoutNode, Size};
-use crate::style::computed::{BorderSide, BorderStyle, Display, Edges, Float, LengthPercentage, ListStyleType};
+use crate::style::computed::{
+    BorderCollapse, BorderSide, BorderStyle, Display, Edges, Float, LengthPercentage, ListStyleType,
+};
 use crate::style::ComputedStyle;
 use crate::surface::Color;
 
@@ -210,6 +212,42 @@ fn build_node<'a>(
             if el.name.as_str() == "table" {
                 apply_table_border_attribute(el, &mut node);
                 apply_table_cellpadding_attribute(el, &mut node);
+                // packet/border-collapse follow-up: only fires when
+                // `apply_table_cellpadding_attribute` above did NOT already
+                // stamp real cellpadding (see its own doc comment) -- runs
+                // right after it for that reason.
+                apply_table_border_default_padding(el, &mut node);
+                // packet/collapse-geometry: `border-collapse: collapse` no
+                // longer dedups (zeros) any cell border side here -- every
+                // cell keeps its full cascaded/presentational-hint border,
+                // and the actual "shared single line" effect is achieved by
+                // `layout::block`'s collapse-aware cell GEOMETRY (overlapping
+                // adjacent cells' rects by exactly one border-width) instead.
+                // See `layout::block`'s "packet/collapse-geometry" doc
+                // comments for the full replacement design and the DECISIONS
+                // ledger for why the old dedup-to-an-L approach was wrong
+                // (it broke both a bare `<table border>`'s frame -- doubled
+                // to 2px -- and any CSS-collapsed table with no table-level
+                // border -- lost its right/bottom outer edge entirely).
+                //
+                // packet/collapse-geometry (tty follow-up): stamp the
+                // table's own resolved `border_collapse` onto every cell's
+                // OWN `ComputedStyle.border_collapse` too. Real CSS
+                // `border-collapse` is a table-level-only concept -- a
+                // cell's own value is never otherwise read anywhere in this
+                // codebase (`layout::block` only ever reads the TABLE
+                // node's own `style.border_collapse`) -- so this is purely
+                // an internal signal for `backend::tty::draw_table_grid_lines`,
+                // which paints one fragment (and thus one `ComputedStyle`)
+                // at a time with no access to its enclosing table: without
+                // this, a cell fragment's own (uninherited, always-default-
+                // Separate) `border_collapse` can't tell the tty backend
+                // whether THIS cell's shared border is meant to coincide
+                // with its neighbor's (collapse) or stay visually distinct
+                // (separate, e.g. `cellspacing`) — see that function's own
+                // "packet/collapse-geometry" doc comment.
+                let collapse = node.style.border_collapse;
+                stamp_cell_border_collapse(&mut node, collapse, 0);
             }
             Some(node)
         }
@@ -407,6 +445,28 @@ fn stamp_cell_borders(node: &mut LayoutNode, depth: usize) {
     }
 }
 
+/// Walk `node`'s children (NOT `node` itself) stamping `collapse` onto every
+/// `TableCell` box's OWN `border_collapse` field, without descending into a
+/// nested `<table>`'s subtree (its own `border-collapse`, or lack of one,
+/// governs its own cells -- exactly `stamp_cell_borders`'s own "stop at a
+/// nested Display::Table" rule). See the call site's own doc comment for why
+/// this purely-internal stamp exists. `DEPTH_CAP`-bounded for the same
+/// reason every other recursive walk in this module is.
+fn stamp_cell_border_collapse(node: &mut LayoutNode, collapse: BorderCollapse, depth: usize) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    for child in &mut node.children {
+        if child.style.display == Display::Table {
+            continue;
+        }
+        if matches!(child.content, BoxContent::TableCell { .. }) {
+            child.style.border_collapse = collapse;
+        }
+        stamp_cell_border_collapse(child, collapse, depth + 1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // `<table cellpadding="N">` presentational attribute (packet/table-spacing):
 // mirrors `<table border="N">`'s stamping pattern directly above almost
@@ -484,6 +544,127 @@ fn stamp_cell_padding(node: &mut LayoutNode, n: f32, depth: usize) {
         stamp_cell_padding(child, n, depth + 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// `<table border>` default cell padding (packet/border-collapse follow-up):
+// a bare `<table border="N">` with no `cellpadding` at all has ZERO cell
+// padding by CSS default, which (combined with `border-collapse`'s own
+// zeroed border-spacing) leaves NO free tty character-column between a
+// cell's own border and its neighbor's text -- e.g. "Widget" immediately
+// followed by "4" with no separator at all (`backend::tty::
+// draw_table_grid_lines`'s box-drawing separator has nowhere to land; see
+// that function's own doc comment for the full tty-resolution analysis).
+// This stamps a small default padding, calibrated (see `DEFAULT_TABLE_
+// BORDER_CELL_PADDING`'s own doc comment) to reliably reserve at least one
+// free tty column, so the SAME box-drawing separator this packet already
+// draws actually has room to show. Purely a rendering nicety for the
+// text-mode grid -- pixel/fb rendering also gets slightly padded cells as a
+// side effect, which reads as more legible there too (no downside).
+//
+// Mirrors `apply_table_cellpadding_attribute`'s own stamping pattern almost
+// exactly, with two extra gates: only when `border` is present (packet
+// brief -- author-CSS-only-bordered tables, e.g. kitchen-sink's `td {
+// border: 1px solid }`, get NOTHING from this: no `border` ATTRIBUTE means
+// this whole function is a no-op) AND only when `cellpadding` is NOT present
+// AT ALL (not just "parses to zero" -- an explicit `cellpadding="0"`, even
+// though it stamps literal `0px` padding either way, still counts as
+// "author asked for padding" and must suppress this default, matching the
+// packet brief's literal "no cellpadding attribute" wording). `stamp_cell_
+// padding`'s own "still cascade-default" gate (padding_is_cascade_default)
+// is reused unchanged, so real author CSS/inline `style="padding:...">`
+// still wins over this default exactly like it wins over `cellpadding`
+// itself.
+//
+// KNOWN LIMITATION shared with `cellpadding` itself: `padding_is_cascade_
+// default` can't distinguish "the author explicitly wrote `padding: 0`" from
+// "nothing touched padding at all" -- both resolve to the same `Px(0.0)` in
+// `ComputedStyle`. So an author rule of EXACTLY `td { padding: 0 }` would
+// still get overwritten by this default (and, pre-existing, by a real
+// `cellpadding="N"` attribute too) -- this is not a new gap this packet
+// introduces, just an existing one `apply_table_cellpadding_attribute`
+// already has, inherited unchanged. A non-zero author padding (e.g. `td {
+// padding: 2px }`) is unaffected and correctly wins (see this section's own
+// test).
+// ---------------------------------------------------------------------------
+
+/// Default per-side cell padding stamped by `apply_table_border_default_
+/// padding` (module doc section above). Calibrated empirically against
+/// `fixtures/table-border.html` (`<table border="1">`, no cellpadding) run
+/// through the real fetch->parse->cascade->box-tree->layout->tty pipeline:
+/// with `0px` padding, adjacent cells' solved column widths exactly hug
+/// their own text (zero slack), so a cell's own left border and the
+/// following cell's first text character round to the SAME 8px tty column
+/// (`backend::tty::CELL_W`) -- the border character is then invisible
+/// (real text, painted after, always wins the write). `4px` reliably pushes
+/// the FOLLOWING cell's own text start at least one whole tty column past
+/// its border/corner column in every row of that fixture (verified via a
+/// one-off fragment-rect dump: 1px border + 4px padding = 5px inset, enough
+/// to cross an 8px column's round-to-nearest boundary regardless of exactly
+/// where the border's own sub-pixel position falls within its column) --
+/// confirmed against the ACTUAL rendered `--headless --dump-text` output:
+/// `Widget`/`4` (and `Gadget`/`2`) now render with a real box-drawing
+/// character between them, no more cells running together. Deliberately
+/// smaller than `table-spacing`'s own convention-only `cellpadding="6"`
+/// (real HTML content, not calibrated for this purpose) -- 4px is the
+/// minimum this packet's own testing found sufficient, keeping the visual
+/// padding as unobtrusive as possible while still fixing the separator.
+const DEFAULT_TABLE_BORDER_CELL_PADDING: f32 = 4.0;
+
+/// Stamp `DEFAULT_TABLE_BORDER_CELL_PADDING` onto every still-cascade-
+/// default `TableCell` box in `table_box`'s subtree, but ONLY when `el` (the
+/// `<table>` element) has a `border` ATTRIBUTE present AND no `cellpadding`
+/// attribute at all -- see the module doc section above for the full
+/// rationale and each gate's own reasoning. `table_box` is the just-built
+/// `LayoutNode`, already having had `apply_table_border_attribute`/`apply_
+/// table_cellpadding_attribute` applied to it (see the call site in
+/// `build_node`), so this sees their result -- in particular, if `cell
+/// padding` WAS present, `apply_table_cellpadding_attribute` already
+/// stamped every still-default cell with that real value, and this function
+/// bails out immediately without ever touching that (or any) cell.
+fn apply_table_border_default_padding(el: &Element, table_box: &mut LayoutNode) {
+    if el.attrs.get("border").is_none() {
+        return; // no `border` attribute: not this packet's scope at all
+    }
+    if el.attrs.get("cellpadding").is_some() {
+        // Author explicitly named a `cellpadding` (even `"0"`, or an
+        // unparseable value) -- that request (or its total absence of
+        // effect, for `"0"`/garbage) always wins; this default never
+        // second-guesses it.
+        return;
+    }
+    stamp_cell_padding(table_box, DEFAULT_TABLE_BORDER_CELL_PADDING, 0);
+}
+
+// ---------------------------------------------------------------------------
+// `border-collapse: collapse` (packet/collapse-geometry): NOT handled here
+// at all anymore. The earlier "top+left only + table outer border" dedup
+// model (`apply_border_collapse`/`dedup_cell_borders`, removed by this
+// packet) zeroed every cell's right/bottom border, relying on the table's
+// own frame box to close off the grid's right/bottom edges. That was
+// architecturally wrong in two ways the pixel goldens exposed: (1) a bare
+// `<table border>` (which HAS its own frame border) then drew that frame
+// AND the first row/column cells' top/left borders on top of each other --
+// a doubled 2px edge instead of 1px; (2) a CSS-only-collapsed table with NO
+// table-level border (e.g. kitchen-sink's `table { border-collapse:
+// collapse } td { border: 1px solid }`) lost its right/bottom outer edge
+// entirely, since zeroing was the only thing that ever drew those edges.
+//
+// The replacement keeps every cell's FULL 4-side border untouched (real CSS
+// `border-collapse: collapse` cells still have a border on every side; it's
+// the LAYOUT that makes adjacent borders land on the same pixels, not the
+// style) and fixes the geometry instead, in `layout::block` (see that
+// module's own "packet/collapse-geometry" doc comments): cells are
+// positioned so each interior grid line is shared -- adjacent cells'
+// abutting edges are pulled together by exactly one border-width, so their
+// independently-painted borders coincide into a single line -- and, when
+// the table itself also carries a border (the `<table border>` case), the
+// whole cell grid is shifted to overlap the table's own frame the same way,
+// so the frame and the edge cells' own borders coincide instead of
+// stacking. Both fixes only need a uniform border width (the only case this
+// packet's brief asks for; genuinely conflicting per-cell border widths/
+// styles would need real CSS border-conflict resolution -- out of scope,
+// documented follow-up, same as before).
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // <details>/<summary> disclosure (M5 dialect-completeness, part 1).
@@ -1565,6 +1746,11 @@ mod tests {
 
     #[test]
     fn table_border_attribute_stamps_table_and_1px_cell_borders() {
+        // A bare `<table border="1">` (no cellspacing) resolves to
+        // `border-collapse: collapse` (packet/border-collapse), but
+        // (packet/collapse-geometry) the box tree no longer dedups any
+        // side for that -- every cell keeps its full 1px four-sided border,
+        // same as the table's own frame.
         let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td><td>b</td></tr></table>"#);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
@@ -1584,6 +1770,10 @@ mod tests {
 
     #[test]
     fn table_border_n_controls_table_frame_width_cells_stay_1px() {
+        // The cell's own border WIDTH stays 1px regardless of the table
+        // frame's own width N (`stamp_cell_borders` is untouched by this
+        // packet); (packet/collapse-geometry) all four sides stay solid too,
+        // dedup no longer applies.
         let d = dom::parser::parse(r#"<table border="3"><tr><td>a</td></tr></table>"#);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
@@ -1637,6 +1827,11 @@ mod tests {
 
     #[test]
     fn table_border_attribute_never_overrides_author_css_border() {
+        // `<table border="1">` (no cellspacing, no author `border-collapse`)
+        // still resolves to `collapse`, but (packet/collapse-geometry) that
+        // no longer dedups any side -- the td's own AUTHOR border (2px black
+        // -- wins over the presentational 1px gray stamp, unaffected by this
+        // packet) keeps all four sides.
         let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td></tr></table>"#);
         let sheet = parser::parse("td { border: 2px solid #000000; }");
         let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
@@ -1645,8 +1840,8 @@ mod tests {
         let mut cells = Vec::new();
         find_by(&root, &is_cell_box, &mut cells);
         assert_eq!(cells.len(), 1);
-        // Author CSS wins: the td keeps its own 2px black border, NOT the
-        // 1px gray presentational-attribute stamp.
+        // Author CSS wins: the td keeps its own 2px black border color/width
+        // on all four sides, NOT the 1px gray presentational-attribute stamp.
         assert_border_all_colored(&cells[0].style.border, 2.0, Color::rgb(0, 0, 0));
 
         // The table itself has no author border, so it still gets the
@@ -1678,7 +1873,12 @@ mod tests {
         find_by(&root, &is_cell_box, &mut cells);
         assert_eq!(cells.len(), 2, "expected outer td + inner td");
         // Pre-order: the outer td (wrapping the whole inner table) is
-        // visited before the inner td nested inside it.
+        // visited before the inner td nested inside it. The OUTER table
+        // (border="1", no cellspacing) collapses, but (packet/
+        // collapse-geometry) that no longer dedups its own td's border --
+        // it keeps all four solid sides; the inner table (border="0") has
+        // no visible border to begin with, so its td stays fully unset
+        // regardless of collapse.
         assert_border_all(&cells[0].style.border, 1.0);
         assert_no_border(&cells[1].style.border);
         assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
@@ -1783,6 +1983,215 @@ mod tests {
         // visited before the inner td nested inside it.
         assert_padding_all(&cells[0].style.padding, 10.0);
         assert_padding_all(&cells[1].style.padding, 2.0);
+        assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
+    }
+
+    // ------------------------------------------------------------------
+    // `<table border>` default cell padding (packet/border-collapse
+    // follow-up): mirrors the `cellpadding` section directly above.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn table_border_with_no_cellpadding_gets_the_default_padding() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_padding_all(&cell.style.padding, DEFAULT_TABLE_BORDER_CELL_PADDING);
+        }
+    }
+
+    #[test]
+    fn table_border_with_explicit_cellpadding_zero_suppresses_the_default() {
+        // `cellpadding="0"` is a present attribute (even though it stamps
+        // literal 0px either way) -- its mere PRESENCE must suppress the
+        // default, per this function's own "no cellpadding attribute AT
+        // ALL" gate.
+        let d = dom::parser::parse(r#"<table border="1" cellpadding="0"><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn table_border_with_unparseable_cellpadding_still_suppresses_the_default() {
+        // Presence, not validity: an unparseable `cellpadding` still counts
+        // as "the author named this attribute" and must suppress the
+        // default too, even though `apply_table_cellpadding_attribute`
+        // itself stamps nothing for it (leaving cells at the CSS 0px
+        // default either way -- same observable padding, different reason).
+        let d = dom::parser::parse(r#"<table border="1" cellpadding="banana"><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn table_border_author_css_padding_wins_over_the_default() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("td { padding: 2px; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_padding_all(&cells[0].style.padding, 2.0);
+    }
+
+    #[test]
+    fn table_without_a_border_attribute_gets_no_default_padding() {
+        // Plain `<table>` (no `border` attribute at all): completely out of
+        // this function's scope, regardless of any author CSS border.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn author_css_bordered_table_with_no_border_attribute_gets_no_default_padding() {
+        // The kitchen-sink shape: `border-collapse: collapse` + `td {
+        // border: 1px solid }` in author CSS, but NO `border` HTML
+        // attribute anywhere -- this packet's default-padding step must
+        // stay completely out of it (gated on the ATTRIBUTE, not the
+        // cascaded border), leaving the author's own (unset) padding
+        // exactly as written.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("table { border-collapse: collapse; } td { border: 1px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    // ------------------------------------------------------------------
+    // `border-collapse: collapse` (packet/collapse-geometry): the box tree
+    // no longer dedups (zeros) any cell border side for a collapsed table --
+    // every cell keeps its FULL cascaded border regardless of `border-
+    // collapse`. These tests replace the old dedup-assertion tests (which
+    // pinned the removed `apply_border_collapse`/`dedup_cell_borders`
+    // behavior) with the new invariant: box-tree construction is completely
+    // insensitive to `border_collapse` for border purposes -- the "shared
+    // single line" effect is a `layout::block` GEOMETRY concern now (see
+    // that module's own tests), not a box-tree style-mutation concern.
+    // ------------------------------------------------------------------
+
+    fn assert_border_side(side: &BorderSide, style: BorderStyle, name: &str) {
+        assert_eq!(side.style, style, "{name} border style");
+    }
+
+    #[test]
+    fn table_border_attribute_keeps_full_four_sided_cell_borders_under_collapse() {
+        // `<table border="1">` (no cellspacing) resolves to
+        // `border-collapse: collapse` (the presentational hint), but the
+        // box tree must NOT dedup any side anymore -- every cell keeps all
+        // four solid sides, same as the table's own frame.
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_eq!(tables.len(), 1);
+        assert_border_all(&tables[0].style.border, 1.0);
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected two td boxes");
+        for cell in cells {
+            assert_border_all(&cell.style.border, 1.0);
+        }
+    }
+
+    #[test]
+    fn table_border_with_cellspacing_stays_separate_all_four_cell_sides_solid() {
+        // `<table border="1" cellspacing="4">` stays `separate` (the
+        // presentational hint only fires with no `cellspacing`) -- every
+        // cell keeps all four solid sides, exactly like the collapsed case
+        // above (border-collapse never touches cell border STYLE anymore,
+        // collapsed or not).
+        let d = dom::parser::parse(r#"<table border="1" cellspacing="4"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_border_all(&cell.style.border, 1.0);
+        }
+    }
+
+    #[test]
+    fn author_css_border_collapse_keeps_full_four_sided_cell_borders() {
+        // Author-CSS collapse: `table { border-collapse: collapse }` + `td {
+        // border: 1px solid #000 }` -- the CASCADED cell border is left
+        // completely alone regardless of the table's `border-collapse`.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td><td>b</td></tr></table>"#);
+        let sheet = parser::parse("table { border-collapse: collapse; } td { border: 1px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_border_all_colored(&cell.style.border, 1.0, Color::rgb(0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn separate_mode_table_border_unchanged_no_dedup() {
+        // Belt-and-suspenders: a table that never opts into collapse (no
+        // `border-collapse` anywhere, no `<table border>`) keeps every
+        // cell's border exactly as cascaded -- this packet must not touch
+        // `Separate` tables at all.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("td { border: 2px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_border_all_colored(&cells[0].style.border, 2.0, Color::rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn table_border_collapse_nested_table_keeps_full_borders_independent_of_outer() {
+        // Same nested-table independence as `stamp_cell_borders`'s own test:
+        // the outer table's `border-collapse` must not reach into an inner
+        // table that stays separate (has its own `cellspacing`) -- both
+        // keep every cell's full four-sided border either way now.
+        let d = dom::parser::parse(
+            r#"<table border="1"><tr><td><table border="1" cellspacing="4"><tr><td>inner</td></tr></table></td></tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected outer td + inner td");
+        // Pre-order: outer td (collapsed) first, inner td (separate) second.
+        assert_border_all(&cells[0].style.border, 1.0); // outer td: collapsed, still full border
+        assert_border_all(&cells[1].style.border, 1.0); // inner td: separate, all four sides solid
         assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
     }
 

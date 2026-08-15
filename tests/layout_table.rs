@@ -8,8 +8,9 @@
 //! point of the assertion.
 
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
-use stele::style::computed::{Display, Edges, LengthPercentage};
+use stele::style::computed::{BorderCollapse, BorderSide, BorderStyle, Display, Edges, LengthPercentage};
 use stele::style::ComputedStyle;
+use stele::surface::Color;
 
 fn styled(display: Display) -> ComputedStyle {
     ComputedStyle { display, ..ComputedStyle::default() }
@@ -393,6 +394,65 @@ fn table_with_default_style_still_uses_8px_border_spacing() {
     assert!((gap - 8.0).abs() < 0.5, "gap {gap} should stay the pre-existing 8px default");
 }
 
+// ---- packet/border-collapse: collapsed tables feed spacing 0 -------------
+
+fn table_with_spacing_and_collapse(
+    spacing_x: f32,
+    spacing_y: f32,
+    collapse: BorderCollapse,
+    children: Vec<LayoutNode>,
+) -> LayoutNode {
+    let mut style = styled(Display::Table);
+    style.border_spacing_x = spacing_x;
+    style.border_spacing_y = spacing_y;
+    style.border_collapse = collapse;
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+}
+
+/// A collapsed table ignores its own `border_spacing_x` entirely (CSS
+/// `border-collapse: collapse` spec behavior) -- even though this table's
+/// style sets a nonzero 20px `border_spacing_x` (same value
+/// `table_border_spacing_style_controls_the_gap_between_columns` above
+/// proves DOES produce a 20px gap for a `Separate` table), the solved gap
+/// between its two adjacent column boxes must be zero: cells sit flush
+/// against each other, no inter-cell gap at all.
+#[test]
+fn collapsed_table_ignores_border_spacing_cells_are_adjacent() {
+    let t = root_with(table_with_spacing_and_collapse(
+        20.0,
+        0.0,
+        BorderCollapse::Collapse,
+        vec![row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")])],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&fragments);
+    let boxes = box_fragments(&fragments);
+    let col0 = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
+    assert!((gap - 0.0).abs() < 0.5, "collapsed table should feed 0 border-spacing to the solver, got gap {gap}");
+}
+
+/// The flip side: the SAME style (20px `border_spacing_x`) with
+/// `border_collapse` left `Separate` still produces the 20px gap -- proves
+/// the zeroing above is specifically gated on `Collapse`, not some blanket
+/// regression.
+#[test]
+fn separate_table_with_same_spacing_style_still_shows_the_gap() {
+    let t = root_with(table_with_spacing_and_collapse(
+        20.0,
+        0.0,
+        BorderCollapse::Separate,
+        vec![row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")])],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    let boxes = box_fragments(&fragments);
+    let col0 = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
+    assert!((gap - 20.0).abs() < 0.5, "separate table should still show its own 20px border_spacing_x, got gap {gap}");
+}
+
 /// A single-cell, single-column table (no border-spacing gaps in play at
 /// all) built with the cell's own `padding` set directly on its
 /// `ComputedStyle` -- proves the measurement pipeline
@@ -483,4 +543,239 @@ fn cell_padding_offsets_content_from_the_cell_box_origin() {
         (hello_p.rect.origin.y - (box_p.y + 10.0)).abs() < 0.5,
         "padded content should be inset 10px from the cell box's top edge"
     );
+}
+
+// ---------------------------------------------------------------------------
+// packet/collapse-geometry: `border-collapse: collapse` shared grid lines.
+//
+// Every cell keeps its FULL 4-side border (no dedup) -- the single-line
+// effect comes from POSITIONING adjacent cells so their borders coincide on
+// the same pixels, per `layout::block`'s own "packet/collapse-geometry" doc
+// comments. For a uniform 1px border, the closed-form geometry this proves:
+//   - every SINGLE-span column/row keeps its exact separate-mode width/
+//     height (only its POSITION shifts) -- adjacent cells intentionally
+//     OVERLAP by exactly one border-width (1px here) at each interior grid
+//     line, so their independently-painted borders land on the same pixel.
+//   - a cell spanning multiple columns/rows is narrower/shorter than the
+//     raw summed span by `(span - 1) * border_width` (the interior lines it
+//     internally swallows are genuinely gone, not shared with a neighbor).
+//   - the table's total collapsed width/height is the raw sum minus
+//     `(count - 1) * border_width` (one shared line removed per interior
+//     boundary; the true outer edges are untouched at the frameless-table
+//     boundary).
+// ---------------------------------------------------------------------------
+
+fn bordered_cell(colspan: u16, rowspan: u16, text: &str, border_px: f32) -> LayoutNode {
+    let mut style = styled(Display::TableCell);
+    style.border = Edges::all(BorderSide { width: border_px, style: BorderStyle::Solid, color: Color::BLACK });
+    LayoutNode {
+        style,
+        content: BoxContent::TableCell { colspan, rowspan },
+        children: vec![text_node(text)],
+        interactive: None,
+    }
+}
+
+/// `frame_border_px`: `Some(n)` gives the TABLE's own box a solid `n`px
+/// border on all four sides too (the `<table border>` shape -- bug #1 in
+/// the packet brief: the frame and the first row/col cells' own borders
+/// must coincide, not stack into a doubled edge); `None` leaves the table's
+/// own border at the CSS default (the CSS-only-collapsed shape with no
+/// table-level border at all -- e.g. kitchen-sink's `table {
+/// border-collapse: collapse } td { border: 1px solid }`).
+fn collapsed_table(frame_border_px: Option<f32>, children: Vec<LayoutNode>) -> LayoutNode {
+    let mut style = styled(Display::Table);
+    style.border_collapse = BorderCollapse::Collapse;
+    if let Some(bw) = frame_border_px {
+        style.border = Edges::all(BorderSide { width: bw, style: BorderStyle::Solid, color: Color::BLACK });
+    }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+}
+
+/// A collapsed 2x2 table (no table-level border -- the CSS-only-collapsed
+/// shape), 1px cell borders, columns pinned to exact known pixel widths by
+/// single-word (unsplittable) cell text: col0 = "aaaaaaaaaa" (80px content,
+/// 8px/char monospace) + 1px border each side = 82px; col1 = "b" (8px) +
+/// 2px border = 10px. Both rows use the SAME text so column widths (the
+/// solver's per-column max across every cell in that column) are identical
+/// top to bottom, keeping the geometry this test asserts fully closed-form.
+#[test]
+fn collapsed_single_span_cells_share_one_grid_line_no_table_frame() {
+    let t = root_with(collapsed_table(
+        None,
+        vec![
+            row(vec![bordered_cell(1, 1, "aaaaaaaaaa", 1.0), bordered_cell(1, 1, "b", 1.0)]),
+            row(vec![bordered_cell(1, 1, "aaaaaaaaaa", 1.0), bordered_cell(1, 1, "b", 1.0)]),
+        ],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&fragments);
+    let boxes = box_fragments(&fragments);
+    // [0]=root, [1]=table's own box, [2..6]=the four cells in row-major
+    // (place_grid) order: r0c0, r0c1, r1c0, r1c1.
+    assert_eq!(boxes.len(), 6, "root + table + 4 cell boxes");
+    let table_box = boxes[1];
+    let r0c0 = boxes[2];
+    let r0c1 = boxes[3];
+    let r1c0 = boxes[4];
+    let r1c1 = boxes[5];
+
+    // No table-level border: the outer frame is formed ENTIRELY by the edge
+    // cells' own borders -- col0/row0's own box starts exactly where the
+    // table's own (borderless) content box starts, no gap and no gratuitous
+    // extra shift.
+    assert!((r0c0.rect.origin.x - table_box.rect.origin.x).abs() < 0.01, "left frame: r0c0 flush with table's own box");
+    assert!((r0c0.rect.origin.y - table_box.rect.origin.y).abs() < 0.01, "top frame: r0c0 flush with table's own box");
+
+    // Single-span, non-last AND last columns both keep their exact raw
+    // (separate-mode-equal) width -- only positions shift to overlap.
+    assert!((r0c0.rect.size.w - 82.0).abs() < 0.5, "col0 width unchanged by collapse: {}", r0c0.rect.size.w);
+    assert!((r0c1.rect.size.w - 10.0).abs() < 0.5, "col1 width unchanged by collapse: {}", r0c1.rect.size.w);
+
+    // Shared vertical grid line: col0's right edge is exactly 1 border-width
+    // AFTER col1's left edge (a deliberate 1px overlap so their
+    // independently-painted borders land on the SAME pixel column) --
+    // verified for both rows (columns align top to bottom).
+    let overlap_row0 = (r0c0.rect.origin.x + r0c0.rect.size.w) - r0c1.rect.origin.x;
+    assert!((overlap_row0 - 1.0).abs() < 0.5, "col0/col1 should overlap by exactly the 1px border width, got {overlap_row0}");
+    assert!((r0c0.rect.origin.x - r1c0.rect.origin.x).abs() < 0.01, "col0 aligns across rows");
+    assert!((r0c1.rect.origin.x - r1c1.rect.origin.x).abs() < 0.01, "col1 aligns across rows");
+    let overlap_row1 = (r1c0.rect.origin.x + r1c0.rect.size.w) - r1c1.rect.origin.x;
+    assert!((overlap_row1 - overlap_row0).abs() < 0.01, "both rows share the identical grid line");
+
+    // Shared horizontal grid line: row0's bottom edge overlaps row1's top
+    // edge by exactly the (1px) border height, same coincidence trick along
+    // the other axis.
+    let overlap_y_col0 = (r0c0.rect.origin.y + r0c0.rect.size.h) - r1c0.rect.origin.y;
+    assert!((overlap_y_col0 - 1.0).abs() < 0.5, "row0/row1 should overlap by exactly the 1px border height, got {overlap_y_col0}");
+    let overlap_y_col1 = (r0c1.rect.origin.y + r0c1.rect.size.h) - r1c1.rect.origin.y;
+    assert!((overlap_y_col1 - overlap_y_col0).abs() < 0.01, "both columns share the identical horizontal grid line");
+
+    // Total collapsed table width/height: raw sum minus ONE interior
+    // border-width (2 columns/rows -> 1 shared interior boundary each).
+    let expected_total_w = 82.0 + 10.0 - 1.0;
+    let expected_total_h = r0c0.rect.size.h + r1c0.rect.size.h - 1.0;
+    assert!((table_box.rect.size.w - expected_total_w).abs() < 0.5, "table width {} vs expected {expected_total_w}", table_box.rect.size.w);
+    assert!((table_box.rect.size.h - expected_total_h).abs() < 0.5, "table height {} vs expected {expected_total_h}", table_box.rect.size.h);
+
+    // No gaps: the rightmost/bottommost cells' own far edges reach exactly
+    // to the table's own far edges (a complete outer frame, no background-
+    // colored gap between the last cell and the table's own box).
+    assert!(
+        ((r0c1.rect.origin.x + r0c1.rect.size.w) - (table_box.rect.origin.x + table_box.rect.size.w)).abs() < 0.5,
+        "right frame: rightmost cell reaches the table's own right edge, no gap"
+    );
+    assert!(
+        ((r1c0.rect.origin.y + r1c0.rect.size.h) - (table_box.rect.origin.y + table_box.rect.size.h)).abs() < 0.5,
+        "bottom frame: bottommost cell reaches the table's own bottom edge, no gap"
+    );
+}
+
+/// A colspan=2 cell spanning BOTH columns of the same 2-column grid as the
+/// test above: its collapsed width is the interior-shrunk TOTAL table width
+/// (not the raw, unshrunk 92px sum) -- it swallows the one interior grid
+/// line entirely (no neighbor to share it with), and spans the full grid
+/// exactly like the table's own box.
+#[test]
+fn collapsed_colspan_cell_spans_the_full_grid_width() {
+    let t = root_with(collapsed_table(
+        None,
+        vec![
+            row(vec![bordered_cell(2, 1, "TOTAL", 1.0)]),
+            row(vec![bordered_cell(1, 1, "aaaaaaaaaa", 1.0), bordered_cell(1, 1, "b", 1.0)]),
+        ],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&fragments);
+    let boxes = box_fragments(&fragments);
+    // [0]=root, [1]=table, [2]=the colspan-2 TOTAL cell, [3..5]=row1's cells.
+    assert_eq!(boxes.len(), 5, "root + table + colspan cell + 2 baseline cells");
+    let table_box = boxes[1];
+    let total_cell = boxes[2];
+    let r1c0 = boxes[3];
+
+    assert!((total_cell.rect.origin.x - r1c0.rect.origin.x).abs() < 0.01, "colspan cell aligns with col0's left edge");
+    // Exact number, not just "matches the table box": raw sum (82 + 10 = 92)
+    // minus the ONE interior border-width the colspan cell swallows = 91 --
+    // pins the fix precisely rather than merely checking self-consistency
+    // (which the pre-fix code would also trivially satisfy, since both
+    // values were equally un-shrunk).
+    assert!((total_cell.rect.size.w - 91.0).abs() < 0.5, "colspan cell width should be 91 (92 raw - 1 swallowed interior border), got {}", total_cell.rect.size.w);
+    assert!(
+        (total_cell.rect.size.w - table_box.rect.size.w).abs() < 0.5,
+        "colspan cell spans the FULL collapsed table width ({}), not the raw unshrunk sum: got {}",
+        table_box.rect.size.w,
+        total_cell.rect.size.w
+    );
+}
+
+/// Bug #1 from the packet brief: a `<table border>`-shaped table (the table
+/// box ITSELF also carries a solid border, not just its cells) must not
+/// double its top/left (or bottom/right) edge -- the table's own frame and
+/// the edge cells' own borders must coincide on the exact same pixels, so
+/// this asserts the table's own box and the first/last cell's own box share
+/// the same outer corners exactly (not merely close, not offset by the
+/// frame's border width).
+#[test]
+fn collapsed_table_with_own_frame_border_coincides_with_edge_cells() {
+    let t = root_with(collapsed_table(
+        Some(1.0),
+        vec![row(vec![bordered_cell(1, 1, "aaaaaaaaaa", 1.0), bordered_cell(1, 1, "b", 1.0)])],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&fragments);
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 4, "root + table + 2 cells");
+    let table_box = boxes[1];
+    let r0c0 = boxes[2];
+    let r0c1 = boxes[3];
+
+    // Top-left corner: the table's own frame border and cell (0,0)'s own
+    // top/left border must coincide exactly -- no 2px doubled edge.
+    assert!(
+        (r0c0.rect.origin.x - table_box.rect.origin.x).abs() < 0.01,
+        "table frame and r0c0's own left edge must coincide exactly, table.x={} r0c0.x={}",
+        table_box.rect.origin.x,
+        r0c0.rect.origin.x
+    );
+    assert!(
+        (r0c0.rect.origin.y - table_box.rect.origin.y).abs() < 0.01,
+        "table frame and r0c0's own top edge must coincide exactly, table.y={} r0c0.y={}",
+        table_box.rect.origin.y,
+        r0c0.rect.origin.y
+    );
+
+    // Bottom-right corner: the LAST cell's own far edge must coincide with
+    // the table's own far edge (both x and y -- a single row, so the last
+    // cell is both the rightmost AND the bottommost).
+    let table_right = table_box.rect.origin.x + table_box.rect.size.w;
+    let table_bottom = table_box.rect.origin.y + table_box.rect.size.h;
+    let cell_right = r0c1.rect.origin.x + r0c1.rect.size.w;
+    let cell_bottom = r0c1.rect.origin.y + r0c1.rect.size.h;
+    assert!((cell_right - table_right).abs() < 0.5, "table frame and last cell's own right edge must coincide, table_right={table_right} cell_right={cell_right}");
+    assert!((cell_bottom - table_bottom).abs() < 0.5, "table frame and last cell's own bottom edge must coincide, table_bottom={table_bottom} cell_bottom={cell_bottom}");
+}
+
+/// Separate mode (the CSS default) must be completely unaffected by this
+/// packet's collapse geometry: adjacent cells still sit at their normal
+/// (non-overlapping, spacing-separated) positions even when every cell
+/// carries the exact same 1px border that triggers the collapse geometry
+/// above.
+#[test]
+fn separate_mode_bordered_cells_do_not_overlap() {
+    let mut style = styled(Display::Table);
+    style.border_collapse = BorderCollapse::Separate;
+    let t = root_with(LayoutNode {
+        style,
+        content: BoxContent::Container,
+        children: vec![row(vec![bordered_cell(1, 1, "aaaaaaaaaa", 1.0), bordered_cell(1, 1, "b", 1.0)])],
+        interactive: None,
+    });
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 4);
+    let r0c0 = boxes[2];
+    let r0c1 = boxes[3];
+    let gap = r0c1.rect.origin.x - (r0c0.rect.origin.x + r0c0.rect.size.w);
+    assert!(gap >= 0.0, "separate mode must never overlap adjacent cells, got gap {gap}");
 }

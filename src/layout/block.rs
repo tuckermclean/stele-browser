@@ -50,8 +50,8 @@ use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
-    AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto,
-    Dimension as CssDimension, TextAlign,
+    AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, Display, FlexDirection, FlexWrap,
+    JustifyContent, LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -199,6 +199,14 @@ struct TableCacheEntry {
     rows: usize,
     table_layout: TableLayout,
     cell_content: Vec<(Size, Vec<Fragment>)>,
+    /// packet/collapse-geometry: the per-axis CELL border width
+    /// (`collapse_cell_border_widths`) this entry's `table_layout.cell_rects`
+    /// were already adjusted with, when `border_collapse == Collapse`
+    /// (`(0.0, 0.0)` — a no-op — for a `Separate` table). `measure_node`'s
+    /// `NodeCtx::Table` arm reuses these (rather than re-walking `grid`) to
+    /// compute the table's own collapsed total content size.
+    collapse_bw_x: f32,
+    collapse_bw_y: f32,
 }
 
 /// The taffy node-context type: either a folded inline-formatting-context
@@ -305,6 +313,211 @@ fn finite_nonneg(v: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The `(x, y)` border-spacing gap `table_node`'s own resolved style feeds
+/// the table solver, per CSS `border-collapse` (packet/border-collapse): a
+/// `Collapse` table ignores `border-spacing`/`cellspacing` entirely (CSS
+/// spec behavior -- adjacent cells become flush against each other, sharing
+/// one border line, see `layout::box_tree`'s collapse-dedup step for the
+/// border-sharing half of this), so this returns `(0.0, 0.0)` regardless of
+/// what `border_spacing_x/y` resolved to. A `Separate` table (the default --
+/// every table that doesn't opt into `border-collapse: collapse`) is
+/// byte-identical to before this packet: straight `finite_nonneg` off the
+/// table's own resolved `border_spacing_x/y` (see `ComputedStyle::
+/// border_spacing_x`'s own doc comment).
+fn effective_border_spacing(style: &ComputedStyle) -> (f32, f32) {
+    if style.border_collapse == BorderCollapse::Collapse {
+        (0.0, 0.0)
+    } else {
+        (finite_nonneg(style.border_spacing_x), finite_nonneg(style.border_spacing_y))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// packet/collapse-geometry: `border-collapse: collapse` shared-grid-line cell
+// geometry. Replaces the earlier (removed) `box_tree::apply_border_collapse`
+// dedup step, which zeroed each cell's right/bottom border and leaned on the
+// table's own frame box to close off the grid — architecturally wrong (see
+// that removed function's own former doc comment, preserved in DECISIONS):
+// it doubled a bare `<table border>`'s top/left edge to 2px (the frame AND
+// the first cell's own top/left both drew), and it lost the right/bottom
+// outer edge entirely on any collapsed table with NO table-level border
+// (kitchen-sink's shape) since zeroing was the only thing that ever drew
+// those edges.
+//
+// The fix keeps every cell's FULL 4-side border (no style mutation at all)
+// and instead POSITIONS cells so adjacent borders coincide on the same
+// pixel. `raster.rs`'s own border painter draws each side INSET from the
+// box's own edge (e.g. a right border occupies the box's own last
+// `border_width` pixels, not pixels just past it) — which means two boxes
+// that merely ABUT (zero gap, zero overlap, the "textbook" grid-line tiling
+// `layout::table::solve_table` already does for `border-spacing`) do NOT
+// produce a coincident line under that painter: box A's right border and
+// box B's (immediately following) left border land on two DIFFERENT,
+// adjacent pixel columns/rows — a 2px-wide seam, not a shared 1px line.
+// Coincidence instead requires the two boxes to OVERLAP by exactly one
+// border-width at their shared edge, so each box's own inset border paints
+// the SAME pixel range. See `collapse_grid_lines`/`collapse_cell_extent`'s
+// own doc comments for the exact (closed-form, algebraically verified —
+// see the JOURNAL/DECISIONS entry) construction, and `tests/layout_table.rs`'s
+// "packet/collapse-geometry" section for the pixel-exact proof.
+//
+// Scope (documented, matches the packet brief): a single uniform border
+// width per axis is assumed — read as the MAX actually-visible cell border
+// width on that axis (`collapse_cell_border_widths`) and, separately, the
+// table's own frame border width if it has one (`collapse_table_border_widths`).
+// Genuinely differing per-cell border widths/styles would need real CSS
+// border-conflict resolution (widest/style-priority wins per shared edge) —
+// out of scope, same documented limitation the removed dedup step already
+// carried.
+// ---------------------------------------------------------------------------
+
+/// `true` iff `side` will actually paint a visible line — mirrors
+/// `backend::raster::border_px`'s own gate (`Solid` style, finite positive
+/// width) — so collapse geometry only shifts/overlaps cells to coincide with
+/// a border that will really be drawn, never for an invisible (`None`-style
+/// or zero-width) side.
+fn paints_visible_border(side: &BorderSide) -> bool {
+    side.style == BorderStyle::Solid && side.width.is_finite() && side.width > 0.0
+}
+
+fn effective_border_width(side: &BorderSide) -> f32 {
+    if paints_visible_border(side) {
+        side.width
+    } else {
+        0.0
+    }
+}
+
+/// The uniform per-axis CELL border width used for collapse geometry: the
+/// max actually-visible left/right (x) or top/bottom (y) border width across
+/// every cell in `grid` — see this section's own "Scope" note. `(0.0, 0.0)`
+/// if no cell has any visible border on that axis (collapse geometry then
+/// reduces to a no-op: every `collapse_grid_lines`/`collapse_cell_extent`
+/// call below degrades to the plain, non-overlapping tiling `solve_table`
+/// already produces).
+fn collapse_cell_border_widths(grid: &table_layout::Grid) -> (f32, f32) {
+    let mut bw_x = 0.0f32;
+    let mut bw_y = 0.0f32;
+    for gc in &grid.cells {
+        let b = &gc.node.style.border;
+        bw_x = bw_x.max(effective_border_width(&b.left)).max(effective_border_width(&b.right));
+        bw_y = bw_y.max(effective_border_width(&b.top)).max(effective_border_width(&b.bottom));
+    }
+    (bw_x, bw_y)
+}
+
+/// The table's own frame border width per axis (`0.0` if the table itself
+/// has no visible border on that axis — e.g. any CSS-only-collapsed table
+/// with no `border` on the `<table>` element itself, like kitchen-sink's
+/// shape): used to shift the WHOLE cell grid so it overlaps the table's own
+/// frame instead of sitting flush against its inner (content-box) edge — see
+/// `emit`'s `Built::Table` arm and `measure_node`'s `NodeCtx::Table` arm,
+/// both gated on `border_collapse == Collapse`.
+fn collapse_table_border_widths(style: &ComputedStyle) -> (f32, f32) {
+    let bw_x = effective_border_width(&style.border.left).max(effective_border_width(&style.border.right));
+    let bw_y = effective_border_width(&style.border.top).max(effective_border_width(&style.border.bottom));
+    (bw_x, bw_y)
+}
+
+/// Grid-line boundary positions for `border-collapse: collapse` geometry:
+/// `lines[k]` is the pixel offset (relative to column/row `0`'s own
+/// un-collapsed start) of the boundary BEFORE column/row `k`, for `k` in
+/// `0..=widths.len()`. Every INTERIOR boundary (there are
+/// `widths.len().saturating_sub(1)` of them — indices `1..widths.len()`) is
+/// pulled in by exactly `bw`; the outermost boundary (`k == 0` and `k ==
+/// widths.len()`) is left at its natural (un-pulled) position, since there's
+/// no neighboring cell there to share a line with (see this section's own
+/// module doc for why a naive "pull in EVERY boundary including the outer
+/// ones by `k * bw`" formula over-shrinks a single-column/row table, or any
+/// table's true outer edge, by one spurious border-width).
+///
+/// Total: `widths` (already `solve_table`'s own finite/non-negative output)
+/// is defensively re-sanitized anyway; `bw` non-finite/negative sanitizes to
+/// `0.0` (a no-op shift). Never empty — always `widths.len() + 1` entries,
+/// so `lines[widths.len()]` (the far/total boundary) is always valid to
+/// index.
+fn collapse_grid_lines(widths: &[f32], bw: f32) -> Vec<f32> {
+    let n = widths.len();
+    let bw = finite_nonneg(bw);
+    let cap = n.saturating_sub(1);
+    let mut lines = Vec::with_capacity(n + 1);
+    lines.push(0.0f32);
+    let mut s = 0.0f32;
+    for (k, w) in widths.iter().enumerate() {
+        s += finite_nonneg(*w);
+        let shrink = (k + 1).min(cap) as f32 * bw;
+        lines.push((s - shrink).max(0.0));
+    }
+    lines
+}
+
+/// One cell's collapse-adjusted `(offset, length)` along one axis: `lines`
+/// is that axis's [`collapse_grid_lines`] output, `start`/`span` the cell's
+/// column/row origin and colspan/rowspan (already grid-clamped by
+/// `table_layout::place_grid`), `bw` that axis's border width.
+///
+/// Every cell that does NOT reach the axis's far edge (`start + span <
+/// lines.len() - 1`, i.e. it has a real neighbor immediately after it)
+/// OVERSHOOTS the plain grid-line difference by `bw` — deliberately
+/// extending `bw` pixels PAST its own nominal grid line, into where the
+/// next cell begins, so the two cells overlap by exactly one border-width.
+/// Under this renderer's "border painted inset from the box's own edge"
+/// convention (see this section's module doc), that overlap is exactly what
+/// makes the two independently-painted borders land on the SAME pixel — a
+/// flush, non-overlapping tiling (the naive `lines[end] - lines[start]`
+/// with no overshoot) provably does NOT coincide under that convention
+/// (verified algebraically, see JOURNAL/DECISIONS). A cell that DOES reach
+/// the far edge gets no overshoot (there's no neighbor beyond it to overlap
+/// with — overshooting there would extend the cell past the table's own
+/// true outer edge, leaving a gap between where the cell's far border
+/// actually lands and where the table reports its own total size).
+fn collapse_cell_extent(lines: &[f32], start: usize, span: usize, bw: f32) -> (f32, f32) {
+    let n = lines.len().saturating_sub(1);
+    let start = start.min(n);
+    let end = start.saturating_add(span).min(n);
+    let x0 = lines.get(start).copied().unwrap_or(0.0);
+    let x1 = lines.get(end).copied().unwrap_or(x0);
+    let overshoot = if end < n { finite_nonneg(bw) } else { 0.0 };
+    (x0, (x1 - x0 + overshoot).max(0.0))
+}
+
+/// The collapsed grid's total extent along one axis: the far (`k ==
+/// widths.len()`) [`collapse_grid_lines`] boundary — the raw sum minus one
+/// border-width per INTERIOR boundary only (a single-column/row table, with
+/// no interior boundary at all, reports its untouched raw total). This is
+/// the table's own collapsed content-box size along that axis (before
+/// `collapse_table_border_widths`' further frame-overlap adjustment — see
+/// `measure_node`'s `NodeCtx::Table` arm).
+fn collapse_total(widths: &[f32], bw: f32) -> f32 {
+    collapse_grid_lines(widths, bw).last().copied().unwrap_or(0.0)
+}
+
+/// Recompute every cell's rect for `border-collapse: collapse` (module doc
+/// above): same 1:1 index correspondence with `grid.cells` that
+/// `table::solve_table`'s own `cell_rects` already promises (both are keyed
+/// by the SAME `grid.cells` iteration order — see `compute_table_cache_entry`).
+/// `col_widths`/`row_heights` are `solve_table`'s own (unmodified) column-
+/// width/row-height solve — this is purely a POSITIONING re-derivation, the
+/// underlying min/max-content column/row sizing algorithm is untouched.
+fn collapse_adjust_cell_rects(
+    grid: &table_layout::Grid,
+    col_widths: &[f32],
+    row_heights: &[f32],
+    bw_x: f32,
+    bw_y: f32,
+) -> Vec<Rect> {
+    let lines_x = collapse_grid_lines(col_widths, bw_x);
+    let lines_y = collapse_grid_lines(row_heights, bw_y);
+    grid.cells
+        .iter()
+        .map(|gc| {
+            let (x, w) = collapse_cell_extent(&lines_x, gc.col, gc.colspan, bw_x);
+            let (y, h) = collapse_cell_extent(&lines_y, gc.row, gc.rowspan, bw_y);
+            Rect { origin: Point { x, y }, size: Size { w, h } }
+        })
+        .collect()
 }
 
 /// Translate one `LayoutNode` (any content kind) into a taffy node. `depth`
@@ -656,11 +869,31 @@ fn measure_node<M: Metrics>(
             // hardcoded constant — see `ComputedStyle::border_spacing_x`'s
             // doc comment (falls back to the same 8.0/0.0 default when
             // nothing set it, so this is a no-op change for every table
-            // that doesn't use `border-spacing`/`cellspacing`).
-            let spacing_x = finite_nonneg(table_node.style.border_spacing_x);
-            let spacing_y = finite_nonneg(table_node.style.border_spacing_y);
-            let total_w = finite_nonneg(entry.table_layout.col_widths.iter().sum::<f32>() + col_gaps * spacing_x);
-            let total_h = finite_nonneg(entry.table_layout.row_heights.iter().sum::<f32>() + row_gaps * spacing_y);
+            // that doesn't use `border-spacing`/`cellspacing`). packet/
+            // border-collapse: a `Collapse` table gets `(0.0, 0.0)` instead
+            // — see `effective_border_spacing`'s own doc comment.
+            let (spacing_x, spacing_y) = effective_border_spacing(&table_node.style);
+            let (total_w, total_h) = if table_node.style.border_collapse == BorderCollapse::Collapse {
+                // packet/collapse-geometry: the collapsed grid's own total
+                // (raw sum minus one border-width per INTERIOR boundary —
+                // see `collapse_total`), further pulled in by the table's
+                // OWN frame border width on each axis (if it has one) so
+                // `emit`'s later `content_box_x/y() - table_bw` positioning
+                // (which overlaps the whole grid onto the table's own frame,
+                // not just its content-box inset) reconstructs a border-box
+                // size that exactly closes over the collapsed grid — see
+                // `emit`'s `Built::Table` arm and this module's own
+                // "packet/collapse-geometry" doc section above.
+                let (table_bw_x, table_bw_y) = collapse_table_border_widths(&table_node.style);
+                let w = collapse_total(&entry.table_layout.col_widths, entry.collapse_bw_x) - 2.0 * table_bw_x;
+                let h = collapse_total(&entry.table_layout.row_heights, entry.collapse_bw_y) - 2.0 * table_bw_y;
+                (finite_nonneg(w), finite_nonneg(h))
+            } else {
+                (
+                    finite_nonneg(entry.table_layout.col_widths.iter().sum::<f32>() + col_gaps * spacing_x),
+                    finite_nonneg(entry.table_layout.row_heights.iter().sum::<f32>() + row_gaps * spacing_y),
+                )
+            };
             TSize {
                 width: known_dimensions.width.unwrap_or(total_w),
                 height: known_dimensions.height.unwrap_or(total_h),
@@ -752,9 +985,17 @@ fn compute_table_cache_entry<M: Metrics>(
     // packet/table-spacing: read straight off the table's own resolved
     // style (falls back to the pre-existing 8.0/0.0 default — see
     // `ComputedStyle::border_spacing_x`'s doc comment), sanitized the same
-    // way every other layout-space scalar in this module is.
-    let spacing_x = finite_nonneg(table_node.style.border_spacing_x);
-    let spacing_y = finite_nonneg(table_node.style.border_spacing_y);
+    // way every other layout-space scalar in this module is. packet/
+    // border-collapse: `(0.0, 0.0)` instead when the table is collapsed —
+    // see `effective_border_spacing`'s own doc comment.
+    let (spacing_x, spacing_y) = effective_border_spacing(&table_node.style);
+    // packet/collapse-geometry: the uniform per-axis CELL border width this
+    // table's collapse geometry (if any) is built from — `(0.0, 0.0)` for a
+    // `Separate` table, making every `collapse_adjust_cell_rects` call below
+    // a total no-op (see `collapse_grid_lines`/`collapse_cell_extent`'s own
+    // "bw == 0" degenerate case).
+    let collapse = table_node.style.border_collapse == BorderCollapse::Collapse;
+    let (bw_x, bw_y) = if collapse { collapse_cell_border_widths(&grid) } else { (0.0, 0.0) };
 
     let mut cells: Vec<CellSpec> = grid
         .cells
@@ -773,7 +1014,7 @@ fn compute_table_cache_entry<M: Metrics>(
         })
         .collect();
 
-    let pass1 = table::solve_table(&TableSpec {
+    let mut pass1 = table::solve_table(&TableSpec {
         columns: grid.columns,
         rows: grid.rows,
         cells: cells.clone(),
@@ -781,6 +1022,15 @@ fn compute_table_cache_entry<M: Metrics>(
         border_spacing_x: spacing_x,
         border_spacing_y: spacing_y,
     });
+    if collapse {
+        // packet/collapse-geometry: re-derive pass1's cell rects BEFORE
+        // using them to assign each cell's content-layout width below, so
+        // the width a cell's own content is laid out at matches its FINAL
+        // collapsed rect (same collapse geometry re-applied to the final
+        // solve just below) — otherwise a cell's content would wrap against
+        // a wider (pre-collapse) width than its actually-painted box.
+        pass1.cell_rects = collapse_adjust_cell_rects(&grid, &pass1.col_widths, &pass1.row_heights, bw_x, bw_y);
+    }
 
     // One sub-layout per cell here (not two — see the module report):
     // `cell_content_layout`'s fragments are KEPT (not discarded) so `emit`
@@ -795,7 +1045,7 @@ fn compute_table_cache_entry<M: Metrics>(
         cell_content.push((size, fragments));
     }
 
-    let table_layout = table::solve_table(&TableSpec {
+    let mut table_layout = table::solve_table(&TableSpec {
         columns: grid.columns,
         rows: grid.rows,
         cells,
@@ -803,8 +1053,20 @@ fn compute_table_cache_entry<M: Metrics>(
         border_spacing_x: spacing_x,
         border_spacing_y: spacing_y,
     });
+    if collapse {
+        table_layout.cell_rects =
+            collapse_adjust_cell_rects(&grid, &table_layout.col_widths, &table_layout.row_heights, bw_x, bw_y);
+    }
 
-    TableCacheEntry { avail_w: available_width, columns: grid.columns, rows: grid.rows, table_layout, cell_content }
+    TableCacheEntry {
+        avail_w: available_width,
+        columns: grid.columns,
+        rows: grid.rows,
+        table_layout,
+        cell_content,
+        collapse_bw_x: bw_x,
+        collapse_bw_y: bw_y,
+    }
 }
 
 /// A cell's min-content width (every soft-wrap opportunity taken) and
@@ -1159,6 +1421,23 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
 
             let content_origin =
                 Point { x: parent_origin.x + layout.content_box_x(), y: parent_origin.y + layout.content_box_y() };
+            // packet/collapse-geometry: in collapse mode, the whole cell
+            // grid is based at the table's own BORDER-BOX origin minus its
+            // own frame border width (`content_origin`, shifted back by the
+            // border reservation `content_box_x/y()` already added) rather
+            // than at the content-box origin — so cell (0,0)'s own border
+            // overlaps (and thus coincides with, see this module's own
+            // "packet/collapse-geometry" doc section) the table's own frame
+            // border instead of sitting flush just past its inner edge. A
+            // `Separate` table, or a `Collapse` table with no table-level
+            // border (`table_bw == (0.0, 0.0)`), gets `cell_base ==
+            // content_origin` exactly — this is a no-op for both.
+            let cell_base = if node.style.border_collapse == BorderCollapse::Collapse {
+                let (table_bw_x, table_bw_y) = collapse_table_border_widths(&node.style);
+                Point { x: content_origin.x - table_bw_x, y: content_origin.y - table_bw_y }
+            } else {
+                content_origin
+            };
             let avail_w = finite_nonneg(layout.content_box_width());
             // Critical-C1 fix (review): reuse the cached solve from measure
             // time (same `avail_w` in the overwhelmingly common case — see
@@ -1173,7 +1452,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
             let cell_rects = entry.table_layout.cell_rects;
             for (i, (_, cell_fragments)) in entry.cell_content.into_iter().enumerate() {
                 let Some(rect) = cell_rects.get(i).copied() else { continue };
-                let cell_origin = Point { x: content_origin.x + rect.origin.x, y: content_origin.y + rect.origin.y };
+                let cell_origin = Point { x: cell_base.x + rect.origin.x, y: cell_base.y + rect.origin.y };
                 for (fi, f) in cell_fragments.into_iter().enumerate() {
                     // `cell_content_layout`'s FIRST fragment is always the
                     // cell's own root `Box` (see `emit`'s `Container` arm:

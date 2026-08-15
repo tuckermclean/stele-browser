@@ -19,6 +19,27 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Rendering — border-collapse + tty table grids
+
+### D50 — border-collapse via shared-grid-line overlap geometry (not dedup)
+`ComputedStyle.border_collapse` (freeze amendment, default Separate). Collapse is
+triggered by CSS `border-collapse: collapse` or a bare `<table border>` (no
+cellspacing; explicit cellspacing / `separate` overrides). **Geometry:** every
+cell keeps its full 4 borders; in collapse the table solver/emit places adjacent
+cells OVERLAPPING by one border-width so their shared borders coincide into a
+single 1px line, with the edge cells' outer borders (and the table frame, if any,
+based at its border-box origin) forming a complete outer frame; `border-spacing`
+is forced to 0. Colspan/rowspan span the correct grid lines and clip interior
+lines. **A first implementation that deduped cells to top+left borders was tried
+and DELETED** — it doubled the frame on bordered tables and deleted the
+right/bottom edges of frameless CSS-celled tables. **Verification:** orchestrator
+pixel-analyzed both `table-border.png` and `kitchen-sink.png` to confirm every
+line is 1px, the frame is closed on all four sides, and there are no column gaps.
+The tty draws box-drawing grids for table cells (`<hr>`/non-table unchanged), and
+a bare `<table border>` gets a 4px default cell padding so the tty separator has
+a column. **Limitation:** uniform border width only — differing per-cell border
+widths/styles still need real CSS border-conflict resolution (deferred).
+
 ## Layout — Table cellpadding/cellspacing
 
 ### D49 — cellspacing is a border-spacing freeze amendment; cellpadding rides padding

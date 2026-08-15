@@ -177,6 +177,15 @@ pub enum BorderStyle {
     Solid,
 }
 
+/// CSS `border-collapse: separate | collapse` (FREEZE AMENDMENT, packet/
+/// border-collapse — see `ComputedStyle::border_collapse`'s own doc comment
+/// for the full rationale). `Separate` is the CSS initial value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderCollapse {
+    Separate,
+    Collapse,
+}
+
 /// One side of a border. Only `solid` is honored in v0 (brief §4).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BorderSide {
@@ -279,6 +288,29 @@ pub struct ComputedStyle {
     /// implicit.
     pub border_spacing_x: f32,
     pub border_spacing_y: f32,
+    /// `border-collapse: separate | collapse` (FREEZE AMENDMENT, packet/
+    /// border-collapse): selects the table border model the bespoke table
+    /// solver (`layout::block::compute_table_cache_entry`) and the box-tree
+    /// builder's collapse-dedup step (`layout::box_tree`'s post-stamp walk)
+    /// key off. `Separate` (the CSS initial value, and this field's default)
+    /// is the pre-existing model — untouched by this packet, byte-identical
+    /// to every table's rendering before it landed. `Collapse` makes the
+    /// solver ignore `border_spacing_x/y` (feeds it `0.0` regardless of what
+    /// they resolved to) and makes the box-tree builder dedup each cell's
+    /// right/bottom borders against its neighbor's top/left, so adjacent
+    /// cells share one border line instead of doubling it with a gap between
+    /// (real CSS `border-collapse`). This is the ONLY other change this
+    /// packet makes to the otherwise-frozen `ComputedStyle` — one enum, one
+    /// field.
+    ///
+    /// Not inherited: real CSS `border-collapse` DOES inherit, but (exactly
+    /// like `border_spacing_x/y` above) only a `Display::Table` box's own
+    /// value is ever consulted by the solver/box-tree builder — a descendant
+    /// picking up an ancestor's `border-collapse` is otherwise unobservable
+    /// in this engine — so `cascade::resolve` resolves this as a plain
+    /// non-inherited ("own") box property, the same documented-simplest
+    /// choice `border_spacing_x/y` already made.
+    pub border_collapse: BorderCollapse,
     pub float: Float,
     pub clear: Clear,
 
@@ -322,6 +354,11 @@ impl Default for ComputedStyle {
             // exactly (8.0/0.0), see the field doc comment above.
             border_spacing_x: 8.0,
             border_spacing_y: 0.0,
+            // Freeze amendment default (packet/border-collapse): CSS's own
+            // initial value, and the only value a table without an explicit
+            // `border-collapse`/`<table border>`-presentational-hint resolves
+            // to — see the field's own doc comment.
+            border_collapse: BorderCollapse::Separate,
             float: Float::None,
             clear: Clear::None,
 
@@ -357,5 +394,9 @@ mod tests {
         // (8.0/0.0), so no existing table's rendering shifts.
         assert_eq!(s.border_spacing_x, 8.0);
         assert_eq!(s.border_spacing_y, 0.0);
+        // packet/border-collapse freeze amendment: default MUST be
+        // `Separate` (CSS's own initial value), so no existing table's
+        // rendering shifts.
+        assert_eq!(s.border_collapse, BorderCollapse::Separate);
     }
 }

@@ -262,6 +262,9 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
         // silently collapsing to 0 in practice.
         border_spacing_x: d.border_spacing_x.map(|l| raw_to_px(l, font_size)).unwrap_or(default.border_spacing_x),
         border_spacing_y: d.border_spacing_y.map(|l| raw_to_px(l, font_size)).unwrap_or(default.border_spacing_y),
+        // packet/border-collapse: non-inherited ("own") resolution -- see
+        // `ComputedStyle::border_collapse`'s own doc comment for why.
+        border_collapse: own!(border_collapse),
         float: own!(float),
         clear: own!(clear),
 
@@ -906,6 +909,49 @@ mod tests {
         let table = &styles[find(&d, "table")];
         assert_eq!(table.border_spacing_x, 12.0, "author CSS wins over the presentational hint");
         assert_eq!(table.border_spacing_y, 12.0);
+    }
+
+    // ---- packet/border-collapse: `border-collapse` / `<table border>` ----
+
+    #[test]
+    fn plain_table_defaults_to_separate() {
+        let d = dom::parser::parse("<table><tr><td>x</td></tr></table>");
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "table")].border_collapse, BorderCollapse::Separate);
+    }
+
+    #[test]
+    fn table_border_attribute_alone_resolves_to_collapse() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>x</td></tr></table>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "table")].border_collapse, BorderCollapse::Collapse);
+    }
+
+    #[test]
+    fn table_border_with_cellspacing_stays_separate() {
+        let d = dom::parser::parse(r#"<table border="1" cellspacing="4"><tr><td>x</td></tr></table>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "table")].border_collapse, BorderCollapse::Separate);
+    }
+
+    #[test]
+    fn author_css_border_collapse_property_resolves_onto_the_table() {
+        let d = dom::parser::parse("<table><tr><td>x</td></tr></table>");
+        let sheet = parser::parse("table { border-collapse: collapse; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "table")].border_collapse, BorderCollapse::Collapse);
+    }
+
+    #[test]
+    fn author_css_separate_overrides_the_table_border_presentational_hint() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>x</td></tr></table>"#);
+        let sheet = parser::parse("table { border-collapse: separate; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(
+            styles[find(&d, "table")].border_collapse,
+            BorderCollapse::Separate,
+            "author CSS wins over the presentational collapse hint"
+        );
     }
 
     #[test]

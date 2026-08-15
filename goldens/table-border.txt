@@ -1,4 +1,6 @@
 
- Item    Qty
- Widget  4
- Gadget  2
+ ┌Item──┌Qty┐
+ ┌Widget┌4──┐
+ └──────└───┘
+ ┌Gadget┌2──┐
+ └──────└───┘
