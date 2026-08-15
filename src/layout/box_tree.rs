@@ -212,6 +212,11 @@ fn build_node<'a>(
             if el.name.as_str() == "table" {
                 apply_table_border_attribute(el, &mut node);
                 apply_table_cellpadding_attribute(el, &mut node);
+                // packet/border-collapse follow-up: only fires when
+                // `apply_table_cellpadding_attribute` above did NOT already
+                // stamp real cellpadding (see its own doc comment) -- runs
+                // right after it for that reason.
+                apply_table_border_default_padding(el, &mut node);
                 // packet/border-collapse: runs AFTER the border/cellpadding
                 // stamps above so it sees their result -- see
                 // `apply_border_collapse`'s own doc comment.
@@ -489,6 +494,96 @@ fn stamp_cell_padding(node: &mut LayoutNode, n: f32, depth: usize) {
         }
         stamp_cell_padding(child, n, depth + 1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// `<table border>` default cell padding (packet/border-collapse follow-up):
+// a bare `<table border="N">` with no `cellpadding` at all has ZERO cell
+// padding by CSS default, which (combined with `border-collapse`'s own
+// zeroed border-spacing) leaves NO free tty character-column between a
+// cell's own border and its neighbor's text -- e.g. "Widget" immediately
+// followed by "4" with no separator at all (`backend::tty::
+// draw_table_grid_lines`'s box-drawing separator has nowhere to land; see
+// that function's own doc comment for the full tty-resolution analysis).
+// This stamps a small default padding, calibrated (see `DEFAULT_TABLE_
+// BORDER_CELL_PADDING`'s own doc comment) to reliably reserve at least one
+// free tty column, so the SAME box-drawing separator this packet already
+// draws actually has room to show. Purely a rendering nicety for the
+// text-mode grid -- pixel/fb rendering also gets slightly padded cells as a
+// side effect, which reads as more legible there too (no downside).
+//
+// Mirrors `apply_table_cellpadding_attribute`'s own stamping pattern almost
+// exactly, with two extra gates: only when `border` is present (packet
+// brief -- author-CSS-only-bordered tables, e.g. kitchen-sink's `td {
+// border: 1px solid }`, get NOTHING from this: no `border` ATTRIBUTE means
+// this whole function is a no-op) AND only when `cellpadding` is NOT present
+// AT ALL (not just "parses to zero" -- an explicit `cellpadding="0"`, even
+// though it stamps literal `0px` padding either way, still counts as
+// "author asked for padding" and must suppress this default, matching the
+// packet brief's literal "no cellpadding attribute" wording). `stamp_cell_
+// padding`'s own "still cascade-default" gate (padding_is_cascade_default)
+// is reused unchanged, so real author CSS/inline `style="padding:...">`
+// still wins over this default exactly like it wins over `cellpadding`
+// itself.
+//
+// KNOWN LIMITATION shared with `cellpadding` itself: `padding_is_cascade_
+// default` can't distinguish "the author explicitly wrote `padding: 0`" from
+// "nothing touched padding at all" -- both resolve to the same `Px(0.0)` in
+// `ComputedStyle`. So an author rule of EXACTLY `td { padding: 0 }` would
+// still get overwritten by this default (and, pre-existing, by a real
+// `cellpadding="N"` attribute too) -- this is not a new gap this packet
+// introduces, just an existing one `apply_table_cellpadding_attribute`
+// already has, inherited unchanged. A non-zero author padding (e.g. `td {
+// padding: 2px }`) is unaffected and correctly wins (see this section's own
+// test).
+// ---------------------------------------------------------------------------
+
+/// Default per-side cell padding stamped by `apply_table_border_default_
+/// padding` (module doc section above). Calibrated empirically against
+/// `fixtures/table-border.html` (`<table border="1">`, no cellpadding) run
+/// through the real fetch->parse->cascade->box-tree->layout->tty pipeline:
+/// with `0px` padding, adjacent cells' solved column widths exactly hug
+/// their own text (zero slack), so a cell's own left border and the
+/// following cell's first text character round to the SAME 8px tty column
+/// (`backend::tty::CELL_W`) -- the border character is then invisible
+/// (real text, painted after, always wins the write). `4px` reliably pushes
+/// the FOLLOWING cell's own text start at least one whole tty column past
+/// its border/corner column in every row of that fixture (verified via a
+/// one-off fragment-rect dump: 1px border + 4px padding = 5px inset, enough
+/// to cross an 8px column's round-to-nearest boundary regardless of exactly
+/// where the border's own sub-pixel position falls within its column) --
+/// confirmed against the ACTUAL rendered `--headless --dump-text` output:
+/// `Widget`/`4` (and `Gadget`/`2`) now render with a real box-drawing
+/// character between them, no more cells running together. Deliberately
+/// smaller than `table-spacing`'s own convention-only `cellpadding="6"`
+/// (real HTML content, not calibrated for this purpose) -- 4px is the
+/// minimum this packet's own testing found sufficient, keeping the visual
+/// padding as unobtrusive as possible while still fixing the separator.
+const DEFAULT_TABLE_BORDER_CELL_PADDING: f32 = 4.0;
+
+/// Stamp `DEFAULT_TABLE_BORDER_CELL_PADDING` onto every still-cascade-
+/// default `TableCell` box in `table_box`'s subtree, but ONLY when `el` (the
+/// `<table>` element) has a `border` ATTRIBUTE present AND no `cellpadding`
+/// attribute at all -- see the module doc section above for the full
+/// rationale and each gate's own reasoning. `table_box` is the just-built
+/// `LayoutNode`, already having had `apply_table_border_attribute`/`apply_
+/// table_cellpadding_attribute` applied to it (see the call site in
+/// `build_node`), so this sees their result -- in particular, if `cell
+/// padding` WAS present, `apply_table_cellpadding_attribute` already
+/// stamped every still-default cell with that real value, and this function
+/// bails out immediately without ever touching that (or any) cell.
+fn apply_table_border_default_padding(el: &Element, table_box: &mut LayoutNode) {
+    if el.attrs.get("border").is_none() {
+        return; // no `border` attribute: not this packet's scope at all
+    }
+    if el.attrs.get("cellpadding").is_some() {
+        // Author explicitly named a `cellpadding` (even `"0"`, or an
+        // unparseable value) -- that request (or its total absence of
+        // effect, for `"0"`/garbage) always wins; this default never
+        // second-guesses it.
+        return;
+    }
+    stamp_cell_padding(table_box, DEFAULT_TABLE_BORDER_CELL_PADDING, 0);
 }
 
 // ---------------------------------------------------------------------------
