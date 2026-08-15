@@ -404,6 +404,42 @@ mod tests {
     }
 
     #[test]
+    fn border_top_declaration_sets_only_the_top_side() {
+        // packet/hr-rule: `border-top` must override only `Edges.top`,
+        // leaving right/bottom/left at the CSS initial (`BorderStyle::None`)
+        // -- unlike the `border` shorthand, which sets all four uniformly.
+        let d = dom::parser::parse("<div>x</div>");
+        let sheet = parser::parse("div { border-top: 1px solid #808080; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        let top = styles[div].border.top;
+        assert_eq!(top.style, BorderStyle::Solid);
+        assert_eq!(top.width, 1.0);
+        assert_eq!(top.color, Color::rgb(0x80, 0x80, 0x80));
+        for side in [styles[div].border.right, styles[div].border.bottom, styles[div].border.left] {
+            assert_eq!(side, BorderSide::default(), "non-top sides must stay unset");
+        }
+    }
+
+    #[test]
+    fn hr_ua_rule_renders_as_a_zero_height_box_with_a_solid_top_border() {
+        // The UA sheet's own `hr` rule (packet/hr-rule): a thin full-width
+        // rule line, not the old blank-space rendering.
+        let d = dom::parser::parse("<hr>");
+        let styles = cascade(&d, &[]);
+        let hr = find(&d, "hr");
+        assert_eq!(styles[hr].display, Display::Block);
+        assert_eq!(styles[hr].height, Dimension::Px(0.0));
+        let top = styles[hr].border.top;
+        assert_eq!(top.style, BorderStyle::Solid);
+        assert_eq!(top.width, 1.0);
+        assert_eq!(top.color, Color::rgb(0x80, 0x80, 0x80));
+        assert_eq!(styles[hr].border.right, BorderSide::default());
+        assert_eq!(styles[hr].border.bottom, BorderSide::default());
+        assert_eq!(styles[hr].border.left, BorderSide::default());
+    }
+
+    #[test]
     fn box_properties_do_not_inherit() {
         let d = dom::parser::parse(r#"<div><span>x</span></div>"#);
         let sheet = parser::parse("div { margin: 10px; }");

@@ -614,6 +614,20 @@ mod tests {
         }
     }
 
+    /// A `Box` fragment whose style carries only a top border (the `<hr>`
+    /// shape: zero content height, one solid top edge) — every other side
+    /// stays `BorderSide::default()` (`BorderStyle::None`).
+    fn box_fragment_top_border(x: f32, y: f32, w: f32, h: f32, border: crate::style::computed::BorderSide) -> Fragment {
+        use crate::style::computed::Edges;
+        Fragment {
+            rect: Rect { origin: Point { x, y }, size: Size { w, h } },
+            kind: FragmentKind::Box {
+                style: ComputedStyle { border: Edges { top: border, ..Edges::all(Default::default()) }, ..ComputedStyle::default() },
+            },
+            interactive: None,
+        }
+    }
+
     fn text_fragment_fg(x: f32, y: f32, w: f32, h: f32, text: &str, fg: Color) -> Fragment {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
@@ -732,6 +746,33 @@ mod tests {
         let fragments = vec![box_fragment(0.0, 0.0, 24.0, 16.0)]; // default style: TRANSPARENT
         let grid = render(&fragments, 10);
         assert_eq!(grid.cell_at(0, 0).bg, Color::TRANSPARENT);
+    }
+
+    // ------------------------------------------------------- hr rule (packet/hr-rule)
+
+    #[test]
+    fn solid_top_border_draws_a_horizontal_rule_across_the_box_width() {
+        use crate::style::computed::{BorderSide, BorderStyle};
+        let gray = Color::rgb(0x80, 0x80, 0x80);
+        let border = BorderSide { width: 1.0, style: BorderStyle::Solid, color: gray };
+        // 24px wide box at (0,0) -> 3 cells (0..3) on row 0.
+        let fragments = vec![box_fragment_top_border(0.0, 0.0, 24.0, 0.0, border)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0), "\u{2500}\u{2500}\u{2500}", "top border should draw '─' across the box's width");
+        for col in 0..3 {
+            assert_eq!(grid.cell_at(0, col).fg, gray, "col {col} should carry the border color");
+        }
+        assert_eq!(grid.cell_at(0, 3).ch, ' ', "col 3 is outside the box and must stay blank");
+    }
+
+    #[test]
+    fn no_border_style_draws_nothing_regression_guard() {
+        use crate::style::computed::BorderSide;
+        // Default BorderSide (BorderStyle::None) must not draw a rule — the
+        // overwhelmingly common case (every box without an explicit border).
+        let fragments = vec![box_fragment_top_border(0.0, 0.0, 24.0, 0.0, BorderSide::default())];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "", "no border style set should draw no rule characters");
     }
 
     #[test]

@@ -1038,6 +1038,31 @@ mod tests {
     }
 
     #[test]
+    fn border_top_longhand_parses_into_its_own_field_leaving_border_unset() {
+        // packet/hr-rule: `<hr>`'s UA rule needs a solid TOP-only border,
+        // distinct from the `border` shorthand (which sets all four sides
+        // uniformly via `resolve_border`'s `Edges::all`) -- `border-top`
+        // must land in its own `Declarations` field so the cascade can
+        // override just the top `BorderSide`.
+        let mut d = Declarations::default();
+        assert!(apply_property("border-top", &toks("1px solid #808080"), &mut d));
+        let b = d.border_top.unwrap();
+        assert_eq!(b.width, Some(RawLength::Px(1.0)));
+        assert_eq!(b.style, Some(BorderStyle::Solid));
+        assert_eq!(b.color, Some(Color::rgb(0x80, 0x80, 0x80)));
+        assert!(d.border.is_none(), "border-top must not also set the all-sides `border` field");
+    }
+
+    #[test]
+    fn border_top_garbage_token_invalidates_the_whole_declaration() {
+        // Same "whole shorthand invalid on one bad token" rule as `border`
+        // itself (see `border_shorthand_...`'s sibling tests below).
+        let mut d = Declarations::default();
+        assert!(!apply_property("border-top", &toks("2px solid red garbage"), &mut d));
+        assert!(d.border_top.is_none());
+    }
+
+    #[test]
     fn unknown_property_is_not_applied() {
         let mut d = Declarations::default();
         assert!(!apply_property("flibbertigibbet", &toks("1"), &mut d));
