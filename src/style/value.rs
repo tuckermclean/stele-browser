@@ -3,6 +3,7 @@
 //! total — an unparseable value simply fails to apply (the caller counts it
 //! against `Stylesheet::ignored_declarations`), it never panics.
 
+use crate::dom::AttrMap;
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float, FontFamily,
     FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
@@ -263,6 +264,134 @@ pub(crate) fn parse_color(tokens: &[Token]) -> Option<Color> {
         }
         _ => None,
     }
+}
+
+/// Parse an HTML color ATTRIBUTE value (as opposed to a CSS token stream --
+/// `parse_color` above): `#rgb`/`#rrggbb`, the same hex WITHOUT a leading
+/// `#` (vintage markup writes `bgcolor="FF0000"` freely), or a CSS named
+/// color, tried in that order. Total: anything else (garbage, empty, a
+/// partial hex run) simply fails to parse and the caller ignores the whole
+/// attribute (charter C2 -- unknown/unhandled input is ignored, never
+/// guessed at), never panics.
+fn parse_html_color(s: &str) -> Option<Color> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let hex_candidate = s.strip_prefix('#').unwrap_or(s);
+    hex_color(hex_candidate).or_else(|| named_color(s))
+}
+
+/// The HTML4 `<font size>` scale (curated dialect: absolute values `1..=7`,
+/// `3` the default) -- `resolve_font_size_attr` below maps an already-
+/// resolved size 1..=7 to its pixel value; index 7 (and anything the caller
+/// already clamped above it) falls through to the top of the scale.
+fn html_font_size_scale_px(size: i32) -> f32 {
+    match size {
+        1 => 10.0,
+        2 => 13.0,
+        3 => 16.0,
+        4 => 18.0,
+        5 => 24.0,
+        6 => 32.0,
+        _ => 48.0, // 7, and anything clamped to it
+    }
+}
+
+/// Parse a `<font size="...">` attribute value into a resolved pixel size,
+/// per the HTML4 font-size scale (brief: packet/presentational-attrs).
+/// Absolute values (`"1"`..`"7"`, no leading sign) map directly and OUT-OF-
+/// RANGE absolute values are ignored outright (no clamping) -- `"0"`/`"8"`
+/// are simply invalid, not "meant" 1 or 7. A leading `"+"`/`"-"` makes the
+/// value RELATIVE: N steps from the default size 3, clamped into `[1, 7]`
+/// before mapping (real HTML: relative sizes always resolve to something,
+/// they just saturate at the scale's ends). Total: any non-digit run after
+/// an optional sign (or no digits at all) fails to parse and the whole
+/// attribute is ignored -- never panics.
+fn font_size_attr_px(raw: &str) -> Option<f32> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (sign, digits): (i32, &str) = if let Some(rest) = s.strip_prefix('+') {
+        (1, rest)
+    } else if let Some(rest) = s.strip_prefix('-') {
+        (-1, rest)
+    } else {
+        (0, s)
+    };
+    // Digits only from here -- rejects garbage like "3.5", "++1" (the
+    // remainder after one stripped sign still starts with a sign), or a
+    // bare "+"/"-" with nothing after it, rather than letting `i32::parse`
+    // itself tolerate a second leading sign it otherwise would.
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: i32 = digits.parse().ok()?;
+    if sign == 0 {
+        // Absolute: exactly 1..=7, no clamping -- "0"/"8" are invalid, not
+        // "meant" 1 or 7.
+        (1..=7).contains(&n).then(|| html_font_size_scale_px(n))
+    } else {
+        // Relative: N steps from the default size 3, saturating into [1, 7].
+        let size = (3 + sign * n).clamp(1, 7);
+        Some(html_font_size_scale_px(size))
+    }
+}
+
+/// The presentational-hint cascade tier (packet/presentational-attrs): the
+/// vintage HTML presentational attributes a given element carries, folded
+/// into `Declarations` exactly the way a matched CSS rule would be. The
+/// cascade (`cascade::fold_matching_declarations`) slots this in as its own
+/// tier -- above the UA sheet, below author CSS and inline `style=` -- so
+/// these participate in real inheritance and can be overridden by author
+/// CSS, unlike a post-cascade `ComputedStyle` mutation.
+///
+/// Curated to the handful vintage markup actually leans on (brief): `bgcolor`
+/// on ANY element, `<font color>`/`<font size>`, `align=` on any element
+/// EXCEPT `<img>` (whose `align` stays a float hint -- see
+/// `layout::box_tree::apply_align_float_hint`, deliberately left untouched by
+/// this packet), and `<body text>`. Everything else (and any element/
+/// attribute combo not listed above) yields an empty `Declarations` --
+/// including unparseable attribute values, which are silently ignored rather
+/// than guessed at. DEFERRED (not implemented; follow-up packets): `<body
+/// link/vlink/alink>`, `<table border>`, `cellpadding`/`cellspacing`, `<td
+/// width/height/valign/nowrap>`, `<font face>`.
+pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
+    let mut d = Declarations::default();
+
+    if let Some(bg) = attrs.get("bgcolor") {
+        d.background_color = parse_html_color(bg);
+    }
+
+    if tag.eq_ignore_ascii_case("font") {
+        if let Some(color) = attrs.get("color") {
+            d.color = parse_html_color(color);
+        }
+        if let Some(size) = attrs.get("size") {
+            d.font_size = font_size_attr_px(size).map(RawLength::Px);
+        }
+    }
+
+    if tag.eq_ignore_ascii_case("body") {
+        if let Some(text) = attrs.get("text") {
+            d.color = parse_html_color(text);
+        }
+    }
+
+    if !tag.eq_ignore_ascii_case("img") {
+        if let Some(align) = attrs.get("align") {
+            d.text_align = match align.trim().to_ascii_lowercase().as_str() {
+                "left" => Some(TextAlign::Left),
+                "right" => Some(TextAlign::Right),
+                "center" => Some(TextAlign::Center),
+                "justify" => Some(TextAlign::Justify),
+                _ => None, // top/middle/bottom/unknown: vertical-align territory, not this packet's scope.
+            };
+        }
+    }
+
+    d
 }
 
 /// Extract just the color component of a `background` shorthand value
@@ -1332,5 +1461,143 @@ mod tests {
         base.overlay(&later);
         assert_eq!(base.color, Some(Color::rgb(0, 0, 255)));
         assert_eq!(base.display, Some(Display::Block)); // untouched field survives
+    }
+
+    // ---- packet/presentational-attrs: vintage HTML attrs -> Declarations ---
+
+    fn attrs(pairs: &[(&str, &str)]) -> AttrMap {
+        let mut a = AttrMap::new();
+        for (k, v) in pairs {
+            a.set(k, v);
+        }
+        a
+    }
+
+    #[test]
+    fn font_color_attribute_maps_to_color_declaration() {
+        let d = presentational_hints("font", &attrs(&[("color", "red")]));
+        assert_eq!(d.color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn color_attribute_on_a_non_font_element_is_ignored() {
+        let d = presentational_hints("div", &attrs(&[("color", "red")]));
+        assert_eq!(d.color, None);
+    }
+
+    #[test]
+    fn bgcolor_accepts_hash_bare_hex_and_named_colors_identically() {
+        let expect = Some(Color::rgb(0xff, 0xcc, 0x00));
+        for val in ["#ffcc00", "ffcc00", "FFCC00", "#FFCC00"] {
+            let d = presentational_hints("p", &attrs(&[("bgcolor", val)]));
+            assert_eq!(d.background_color, expect, "bgcolor={val}");
+        }
+        let d = presentational_hints("p", &attrs(&[("bgcolor", "yellow")]));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 255, 0)));
+    }
+
+    #[test]
+    fn bgcolor_applies_on_any_element_not_just_body() {
+        let d = presentational_hints("span", &attrs(&[("bgcolor", "red")]));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn invalid_bgcolor_is_ignored() {
+        let d = presentational_hints("p", &attrs(&[("bgcolor", "not-a-color")]));
+        assert_eq!(d.background_color, None);
+    }
+
+    #[test]
+    fn font_size_absolute_scale_1_through_7() {
+        let expected = [(1, 10.0), (2, 13.0), (3, 16.0), (4, 18.0), (5, 24.0), (6, 32.0), (7, 48.0)];
+        for (n, px) in expected {
+            let d = presentational_hints("font", &attrs(&[("size", &n.to_string())]));
+            assert_eq!(d.font_size, Some(RawLength::Px(px)), "size={n}");
+        }
+    }
+
+    #[test]
+    fn font_size_relative_plus_and_minus_one_step_from_default() {
+        let d = presentational_hints("font", &attrs(&[("size", "+1")]));
+        assert_eq!(d.font_size, Some(RawLength::Px(18.0)), "size 4");
+        let d = presentational_hints("font", &attrs(&[("size", "-1")]));
+        assert_eq!(d.font_size, Some(RawLength::Px(13.0)), "size 2");
+    }
+
+    #[test]
+    fn font_size_relative_clamps_at_scale_bounds() {
+        let d = presentational_hints("font", &attrs(&[("size", "+10")]));
+        assert_eq!(d.font_size, Some(RawLength::Px(48.0)), "clamped to 7");
+        let d = presentational_hints("font", &attrs(&[("size", "-10")]));
+        assert_eq!(d.font_size, Some(RawLength::Px(10.0)), "clamped to 1");
+    }
+
+    #[test]
+    fn font_size_garbage_or_absolute_out_of_range_is_ignored() {
+        for v in ["abc", "0", "8", "", "3.5", "++1"] {
+            let d = presentational_hints("font", &attrs(&[("size", v)]));
+            assert_eq!(d.font_size, None, "size={v:?}");
+        }
+    }
+
+    #[test]
+    fn align_center_left_right_justify_map_to_text_align_on_non_img_elements() {
+        for (val, expect) in [
+            ("left", TextAlign::Left),
+            ("right", TextAlign::Right),
+            ("center", TextAlign::Center),
+            ("justify", TextAlign::Justify),
+        ] {
+            for tag in ["p", "div", "td"] {
+                let d = presentational_hints(tag, &attrs(&[("align", val)]));
+                assert_eq!(d.text_align, Some(expect), "tag={tag} align={val}");
+            }
+        }
+    }
+
+    #[test]
+    fn align_is_ignored_on_img_elements() {
+        let d = presentational_hints("img", &attrs(&[("align", "center")]));
+        assert_eq!(d.text_align, None);
+    }
+
+    #[test]
+    fn align_top_middle_bottom_are_ignored_everywhere() {
+        for v in ["top", "middle", "bottom", "nonsense"] {
+            let d = presentational_hints("p", &attrs(&[("align", v)]));
+            assert_eq!(d.text_align, None, "align={v}");
+        }
+    }
+
+    #[test]
+    fn body_text_attribute_maps_to_color() {
+        let d = presentational_hints("body", &attrs(&[("text", "#333333")]));
+        assert_eq!(d.color, Some(Color::rgb(0x33, 0x33, 0x33)));
+    }
+
+    #[test]
+    fn text_attribute_on_a_non_body_element_is_ignored() {
+        let d = presentational_hints("p", &attrs(&[("text", "#333333")]));
+        assert_eq!(d.color, None);
+    }
+
+    #[test]
+    fn irrelevant_element_attribute_combos_yield_empty_declarations() {
+        let d = presentational_hints("div", &attrs(&[]));
+        assert_eq!(d.color, None);
+        assert_eq!(d.background_color, None);
+        assert_eq!(d.font_size, None);
+        assert_eq!(d.text_align, None);
+    }
+
+    #[test]
+    fn presentational_hints_never_panics_on_garbage_attribute_values() {
+        let d = presentational_hints(
+            "font",
+            &attrs(&[("color", "!!!"), ("size", "!!!"), ("bgcolor", "!!!"), ("align", "!!!"), ("text", "!!!")]),
+        );
+        assert_eq!(d.color, None);
+        assert_eq!(d.font_size, None);
     }
 }

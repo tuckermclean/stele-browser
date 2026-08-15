@@ -11,7 +11,7 @@ use crate::style::computed::{
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
-use crate::style::value::{BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
+use crate::style::value::{presentational_hints, BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
 use crate::style::{parser, ComputedStyle, Stylesheet};
 use crate::surface::Color;
 
@@ -81,7 +81,14 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                 }
                 Node::Element(el) => {
                     let info = ElementInfo::from_element(&el.name, &el.attrs);
-                    let mut decls = fold_matching_declarations(ua, author, &ancestors, &info);
+                    // Vintage HTML presentational attributes (packet/
+                    // presentational-attrs: <font color/size>, bgcolor,
+                    // align=, <body text>) -- computed straight from the
+                    // `Element` already in hand (its attrs aren't part of
+                    // `ElementInfo`) and folded in as their own cascade tier
+                    // below, between the UA sheet and author CSS.
+                    let presentational = presentational_hints(el.name.as_str(), &el.attrs);
+                    let mut decls = fold_matching_declarations(ua, author, &ancestors, &info, &presentational);
                     // Inline `style="..."` is the highest-precedence CSS
                     // origin (beats both UA and every author sheet
                     // regardless of specificity) — folded in last so it
@@ -110,29 +117,48 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
     }
 }
 
-/// Merge every UA + author rule that matches this element and fold their
-/// declarations onto one accumulator, in cascade precedence order: sorted
-/// globally by `(origin, specificity, source order)`, applied low-to-high so
-/// the highest-precedence match's fields win (`Declarations::overlay`).
+/// Merge every UA + presentational-hint + author rule that matches this
+/// element and fold their declarations onto one accumulator, in cascade
+/// precedence order: sorted globally by `(tier, specificity, source order)`,
+/// applied low-to-high so the highest-precedence match's fields win
+/// (`Declarations::overlay`).
 ///
-/// Author sheets always outrank the UA sheet regardless of specificity (real
-/// CSS origin ordering — we don't support `!important`, so normal-weight
-/// author always beats normal-weight UA). *Within* the author origin, every
-/// matching rule from *every* author sheet is compared by specificity
-/// together, with sheet index (then in-sheet source order) only breaking
-/// exact specificity ties — a later sheet must not automatically beat an
-/// earlier one on lower specificity (that was the bug: folding one sheet at
-/// a time made specificity only work within a single sheet).
-fn fold_matching_declarations(ua: &Stylesheet, author: &[Stylesheet], ancestors: &[ElementInfo], info: &ElementInfo) -> Declarations {
-    // (is_author_origin, specificity, sheet_index, in-sheet source order, declarations)
-    let mut candidates: Vec<(bool, Specificity, usize, u32, &Declarations)> = Vec::new();
+/// Three tiers, lowest to highest precedence (packet/presentational-attrs
+/// added the middle one): `0` UA sheet, `1` this element's presentational
+/// hints (`value::presentational_hints` -- `<font color>`, `bgcolor`, etc.),
+/// `2` author `<style>`/linked sheets. We don't support `!important`, so
+/// within a tier only specificity (then sheet index, then in-sheet source
+/// order) breaks ties -- exactly as before this packet, just with the old
+/// `is_author: bool` widened to a `u8` so a middle tier could slot in
+/// without disturbing UA-vs-author precedence at all (`0 < 2` still holds
+/// exactly like `false < true` did). The presentational-hint tier is a
+/// single bundle per element rather than a set of matched selector rules, so
+/// its specificity is irrelevant (nothing else shares its tier to break a
+/// tie against) -- pushed with `Specificity::default()`.
+///
+/// *Within* the author tier, every matching rule from *every* author sheet is
+/// compared by specificity together, with sheet index (then in-sheet source
+/// order) only breaking exact specificity ties — a later sheet must not
+/// automatically beat an earlier one on lower specificity (that was the bug:
+/// folding one sheet at a time made specificity only work within a single
+/// sheet).
+fn fold_matching_declarations(
+    ua: &Stylesheet,
+    author: &[Stylesheet],
+    ancestors: &[ElementInfo],
+    info: &ElementInfo,
+    presentational: &Declarations,
+) -> Declarations {
+    // (tier, specificity, sheet_index, in-sheet source order, declarations)
+    let mut candidates: Vec<(u8, Specificity, usize, u32, &Declarations)> = Vec::new();
 
     for r in parser::matching_rules(ua, ancestors, info) {
-        candidates.push((false, r.selector.specificity(), 0, r.order, &r.declarations));
+        candidates.push((0, r.selector.specificity(), 0, r.order, &r.declarations));
     }
+    candidates.push((1, Specificity::default(), 0, 0, presentational));
     for (sheet_index, sheet) in author.iter().enumerate() {
         for r in parser::matching_rules(sheet, ancestors, info) {
-            candidates.push((true, r.selector.specificity(), sheet_index, r.order, &r.declarations));
+            candidates.push((2, r.selector.specificity(), sheet_index, r.order, &r.declarations));
         }
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
@@ -730,5 +756,118 @@ mod tests {
             deepest = child;
         }
         assert_eq!(styles[deepest].color, Color::rgb(0, 128, 0));
+    }
+
+    // ---- packet/presentational-attrs: presentational-hint cascade tier ----
+    //
+    // Vintage HTML presentational attributes (`<font color/size>`, `bgcolor`,
+    // `align`, `<body text>`) must fold in as a real cascade tier -- UA <
+    // presentational hints < author CSS < inline `style=` -- so they
+    // participate in inheritance/override correctly instead of being patched
+    // onto `ComputedStyle` after the cascade has already run.
+
+    #[test]
+    fn font_color_attribute_sets_computed_color() {
+        let d = dom::parser::parse(r#"<font color="red">text</font>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn presentational_hint_overrides_inherited_color_but_plain_sibling_still_inherits() {
+        // The key inheritance-correctness case the cascade-tier approach
+        // fixes vs. post-cascade mutation: the <font>'s own hint must beat
+        // the inherited blue, while a plain <span> sibling with no hint of
+        // its own still inherits blue from the div normally.
+        let d = dom::parser::parse(r#"<div style="color:blue"><font color="red">x</font><span>y</span></div>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(255, 0, 0), "hint beats inherited color");
+        assert_eq!(styles[find(&d, "span")].color, Color::rgb(0, 0, 255), "plain sibling still inherits from the div");
+    }
+
+    #[test]
+    fn author_css_beats_presentational_hint() {
+        let d = dom::parser::parse(r#"<font color="red">x</font>"#);
+        let sheet = parser::parse("font { color: green; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn inline_style_beats_presentational_hint_too() {
+        let d = dom::parser::parse(r#"<font color="red" style="color:green">x</font>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "font")].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn bgcolor_variants_agree_and_do_not_inherit() {
+        for (val, expect) in [
+            ("#ffcc00", Color::rgb(0xff, 0xcc, 0x00)),
+            ("ffcc00", Color::rgb(0xff, 0xcc, 0x00)),
+            ("yellow", Color::rgb(255, 255, 0)),
+        ] {
+            let html = format!(r#"<div bgcolor="{val}"><span>x</span></div>"#);
+            let d = dom::parser::parse(&html);
+            let styles = cascade(&d, &[]);
+            assert_eq!(styles[find(&d, "div")].background_color, expect, "bgcolor={val}");
+            assert_eq!(styles[find(&d, "span")].background_color, Color::TRANSPARENT, "bgcolor must not inherit");
+        }
+    }
+
+    #[test]
+    fn font_size_attribute_scale_absolute_and_relative() {
+        let cases = [("1", 10.0_f32), ("7", 48.0), ("+1", 18.0), ("-1", 13.0)];
+        for (attr, px) in cases {
+            let html = format!(r#"<font size="{attr}">a</font>"#);
+            let d = dom::parser::parse(&html);
+            let styles = cascade(&d, &[]);
+            assert_eq!(styles[find(&d, "font")].font_size, px, "size={attr}");
+        }
+    }
+
+    #[test]
+    fn align_center_sets_text_align_on_block_elements() {
+        let d = dom::parser::parse(r#"<p align="center">x</p>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "p")].text_align, TextAlign::Center);
+
+        let d = dom::parser::parse(r#"<div align="center">x</div>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "div")].text_align, TextAlign::Center);
+
+        let d = dom::parser::parse(r#"<table><tr><td align="center">x</td></tr></table>"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "td")].text_align, TextAlign::Center);
+    }
+
+    #[test]
+    fn img_align_does_not_set_text_align_stays_left_default() {
+        // <img align> stays float-only (box_tree::apply_align_float_hint,
+        // unchanged by this packet); the presentational-hint tier must not
+        // ALSO set text-align for <img>.
+        let d = dom::parser::parse(r#"<img src="x.png" align="left">"#);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "img")].text_align, TextAlign::Left);
+    }
+
+    #[test]
+    fn body_text_attribute_sets_color_and_inherits_to_descendants() {
+        let d = dom::parser::parse(r##"<body text="#333333"><p>x</p></body>"##);
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "body")].color, Color::rgb(0x33, 0x33, 0x33));
+        assert_eq!(styles[find(&d, "p")].color, Color::rgb(0x33, 0x33, 0x33));
+    }
+
+    #[test]
+    fn presentational_hints_do_not_disturb_pre_existing_cascade_behavior() {
+        // A belt-and-suspenders re-check (alongside every earlier test in
+        // this module still passing unchanged) that adding the new tier
+        // didn't disturb ordinary author-vs-UA precedence for an element with
+        // no presentational attributes at all.
+        let d = dom::parser::parse("<span>x</span>");
+        let sheet = parser::parse("span { display: block; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles[find(&d, "span")].display, Display::Block);
     }
 }

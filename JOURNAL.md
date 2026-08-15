@@ -426,6 +426,32 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-15 — CORRECT-3 · presentational attributes via a cascade tier
+
+- **Gap:** `<font color>`, `<font size>`, `bgcolor`, block-element `align=`, and
+  `<body text>` did NOTHING — vintage sites (68k.news' purple `<font>` headline,
+  bgcolor tables, `align=center` cells) rendered unstyled.
+- **Fix — a real cascade tier, not post-cascade mutation.** `resolve_declarations`'
+  sort key widened from `is_author: bool` to `tier: u8` (UA=0, presentational=1,
+  author=2; `0<2` preserves the old `false<true` UA-vs-author order bit-for-bit,
+  inline `style=""` still overlaid on top). New `value::presentational_hints(tag,
+  attrs) -> Declarations` folds in as the tier-1 candidate:
+  - `bgcolor` (any element) → background-color (`#rrggbb`/`#rgb`/bare-hex/named).
+  - `<font color>` → color; `<font size>` → font-size (HTML4 scale 1→10px…7→48px,
+    `+N`/`-N` relative to base 3, clamped, garbage ignored, never panics).
+  - `align=left|center|right|justify` on any element EXCEPT `<img>` → text-align
+    (`<img align>` stays float via the untouched box_tree hint).
+  - `<body text>` → color (inherits document-wide).
+  Because hints live IN the cascade, they correctly override an INHERITED
+  ancestor color (the case post-cascade mutation got wrong) yet still lose to
+  author CSS and inline style. Frozen `ComputedStyle` untouched; no unsafe; no
+  deps.
+- Goldens (orchestrator-viewed): `presentational.tty.txt` (centering/right-align)
+  + `presentational.png` (purple sized heading, pale-yellow bg, red right text).
+  No pre-existing golden changed. 907 tests green. See D47.
+- **Deferred follow-ups:** `<body link/vlink/alink>`, `<table border>`,
+  `cellpadding`/`cellspacing`, `<td width/valign/nowrap>`, `<font face>`.
+
 ## 2026-08-15 — CORRECT-2 · <hr> renders as a real horizontal rule (tty + pixel)
 
 - **Gap:** `<hr>` was a `display:block` void element with only a margin — an empty

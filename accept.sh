@@ -504,6 +504,54 @@ else
     sed 's/^/    /' /tmp/stele_a3n.diff
   fi
 
+  # A3o/A3p -- the presentational-attrs packet's own goldens: fixtures/
+  # presentational.html exercises vintage HTML presentational attributes
+  # (<font size color>, bgcolor, align=, <body text>) mapped onto computed
+  # style through the new presentational-hint cascade tier
+  # (style::value::presentational_hints / style::cascade's UA < hint <
+  # author tiers), NOT a post-cascade mutation. A3o is the tty dump (proves
+  # the centering/right-alignment took effect); A3p is the PNG dump (proves
+  # the purple/red text colors, the pale-yellow background, and the larger
+  # heading font size -- none of which the tty dump can show). Same
+  # blessing discipline as every other golden here: these are PROPOSED
+  # goldens, not self-blessed -- the orchestrator/reviewer visually
+  # inspects goldens/presentational.png and countersigns before either is
+  # trusted.
+  GOLDEN_TTY_PRESENTATIONAL="goldens/presentational.tty.txt"
+  FIXTURE_PRESENTATIONAL="fixtures/presentational.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3o: host binary still not found at $HOST_BIN"
+  elif ! out_presentational="$("$HOST_BIN" --headless --dump-text "$FIXTURE_PRESENTATIONAL" 2>/tmp/stele_a3o.err)"; then
+    bad "A3o: stele --headless --dump-text crashed on $FIXTURE_PRESENTATIONAL"
+    sed 's/^/    /' /tmp/stele_a3o.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_presentational" > "$GOLDEN_TTY_PRESENTATIONAL"
+    pass "A3o: blessed presentational tty golden -> $GOLDEN_TTY_PRESENTATIONAL (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_PRESENTATIONAL" <(printf '%s\n' "$out_presentational") >/tmp/stele_a3o.diff 2>&1; then
+    pass "A3o: tty dump of $FIXTURE_PRESENTATIONAL matches golden"
+  else
+    bad "A3o: tty dump of $FIXTURE_PRESENTATIONAL differs from $GOLDEN_TTY_PRESENTATIONAL"
+    sed 's/^/    /' /tmp/stele_a3o.diff
+  fi
+
+  GOLDEN_PNG_PRESENTATIONAL="goldens/presentational.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3p: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_PRESENTATIONAL" /tmp/stele_a3p.png 2>/tmp/stele_a3p.err; then
+    bad "A3p: stele --headless --dump-png crashed on $FIXTURE_PRESENTATIONAL"
+    sed 's/^/    /' /tmp/stele_a3p.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3p.png "$GOLDEN_PNG_PRESENTATIONAL"
+    pass "A3p: blessed presentational PNG golden -> $GOLDEN_PNG_PRESENTATIONAL (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_PRESENTATIONAL" ]; then
+    bad "A3p: no golden at $GOLDEN_PNG_PRESENTATIONAL to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_PRESENTATIONAL" /tmp/stele_a3p.png; then
+    pass "A3p: PNG dump of $FIXTURE_PRESENTATIONAL matches golden"
+  else
+    bad "A3p: PNG dump of $FIXTURE_PRESENTATIONAL differs from $GOLDEN_PNG_PRESENTATIONAL"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_PRESENTATIONAL") actual=$(wc -c < /tmp/stele_a3p.png)"
+  fi
+
   # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline
