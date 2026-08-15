@@ -209,6 +209,7 @@ fn build_node<'a>(
             let mut node = LayoutNode { style, content, children, interactive: None };
             if el.name.as_str() == "table" {
                 apply_table_border_attribute(el, &mut node);
+                apply_table_cellpadding_attribute(el, &mut node);
             }
             Some(node)
         }
@@ -403,6 +404,84 @@ fn stamp_cell_borders(node: &mut LayoutNode, depth: usize) {
             child.style.border = Edges::all(solid_border_side(TABLE_CELL_BORDER_WIDTH));
         }
         stamp_cell_borders(child, depth + 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `<table cellpadding="N">` presentational attribute (packet/table-spacing):
+// mirrors `<table border="N">`'s stamping pattern directly above almost
+// exactly, with one difference -- `cellpadding` only ever touches CELLS
+// (there's no analogous "table's own frame" concept for padding the way
+// `border`'s outer-frame-vs-cell-rule distinction works), so there is no
+// "apply to the table's own box" step here at all.
+//
+// Like `border`, `padding` is NOT an inherited CSS property, so it can't be
+// resolved in the cascade (P2) -- it's stamped here, post-cascade, for the
+// same reason: this is the one place that still has the DOM's TABLE->CELL
+// ancestor relationship in hand while the box tree is being built.
+//
+// Gating: a cell only gets stamped if its CASCADED padding is still the CSS
+// default (`LengthPercentage::Px(0.0)` on all four sides) -- exactly
+// `apply_table_border_attribute`'s "still cascade-default" contract, so
+// author CSS/inline `style="padding:...">` on the `<td>`/`<th>` itself
+// always wins over the presentational hint.
+// ---------------------------------------------------------------------------
+
+/// Parse `<table>`'s `cellpadding` attribute: a non-negative integer pixel
+/// count, same plain-integer HTML4 grammar as `border` (see
+/// `table_border_attribute`'s own doc comment for why `"1.5"` is
+/// unparseable rather than rounded). Absent or unparseable (including
+/// negative) means "stamp nothing" (`None`); `0` is a valid explicit value,
+/// though stamping `0px` padding is observably a no-op either way.
+fn table_cellpadding_attribute(el: &Element) -> Option<f32> {
+    let raw = el.attrs.get("cellpadding")?;
+    let n: u32 = raw.trim().parse().ok()?;
+    Some(n as f32)
+}
+
+/// `true` iff `padding` carries the CSS initial value on all four sides --
+/// the signal "no author rule (inline style, `<style>`, or linked sheet)
+/// touched this box's padding" (padding is NOT inherited, so a non-zero
+/// value here can only have come from an explicit declaration on this exact
+/// element -- there is no earlier stamp to worry about double-applying,
+/// since each table's own `apply_table_cellpadding_attribute` call only
+/// ever walks and stamps ONCE, at table-build time).
+fn padding_is_cascade_default(padding: &Edges<LengthPercentage>) -> bool {
+    let zero = LengthPercentage::Px(0.0);
+    padding.top == zero && padding.right == zero && padding.bottom == zero && padding.left == zero
+}
+
+/// Stamp `<table cellpadding="N">`'s padding onto every `TableCell` box in
+/// `table_box`'s already-built subtree (module doc section above).
+/// `table_box` is the just-built `LayoutNode` for a `<table>` element -- its
+/// `children` are already fully constructed (bottom-up recursion, see
+/// `apply_table_border_attribute`'s own doc comment for the same point about
+/// nested tables already having had this applied to themselves).
+fn apply_table_cellpadding_attribute(el: &Element, table_box: &mut LayoutNode) {
+    let Some(n) = table_cellpadding_attribute(el) else { return };
+    stamp_cell_padding(table_box, n, 0);
+}
+
+/// Walk `node`'s children (NOT `node` itself) stamping `n`px padding on all
+/// four sides of every still-cascade-default `TableCell` box, without
+/// descending into a nested `<table>`'s subtree (its own `cellpadding`
+/// attribute, or lack of one, governs its own cells -- exactly
+/// `stamp_cell_borders`'s own "stop at a nested Display::Table" rule).
+/// `DEPTH_CAP`-bounded for the same reason `stamp_cell_borders` is: total on
+/// its own terms, not just by inheriting the caller's already-bounded
+/// subtree.
+fn stamp_cell_padding(node: &mut LayoutNode, n: f32, depth: usize) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    for child in &mut node.children {
+        if child.style.display == Display::Table {
+            continue;
+        }
+        if matches!(child.content, BoxContent::TableCell { .. }) && padding_is_cascade_default(&child.style.padding) {
+            child.style.padding = Edges::all(LengthPercentage::Px(n));
+        }
+        stamp_cell_padding(child, n, depth + 1);
     }
 }
 

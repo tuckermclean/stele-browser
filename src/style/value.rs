@@ -363,12 +363,17 @@ fn font_size_attr_px(raw: &str) -> Option<f32> {
 /// on ANY element, `<font color>`/`<font size>`, `align=` on any element
 /// EXCEPT `<img>` (whose `align` stays a float hint -- see
 /// `layout::box_tree::apply_align_float_hint`, deliberately left untouched by
-/// this packet), and `<body text>`. Everything else (and any element/
-/// attribute combo not listed above) yields an empty `Declarations` --
-/// including unparseable attribute values, which are silently ignored rather
-/// than guessed at. DEFERRED (not implemented; follow-up packets): `<body
-/// link/vlink/alink>`, `<table border>`, `cellpadding`/`cellspacing`, `<td
-/// width/height/valign/nowrap>`, `<font face>`.
+/// this packet), `<body text>`, and (packet/table-spacing) `<table
+/// cellspacing>` (a non-inherited `border-spacing` this function CAN handle,
+/// unlike `cellpadding` -- see `layout::box_tree::
+/// apply_table_cellpadding_attribute`'s own doc comment for why that one is
+/// stamped post-cascade instead). `<table border>` is also handled outside
+/// this function, in `layout::box_tree`, for the same ancestor-relationship
+/// reason as `cellpadding`. Everything else (and any element/attribute combo
+/// not listed above) yields an empty `Declarations` -- including unparseable
+/// attribute values, which are silently ignored rather than guessed at.
+/// DEFERRED (not implemented; follow-up packets): `<body link/vlink/alink>`,
+/// `<td width/height/valign/nowrap>`, `<font face>`.
 pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
     let mut d = Declarations::default();
 
@@ -388,6 +393,22 @@ pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
     if tag.eq_ignore_ascii_case("body") {
         if let Some(text) = attrs.get("text") {
             d.color = parse_html_color(text);
+        }
+    }
+
+    if tag.eq_ignore_ascii_case("table") {
+        // `cellspacing="N"` (packet/table-spacing): a non-negative integer
+        // pixel count -- same HTML4 plain-integer grammar as `border`
+        // (`layout::box_tree::table_border_attribute`), so `"6.5"` is
+        // unparseable (ignored), not rounded. `0` is a valid explicit value
+        // (distinct from "absent"), same as `RawLength::Px(0.0)` for any
+        // other length -- both axes get the same value, matching real
+        // HTML4's `cellspacing` (there is no separate x/y attribute).
+        if let Some(raw) = attrs.get("cellspacing") {
+            if let Ok(n) = raw.trim().parse::<u32>() {
+                d.border_spacing_x = Some(RawLength::Px(n as f32));
+                d.border_spacing_y = Some(RawLength::Px(n as f32));
+            }
         }
     }
 
@@ -1128,6 +1149,33 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             Some(t) => token_to_raw_length(t).map(|l| d.flex_basis = Some(RawLengthAuto::Length(l))).is_some(),
             None => false,
+        },
+        // `border-spacing: <length> <length>?` (packet/table-spacing): 1
+        // value sets both axes, 2 values set x then y -- CSS's own grammar
+        // for this property. No percentage form (unlike margin/padding), so
+        // `token_to_border_width`'s percent-rejecting conversion is reused
+        // here rather than `token_to_raw_length` (which accepts `%`). Any
+        // other token count (0 or 3+) or an unrecognized/percent token
+        // invalidates the WHOLE declaration -- same "no partial application"
+        // rule every other shorthand in this file follows.
+        "border-spacing" => match tokens.len() {
+            1 => match token_to_border_width(&tokens[0]) {
+                Some(l) => {
+                    d.border_spacing_x = Some(l);
+                    d.border_spacing_y = Some(l);
+                    true
+                }
+                None => false,
+            },
+            2 => match (token_to_border_width(&tokens[0]), token_to_border_width(&tokens[1])) {
+                (Some(x), Some(y)) => {
+                    d.border_spacing_x = Some(x);
+                    d.border_spacing_y = Some(y);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
         },
         "gap" => match tokens.first().and_then(token_to_raw_length) {
             // Percent gap needs a containing-block size this layer doesn't
