@@ -515,8 +515,8 @@ fn draw_top_border_rule(rows: &mut [Vec<Cell>], fragment: &Fragment, style: &Com
 /// 1px solid } table { border-collapse: collapse }`), the result reads as a
 /// clean grid; a table with genuinely non-uniform per-cell borders may show
 /// a visually rougher (but still legible) join — out of scope, same follow-up
-/// note as the layout-side dedup step's own doc comment
-/// (`layout::box_tree::apply_border_collapse`).
+/// note as the layout-side collapse geometry's own doc comment
+/// (`layout::block`'s "packet/collapse-geometry" section).
 ///
 /// The START index uses the SAME rounding `cell_index` (and therefore
 /// `fill_box`/`draw_top_border_rule`) already use, so a box's own top-left
