@@ -126,6 +126,16 @@ pub(crate) struct Declarations {
     /// /`-left` (out of scope -- only `<hr>`'s UA rule needs a single-side
     /// border today); add them the same way if a future packet needs them.
     pub border_top: Option<BorderRaw>,
+    /// `border-spacing: <length-x> <length-y>?` (packet/table-spacing,
+    /// `ComputedStyle`'s own freeze-amendment doc comment has the full
+    /// rationale). Two independent fields (not an `EdgesRaw`-style pair —
+    /// there's no "4 sides" here, just x/y) so `overlay`'s `ov!` macro can
+    /// treat them exactly like every other `Copy` field. `None` means
+    /// "this declaration didn't set it" -- NOT "zero"; `cascade::resolve`
+    /// falls back to `ComputedStyle::default`'s `8.0`/`0.0` the same way
+    /// every other `own!`-resolved field does.
+    pub border_spacing_x: Option<RawLength>,
+    pub border_spacing_y: Option<RawLength>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
 
@@ -170,6 +180,8 @@ impl Declarations {
         ov!(height);
         ov!(border);
         ov!(border_top);
+        ov!(border_spacing_x);
+        ov!(border_spacing_y);
         ov!(float);
         ov!(clear);
         ov!(flex_direction);
@@ -351,12 +363,17 @@ fn font_size_attr_px(raw: &str) -> Option<f32> {
 /// on ANY element, `<font color>`/`<font size>`, `align=` on any element
 /// EXCEPT `<img>` (whose `align` stays a float hint -- see
 /// `layout::box_tree::apply_align_float_hint`, deliberately left untouched by
-/// this packet), and `<body text>`. Everything else (and any element/
-/// attribute combo not listed above) yields an empty `Declarations` --
-/// including unparseable attribute values, which are silently ignored rather
-/// than guessed at. DEFERRED (not implemented; follow-up packets): `<body
-/// link/vlink/alink>`, `<table border>`, `cellpadding`/`cellspacing`, `<td
-/// width/height/valign/nowrap>`, `<font face>`.
+/// this packet), `<body text>`, and (packet/table-spacing) `<table
+/// cellspacing>` (a non-inherited `border-spacing` this function CAN handle,
+/// unlike `cellpadding` -- see `layout::box_tree::
+/// apply_table_cellpadding_attribute`'s own doc comment for why that one is
+/// stamped post-cascade instead). `<table border>` is also handled outside
+/// this function, in `layout::box_tree`, for the same ancestor-relationship
+/// reason as `cellpadding`. Everything else (and any element/attribute combo
+/// not listed above) yields an empty `Declarations` -- including unparseable
+/// attribute values, which are silently ignored rather than guessed at.
+/// DEFERRED (not implemented; follow-up packets): `<body link/vlink/alink>`,
+/// `<td width/height/valign/nowrap>`, `<font face>`.
 pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
     let mut d = Declarations::default();
 
@@ -376,6 +393,22 @@ pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
     if tag.eq_ignore_ascii_case("body") {
         if let Some(text) = attrs.get("text") {
             d.color = parse_html_color(text);
+        }
+    }
+
+    if tag.eq_ignore_ascii_case("table") {
+        // `cellspacing="N"` (packet/table-spacing): a non-negative integer
+        // pixel count -- same HTML4 plain-integer grammar as `border`
+        // (`layout::box_tree::table_border_attribute`), so `"6.5"` is
+        // unparseable (ignored), not rounded. `0` is a valid explicit value
+        // (distinct from "absent"), same as `RawLength::Px(0.0)` for any
+        // other length -- both axes get the same value, matching real
+        // HTML4's `cellspacing` (there is no separate x/y attribute).
+        if let Some(raw) = attrs.get("cellspacing") {
+            if let Ok(n) = raw.trim().parse::<u32>() {
+                d.border_spacing_x = Some(RawLength::Px(n as f32));
+                d.border_spacing_y = Some(RawLength::Px(n as f32));
+            }
         }
     }
 
@@ -1117,6 +1150,33 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             Some(t) => token_to_raw_length(t).map(|l| d.flex_basis = Some(RawLengthAuto::Length(l))).is_some(),
             None => false,
         },
+        // `border-spacing: <length> <length>?` (packet/table-spacing): 1
+        // value sets both axes, 2 values set x then y -- CSS's own grammar
+        // for this property. No percentage form (unlike margin/padding), so
+        // `token_to_border_width`'s percent-rejecting conversion is reused
+        // here rather than `token_to_raw_length` (which accepts `%`). Any
+        // other token count (0 or 3+) or an unrecognized/percent token
+        // invalidates the WHOLE declaration -- same "no partial application"
+        // rule every other shorthand in this file follows.
+        "border-spacing" => match tokens.len() {
+            1 => match token_to_border_width(&tokens[0]) {
+                Some(l) => {
+                    d.border_spacing_x = Some(l);
+                    d.border_spacing_y = Some(l);
+                    true
+                }
+                None => false,
+            },
+            2 => match (token_to_border_width(&tokens[0]), token_to_border_width(&tokens[1])) {
+                (Some(x), Some(y)) => {
+                    d.border_spacing_x = Some(x);
+                    d.border_spacing_y = Some(y);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        },
         "gap" => match tokens.first().and_then(token_to_raw_length) {
             // Percent gap needs a containing-block size this layer doesn't
             // have; out of scope for v0 (unlike width/margin/padding, gap
@@ -1221,6 +1281,34 @@ mod tests {
         let mut d = Declarations::default();
         assert!(!apply_property("border-top", &toks("2px solid red garbage"), &mut d));
         assert!(d.border_top.is_none());
+    }
+
+    // ---- packet/table-spacing: `border-spacing` shorthand ----
+
+    #[test]
+    fn border_spacing_one_value_sets_both_axes() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-spacing", &toks("4px"), &mut d));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(4.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(4.0)));
+    }
+
+    #[test]
+    fn border_spacing_two_values_set_x_then_y() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-spacing", &toks("4px 2px"), &mut d));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(4.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(2.0)));
+    }
+
+    #[test]
+    fn border_spacing_rejects_percent_and_garbage_and_too_many_values() {
+        for bad in ["10%", "not-a-length", "4px 2px 1px", ""] {
+            let mut d = Declarations::default();
+            assert!(!apply_property("border-spacing", &toks(bad), &mut d), "expected {bad:?} to be rejected");
+            assert_eq!(d.border_spacing_x, None);
+            assert_eq!(d.border_spacing_y, None);
+        }
     }
 
     #[test]
@@ -1599,5 +1687,37 @@ mod tests {
         );
         assert_eq!(d.color, None);
         assert_eq!(d.font_size, None);
+    }
+
+    // ---- packet/table-spacing: `cellspacing="N"` -> border-spacing hint ----
+
+    #[test]
+    fn table_cellspacing_sets_both_border_spacing_axes() {
+        let d = presentational_hints("table", &attrs(&[("cellspacing", "6")]));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(6.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(6.0)));
+    }
+
+    #[test]
+    fn table_cellspacing_zero_is_a_valid_explicit_value() {
+        let d = presentational_hints("table", &attrs(&[("cellspacing", "0")]));
+        assert_eq!(d.border_spacing_x, Some(RawLength::Px(0.0)));
+        assert_eq!(d.border_spacing_y, Some(RawLength::Px(0.0)));
+    }
+
+    #[test]
+    fn cellspacing_on_a_non_table_element_is_ignored() {
+        let d = presentational_hints("div", &attrs(&[("cellspacing", "6")]));
+        assert_eq!(d.border_spacing_x, None);
+        assert_eq!(d.border_spacing_y, None);
+    }
+
+    #[test]
+    fn cellspacing_garbage_or_negative_is_ignored_never_panics() {
+        for v in ["abc", "-5", "", "1.5", "99999999999999999999"] {
+            let d = presentational_hints("table", &attrs(&[("cellspacing", v)]));
+            assert_eq!(d.border_spacing_x, None, "cellspacing={v:?}");
+            assert_eq!(d.border_spacing_y, None, "cellspacing={v:?}");
+        }
     }
 }

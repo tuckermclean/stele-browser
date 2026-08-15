@@ -8,7 +8,7 @@
 //! point of the assertion.
 
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
-use stele::style::computed::Display;
+use stele::style::computed::{Display, Edges, LengthPercentage};
 use stele::style::ComputedStyle;
 
 fn styled(display: Display) -> ComputedStyle {
@@ -348,4 +348,139 @@ fn large_real_table_under_cap_still_completes_promptly() {
     assert!(elapsed.as_secs() < 10, "800-cell table took {elapsed:?} -- expected the caching fix to keep this fast");
     let texts = text_fragments(&fragments);
     assert_eq!(texts.len(), 800);
+}
+
+// ---- packet/table-spacing: `border-spacing` (gap) + cell `padding` -------
+
+/// A table whose own `ComputedStyle.border_spacing_x/y` is overridden away
+/// from the default (8.0/0.0) -- the solved gap between two adjacent
+/// columns' boxes must reflect the TABLE's own resolved style, not the old
+/// hardcoded constant this packet replaces.
+fn table_with_spacing(spacing_x: f32, spacing_y: f32, children: Vec<LayoutNode>) -> LayoutNode {
+    let mut style = styled(Display::Table);
+    style.border_spacing_x = spacing_x;
+    style.border_spacing_y = spacing_y;
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+}
+
+#[test]
+fn table_border_spacing_style_controls_the_gap_between_columns() {
+    // col0 ("aaaaaaaaaa", 10 chars) = 80px, col1 ("b", 1 char) = 8px -- both
+    // unambiguous, distinct from every other box in this tiny tree.
+    let t = root_with(table_with_spacing(20.0, 0.0, vec![row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")])]));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&fragments);
+    let boxes = box_fragments(&fragments);
+    let col0 = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
+    assert!((gap - 20.0).abs() < 0.5, "gap {gap} should equal the table's own border_spacing_x (20px), not the old 8px default");
+}
+
+/// The flip side of the above: a table with NO explicit `border_spacing_x`
+/// override (i.e. `ComputedStyle::default`'s 8.0) must still produce the
+/// SAME 8px gap as before this packet -- the "no golden churn" guarantee at
+/// the wiring level, not just the cascade-default level already covered by
+/// `style::computed`/`style::cascade`'s own tests.
+#[test]
+fn table_with_default_style_still_uses_8px_border_spacing() {
+    let t = root_with(table(vec![row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")])]));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    let boxes = box_fragments(&fragments);
+    let col0 = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
+    assert!((gap - 8.0).abs() < 0.5, "gap {gap} should stay the pre-existing 8px default");
+}
+
+/// A single-cell, single-column table (no border-spacing gaps in play at
+/// all) built with the cell's own `padding` set directly on its
+/// `ComputedStyle` -- proves the measurement pipeline
+/// (`cell_min_max_width`/`cell_content_layout`) and `emit`'s content
+/// offsetting both honor a cell's `padding`, independent of any box-tree
+/// `cellpadding`-attribute stamping (tested separately in `box_tree`).
+fn one_cell_table(padding_px: Option<f32>, text: &str) -> LayoutNode {
+    let mut cell_style = styled(Display::TableCell);
+    if let Some(p) = padding_px {
+        cell_style.padding = Edges::all(LengthPercentage::Px(p));
+    }
+    let cell_node = LayoutNode {
+        style: cell_style,
+        content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
+        children: vec![text_node(text)],
+        interactive: None,
+    };
+    root_with(table(vec![row(vec![cell_node])]))
+}
+
+/// Box fragments narrower than the (stretched-to-viewport) root box: in a
+/// single-cell single-column table with no border-spacing gaps, the table's
+/// own box and the cell's own box are BOTH exactly the solved column width
+/// -- this collects just those (excluding the always-viewport-wide root).
+fn non_root_boxes<'a>(fragments: &'a [Fragment], viewport_w: f32) -> Vec<&'a Fragment> {
+    box_fragments(fragments).into_iter().filter(|bx| bx.rect.size.w < viewport_w - 0.5).collect()
+}
+
+#[test]
+fn cell_padding_grows_min_max_width_and_intrinsic_height() {
+    let unpadded = one_cell_table(None, "hello");
+    let padded = one_cell_table(Some(10.0), "hello");
+
+    let frags_u = layout(&unpadded, Size { w: 640.0, h: 480.0 });
+    let frags_p = layout(&padded, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&frags_u);
+    assert_all_finite_nonneg(&frags_p);
+
+    let boxes_u = non_root_boxes(&frags_u, 640.0);
+    let boxes_p = non_root_boxes(&frags_p, 640.0);
+    assert!(!boxes_u.is_empty() && !boxes_p.is_empty());
+
+    let w_u = boxes_u[0].rect.size.w;
+    let h_u = boxes_u[0].rect.size.h;
+    for b in &boxes_u {
+        assert_eq!(b.rect.size.w, w_u, "table box and cell box coincide (single cell, single column)");
+        assert_eq!(b.rect.size.h, h_u);
+    }
+    let w_p = boxes_p[0].rect.size.w;
+    let h_p = boxes_p[0].rect.size.h;
+    for b in &boxes_p {
+        assert_eq!(b.rect.size.w, w_p);
+        assert_eq!(b.rect.size.h, h_p);
+    }
+
+    assert!(
+        (w_p - (w_u + 20.0)).abs() < 0.5,
+        "10px left+right padding should grow the cell's max-content width by 20px: unpadded={w_u} padded={w_p}"
+    );
+    assert!(
+        (h_p - (h_u + 20.0)).abs() < 0.5,
+        "10px top+bottom padding should grow the cell's intrinsic height by 20px: unpadded={h_u} padded={h_p}"
+    );
+}
+
+#[test]
+fn cell_padding_offsets_content_from_the_cell_box_origin() {
+    let unpadded = one_cell_table(None, "hello");
+    let padded = one_cell_table(Some(10.0), "hello");
+
+    let frags_u = layout(&unpadded, Size { w: 640.0, h: 480.0 });
+    let frags_p = layout(&padded, Size { w: 640.0, h: 480.0 });
+
+    let box_u = non_root_boxes(&frags_u, 640.0)[0].rect.origin;
+    let box_p = non_root_boxes(&frags_p, 640.0)[0].rect.origin;
+
+    let hello_u = *text_fragments(&frags_u).iter().find(|f| text_of(f) == "hello").expect("hello present");
+    let hello_p = *text_fragments(&frags_p).iter().find(|f| text_of(f) == "hello").expect("hello present");
+
+    assert!((hello_u.rect.origin.x - box_u.x).abs() < 0.5, "unpadded content sits flush with the cell box");
+    assert!((hello_u.rect.origin.y - box_u.y).abs() < 0.5);
+
+    assert!(
+        (hello_p.rect.origin.x - (box_p.x + 10.0)).abs() < 0.5,
+        "padded content should be inset 10px from the cell box's left edge"
+    );
+    assert!(
+        (hello_p.rect.origin.y - (box_p.y + 10.0)).abs() < 0.5,
+        "padded content should be inset 10px from the cell box's top edge"
+    );
 }

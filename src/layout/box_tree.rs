@@ -31,7 +31,7 @@ use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, Interactive, LayoutNode, Size};
-use crate::style::computed::{BorderSide, BorderStyle, Display, Edges, Float, ListStyleType};
+use crate::style::computed::{BorderSide, BorderStyle, Display, Edges, Float, LengthPercentage, ListStyleType};
 use crate::style::ComputedStyle;
 use crate::surface::Color;
 
@@ -209,6 +209,7 @@ fn build_node<'a>(
             let mut node = LayoutNode { style, content, children, interactive: None };
             if el.name.as_str() == "table" {
                 apply_table_border_attribute(el, &mut node);
+                apply_table_cellpadding_attribute(el, &mut node);
             }
             Some(node)
         }
@@ -403,6 +404,84 @@ fn stamp_cell_borders(node: &mut LayoutNode, depth: usize) {
             child.style.border = Edges::all(solid_border_side(TABLE_CELL_BORDER_WIDTH));
         }
         stamp_cell_borders(child, depth + 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `<table cellpadding="N">` presentational attribute (packet/table-spacing):
+// mirrors `<table border="N">`'s stamping pattern directly above almost
+// exactly, with one difference -- `cellpadding` only ever touches CELLS
+// (there's no analogous "table's own frame" concept for padding the way
+// `border`'s outer-frame-vs-cell-rule distinction works), so there is no
+// "apply to the table's own box" step here at all.
+//
+// Like `border`, `padding` is NOT an inherited CSS property, so it can't be
+// resolved in the cascade (P2) -- it's stamped here, post-cascade, for the
+// same reason: this is the one place that still has the DOM's TABLE->CELL
+// ancestor relationship in hand while the box tree is being built.
+//
+// Gating: a cell only gets stamped if its CASCADED padding is still the CSS
+// default (`LengthPercentage::Px(0.0)` on all four sides) -- exactly
+// `apply_table_border_attribute`'s "still cascade-default" contract, so
+// author CSS/inline `style="padding:...">` on the `<td>`/`<th>` itself
+// always wins over the presentational hint.
+// ---------------------------------------------------------------------------
+
+/// Parse `<table>`'s `cellpadding` attribute: a non-negative integer pixel
+/// count, same plain-integer HTML4 grammar as `border` (see
+/// `table_border_attribute`'s own doc comment for why `"1.5"` is
+/// unparseable rather than rounded). Absent or unparseable (including
+/// negative) means "stamp nothing" (`None`); `0` is a valid explicit value,
+/// though stamping `0px` padding is observably a no-op either way.
+fn table_cellpadding_attribute(el: &Element) -> Option<f32> {
+    let raw = el.attrs.get("cellpadding")?;
+    let n: u32 = raw.trim().parse().ok()?;
+    Some(n as f32)
+}
+
+/// `true` iff `padding` carries the CSS initial value on all four sides --
+/// the signal "no author rule (inline style, `<style>`, or linked sheet)
+/// touched this box's padding" (padding is NOT inherited, so a non-zero
+/// value here can only have come from an explicit declaration on this exact
+/// element -- there is no earlier stamp to worry about double-applying,
+/// since each table's own `apply_table_cellpadding_attribute` call only
+/// ever walks and stamps ONCE, at table-build time).
+fn padding_is_cascade_default(padding: &Edges<LengthPercentage>) -> bool {
+    let zero = LengthPercentage::Px(0.0);
+    padding.top == zero && padding.right == zero && padding.bottom == zero && padding.left == zero
+}
+
+/// Stamp `<table cellpadding="N">`'s padding onto every `TableCell` box in
+/// `table_box`'s already-built subtree (module doc section above).
+/// `table_box` is the just-built `LayoutNode` for a `<table>` element -- its
+/// `children` are already fully constructed (bottom-up recursion, see
+/// `apply_table_border_attribute`'s own doc comment for the same point about
+/// nested tables already having had this applied to themselves).
+fn apply_table_cellpadding_attribute(el: &Element, table_box: &mut LayoutNode) {
+    let Some(n) = table_cellpadding_attribute(el) else { return };
+    stamp_cell_padding(table_box, n, 0);
+}
+
+/// Walk `node`'s children (NOT `node` itself) stamping `n`px padding on all
+/// four sides of every still-cascade-default `TableCell` box, without
+/// descending into a nested `<table>`'s subtree (its own `cellpadding`
+/// attribute, or lack of one, governs its own cells -- exactly
+/// `stamp_cell_borders`'s own "stop at a nested Display::Table" rule).
+/// `DEPTH_CAP`-bounded for the same reason `stamp_cell_borders` is: total on
+/// its own terms, not just by inheriting the caller's already-bounded
+/// subtree.
+fn stamp_cell_padding(node: &mut LayoutNode, n: f32, depth: usize) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    for child in &mut node.children {
+        if child.style.display == Display::Table {
+            continue;
+        }
+        if matches!(child.content, BoxContent::TableCell { .. }) && padding_is_cascade_default(&child.style.padding) {
+            child.style.padding = Edges::all(LengthPercentage::Px(n));
+        }
+        stamp_cell_padding(child, n, depth + 1);
     }
 }
 
@@ -1602,6 +1681,108 @@ mod tests {
         // visited before the inner td nested inside it.
         assert_border_all(&cells[0].style.border, 1.0);
         assert_no_border(&cells[1].style.border);
+        assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
+    }
+
+    // ------------------------------------------------------------------
+    // `<table cellpadding="N">` presentational attribute (packet/
+    // table-spacing): mirrors the `<table border="N">` section directly
+    // above -- same post-cascade, DEPTH_CAP-bounded, stop-at-nested-table
+    // walk, same "gated on cascaded-default" precedence rule (author CSS/
+    // inline `style=` wins over the presentational hint).
+    // ------------------------------------------------------------------
+
+    fn assert_padding_all(padding: &Edges<LengthPercentage>, px: f32) {
+        for (side, name) in
+            [(padding.top, "top"), (padding.right, "right"), (padding.bottom, "bottom"), (padding.left, "left")]
+        {
+            assert_eq!(side, LengthPercentage::Px(px), "{name} padding");
+        }
+    }
+
+    #[test]
+    fn table_cellpadding_attribute_stamps_every_cell_all_sides() {
+        let d = dom::parser::parse(r#"<table cellpadding="10"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected two td boxes");
+        for cell in cells {
+            assert_padding_all(&cell.style.padding, 10.0);
+        }
+
+        // The table's OWN box gets no padding stamped -- only cellpadding
+        // affects CELLS, unlike `border` (which stamps both the table's own
+        // frame and its cells).
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_padding_all(&tables[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn table_cellpadding_zero_or_absent_yields_no_padding() {
+        for html in [
+            r#"<table cellpadding="0"><tr><td>a</td></tr></table>"#,
+            r#"<table><tr><td>a</td></tr></table>"#,
+        ] {
+            let d = dom::parser::parse(html);
+            let styles = cascade::cascade(&d, &[]);
+            let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+            let mut cells = Vec::new();
+            find_by(&root, &is_cell_box, &mut cells);
+            assert_eq!(cells.len(), 1);
+            assert_padding_all(&cells[0].style.padding, 0.0);
+        }
+    }
+
+    #[test]
+    fn table_cellpadding_unparseable_or_negative_attribute_yields_no_padding() {
+        for html in [
+            r#"<table cellpadding="banana"><tr><td>a</td></tr></table>"#,
+            r#"<table cellpadding="-5"><tr><td>a</td></tr></table>"#,
+            r#"<table cellpadding="1.5"><tr><td>a</td></tr></table>"#,
+        ] {
+            let d = dom::parser::parse(html);
+            let styles = cascade::cascade(&d, &[]);
+            let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+            let mut cells = Vec::new();
+            find_by(&root, &is_cell_box, &mut cells);
+            assert_padding_all(&cells[0].style.padding, 0.0);
+        }
+    }
+
+    #[test]
+    fn table_cellpadding_attribute_never_overrides_author_css_padding() {
+        let d = dom::parser::parse(r#"<table cellpadding="10"><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("td { padding: 3px; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        // Author CSS wins: the td keeps its own 3px padding, NOT the 10px
+        // cellpadding stamp.
+        assert_padding_all(&cells[0].style.padding, 3.0);
+    }
+
+    #[test]
+    fn table_cellpadding_nested_table_padding_is_independent() {
+        let d = dom::parser::parse(
+            r#"<table cellpadding="10"><tr><td><table cellpadding="2"><tr><td>inner</td></tr></table></td></tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected outer td + inner td");
+        // Pre-order: the outer td (wrapping the whole inner table) is
+        // visited before the inner td nested inside it.
+        assert_padding_all(&cells[0].style.padding, 10.0);
+        assert_padding_all(&cells[1].style.padding, 2.0);
         assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
     }
 

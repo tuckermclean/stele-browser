@@ -152,11 +152,13 @@ const TABLE_DEPTH_CAP: usize = 2;
 /// after the caching fix below) a small, fast, fixed constant.
 const MAX_TABLE_MEASURED_CELLS: usize = 2_000;
 
-/// Horizontal gap inserted between adjacent columns — see
-/// `compute_table_cache_entry`'s "Border-spacing" doc note. `8.0` (one full
-/// `text::BitmapFont::vga_8x16` cell), not CSS's real `2px` initial value:
-/// `backend::tty::render` maps continuous layout-pixel x-coordinates to
-/// discrete character columns by *rounding* to the nearest cell (`col =
+/// The default horizontal gap between adjacent columns, absent any CSS
+/// `border-spacing`/`cellspacing` on the table — see
+/// `style::ComputedStyle::border_spacing_x`'s own doc comment (packet/
+/// table-spacing FREEZE AMENDMENT) for why this is `8.0` (one full
+/// `text::BitmapFont::vga_8x16` cell) rather than CSS's real `2px` initial
+/// value: `backend::tty::render` maps continuous layout-pixel x-coordinates
+/// to discrete character columns by *rounding* to the nearest cell (`col =
 /// round(x / 8.0)`), so any sub-cell gap smaller than half a cell (4px) can
 /// round away to nothing whenever the preceding column's own content
 /// already exactly fills its whole-character width — e.g. a 2px gap after a
@@ -164,10 +166,14 @@ const MAX_TABLE_MEASURED_CELLS: usize = 2_000;
 /// + 2` right back down to the same cell `col0_width` lands on, so the next
 /// column's text visually touches it with zero rendered gap. A full 8px
 /// cell-width gap has no such rounding ambiguity (`round((w + 8) / 8) ==
-/// round(w / 8) + 1`, always). Vertical spacing stays `0` — rows are
-/// already visually separated by moving to a new tty row.
-const BORDER_SPACING_X: f32 = 8.0;
-const BORDER_SPACING_Y: f32 = 0.0;
+/// round(w / 8) + 1`, always). Vertical spacing stays `0` by default — rows
+/// are already visually separated by moving to a new tty row. These two
+/// numbers now live SOLELY as `ComputedStyle::default()`'s
+/// `border_spacing_x`/`border_spacing_y` values (no longer duplicated as
+/// module-private constants here) — `compute_table_cache_entry`/
+/// `measure_node` read a table's own resolved style directly, which falls
+/// back to that same default when no `border-spacing`/`cellspacing` was
+/// ever set.
 
 /// A table leaf's fully-solved layout: column/row geometry plus each cell's
 /// own content (size + paint-ordered fragments, relative to its own `(0,
@@ -646,10 +652,15 @@ fn measure_node<M: Metrics>(
             // already includes the gaps for) the whole grid.
             let col_gaps = entry.columns.saturating_sub(1) as f32;
             let row_gaps = entry.rows.saturating_sub(1) as f32;
-            let total_w =
-                finite_nonneg(entry.table_layout.col_widths.iter().sum::<f32>() + col_gaps * BORDER_SPACING_X);
-            let total_h =
-                finite_nonneg(entry.table_layout.row_heights.iter().sum::<f32>() + row_gaps * BORDER_SPACING_Y);
+            // packet/table-spacing: the table's OWN resolved style, not a
+            // hardcoded constant — see `ComputedStyle::border_spacing_x`'s
+            // doc comment (falls back to the same 8.0/0.0 default when
+            // nothing set it, so this is a no-op change for every table
+            // that doesn't use `border-spacing`/`cellspacing`).
+            let spacing_x = finite_nonneg(table_node.style.border_spacing_x);
+            let spacing_y = finite_nonneg(table_node.style.border_spacing_y);
+            let total_w = finite_nonneg(entry.table_layout.col_widths.iter().sum::<f32>() + col_gaps * spacing_x);
+            let total_h = finite_nonneg(entry.table_layout.row_heights.iter().sum::<f32>() + row_gaps * spacing_y);
             TSize {
                 width: known_dimensions.width.unwrap_or(total_w),
                 height: known_dimensions.height.unwrap_or(total_h),
@@ -709,16 +720,21 @@ fn ensure_table_cache<M: Metrics>(
 /// `table_budget` is the nested-table budget cell content may spend (see
 /// [`TABLE_DEPTH_CAP`]).
 ///
-/// Border-spacing (documented M3 simplification, see the packet report):
-/// `style::ComputedStyle` has no `border-spacing` property to read (a
-/// frozen type this packet may not extend), so spacing is a fixed constant
-/// rather than CSS-driven — [`BORDER_SPACING_X`]/[`BORDER_SPACING_Y`] (see
-/// their own doc comments for why `8px`/`0px`, not CSS's real `2px 2px`
-/// initial value). Without SOME nonzero horizontal spacing, two abutting
-/// cells whose content exactly fills their column can visually run
-/// together in the tty text-mode dump — which paints no backgrounds/
-/// borders at all (see `backend::tty`'s own documented scope call) — e.g.
-/// `"Qty"` immediately followed by `"Notes"` reading as `"QtyNotes"`.
+/// Border-spacing (packet/table-spacing: CSS `border-spacing`/HTML
+/// `cellspacing="N"`, superseding the earlier M3 "fixed constant" doc note
+/// this replaces): read straight off `table_node.style.border_spacing_x/y`
+/// — a FREEZE AMENDMENT (`style::ComputedStyle`'s own doc comment) added
+/// exactly so this could stop being a hardcoded constant. The default
+/// (`8px`/`0px`, not CSS's real `2px 2px` initial value — see that field's
+/// doc comment for the full "why 8px" rationale, preserved verbatim from
+/// the old `BORDER_SPACING_X`/`BORDER_SPACING_Y` constants) is what every
+/// table with no `border-spacing`/`cellspacing` of its own still resolves
+/// to, so this change is a no-op for any such table. Without SOME nonzero
+/// horizontal spacing, two abutting cells whose content exactly fills their
+/// column can visually run together in the tty text-mode dump — which
+/// paints no backgrounds/borders at all (see `backend::tty`'s own
+/// documented scope call) — e.g. `"Qty"` immediately followed by `"Notes"`
+/// reading as `"QtyNotes"`.
 ///
 /// Total: every step this calls (`place_grid`, `solve_table`,
 /// `cell_min_max_width`, `cell_content_layout`) is itself total; this
@@ -733,8 +749,12 @@ fn compute_table_cache_entry<M: Metrics>(
     table_budget: usize,
 ) -> TableCacheEntry {
     let grid = table_layout::place_grid(table_node);
-    let spacing_x = BORDER_SPACING_X;
-    let spacing_y = BORDER_SPACING_Y;
+    // packet/table-spacing: read straight off the table's own resolved
+    // style (falls back to the pre-existing 8.0/0.0 default — see
+    // `ComputedStyle::border_spacing_x`'s doc comment), sanitized the same
+    // way every other layout-space scalar in this module is.
+    let spacing_x = finite_nonneg(table_node.style.border_spacing_x);
+    let spacing_y = finite_nonneg(table_node.style.border_spacing_y);
 
     let mut cells: Vec<CellSpec> = grid
         .cells
