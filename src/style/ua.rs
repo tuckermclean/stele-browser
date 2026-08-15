@@ -65,7 +65,16 @@ ol { list-style-type: decimal; }
 li { display: block; }
 
 blockquote { margin: 1em 40px; }
-hr { margin: 0.5em 0; }
+/* `<hr>` (packet/hr-rule): a void element with no content of its own -- a
+   plain `display: block` box with nothing inside it renders as invisible
+   blank space, which is not what a rule line means. `height: 0` collapses
+   the (nonexistent) content box, and `border-top` alone (not the `border`
+   shorthand, which would also draw right/bottom/left edges around that
+   zero-height box) paints exactly one horizontal line at the top edge --
+   both the pixel backend (`backend::raster::paint_box`, which already draws
+   each `BorderSide` independently) and the tty backend (`backend::tty`'s
+   own top-border-only rule-line support) key off `border.top` alone. */
+hr { height: 0; border-top: 1px solid #808080; margin: 0.5em 0; }
 
 /* Form controls (P-forms): `inline` is CSS's own initial `display` value
    already (`ComputedStyle::default().display == Display::Inline`), so this

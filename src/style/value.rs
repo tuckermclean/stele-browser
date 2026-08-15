@@ -116,6 +116,15 @@ pub(crate) struct Declarations {
     pub margin: EdgesRaw<RawLengthAuto>,
     pub padding: EdgesRaw<RawLength>,
     pub border: Option<BorderRaw>,
+    /// `border-top` (packet/hr-rule): a distinct field from `border` above
+    /// rather than folded into it, because they mean different things to
+    /// the cascade -- `border` (the shorthand) resolves to all four
+    /// `Edges<BorderSide>` sides uniformly (`cascade::resolve_border`'s
+    /// `Edges::all`), while this is a true CSS longhand that must override
+    /// ONLY `Edges.top`. The curated dialect has no `border-right`/`-bottom`
+    /// /`-left` (out of scope -- only `<hr>`'s UA rule needs a single-side
+    /// border today); add them the same way if a future packet needs them.
+    pub border_top: Option<BorderRaw>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
 
@@ -159,6 +168,7 @@ impl Declarations {
         ov!(width);
         ov!(height);
         ov!(border);
+        ov!(border_top);
         ov!(float);
         ov!(clear);
         ov!(flex_direction);
@@ -521,6 +531,49 @@ fn keyword(tokens: &[Token]) -> Option<String> {
     }
 }
 
+/// Shared grammar for `border` and `border-top` (packet/hr-rule):
+/// width/style/color in any order. Real CSS invalidates the whole shorthand
+/// if any single component is unrecognized — it does not silently apply the
+/// components it understood and drop the rest. `border-width` also has no
+/// percentage form in CSS (unlike margin/padding), so a `%` token must fail
+/// to parse as a width here rather than resolve to `0px` later. `None` for
+/// an empty/entirely-unrecognized value (nothing set at all) or the first
+/// unrecognized token (whole declaration invalid) — the caller (`apply_
+/// property`) treats either the same way: not applied.
+fn parse_border_raw(tokens: &[Token]) -> Option<BorderRaw> {
+    let mut b = BorderRaw::default();
+    for t in tokens {
+        if let Some(l) = token_to_border_width(t) {
+            b.width = Some(l);
+            continue;
+        }
+        if let Token::Ident(s) = t {
+            match s.to_ascii_lowercase().as_str() {
+                "solid" => {
+                    b.style = Some(BorderStyle::Solid);
+                    continue;
+                }
+                "none" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
+                    // Curated set is solid-only (brief §4); every other
+                    // named style resolves to "no visible border".
+                    b.style = Some(BorderStyle::None);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if let Some(c) = parse_color(std::slice::from_ref(t)) {
+            b.color = Some(c);
+            continue;
+        }
+        return None; // unrecognized token: the whole shorthand is invalid
+    }
+    if b.width.is_none() && b.style.is_none() && b.color.is_none() {
+        return None;
+    }
+    Some(b)
+}
+
 /// Apply one already-lowercased property `name` with its (whitespace-
 /// filtered) value tokens onto `d`. Returns whether it was recognized *and*
 /// parsed successfully — the caller counts `false` against
@@ -749,46 +802,25 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
         "padding-right" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.right = Some(l)).is_some(),
         "padding-bottom" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.bottom = Some(l)).is_some(),
         "padding-left" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.left = Some(l)).is_some(),
-        "border" => {
-            // Real CSS invalidates the whole shorthand if any single
-            // component is unrecognized — it does not silently apply the
-            // components it understood and drop the rest. `border-width`
-            // also has no percentage form in CSS (unlike margin/padding),
-            // so a `%` token must fail to parse as a width here rather than
-            // resolve to `0px` later.
-            let mut b = BorderRaw::default();
-            for t in tokens {
-                if let Some(l) = token_to_border_width(t) {
-                    b.width = Some(l);
-                    continue;
-                }
-                if let Token::Ident(s) = t {
-                    match s.to_ascii_lowercase().as_str() {
-                        "solid" => {
-                            b.style = Some(BorderStyle::Solid);
-                            continue;
-                        }
-                        "none" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
-                            // Curated set is solid-only (brief §4); every other
-                            // named style resolves to "no visible border".
-                            b.style = Some(BorderStyle::None);
-                            continue;
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(c) = parse_color(std::slice::from_ref(t)) {
-                    b.color = Some(c);
-                    continue;
-                }
-                return false; // unrecognized token: the whole shorthand is invalid
+        "border" => match parse_border_raw(tokens) {
+            Some(b) => {
+                d.border = Some(b);
+                true
             }
-            if b.width.is_none() && b.style.is_none() && b.color.is_none() {
-                return false;
+            None => false,
+        },
+        // `border-top` (packet/hr-rule): same shorthand grammar as `border`
+        // (width/style/color in any order, whole declaration invalid on any
+        // unrecognized token), but lands in its own `Declarations` field --
+        // see that field's own doc comment for why it can't just reuse
+        // `d.border`.
+        "border-top" => match parse_border_raw(tokens) {
+            Some(b) => {
+                d.border_top = Some(b);
+                true
             }
-            d.border = Some(b);
-            true
-        }
+            None => false,
+        },
         "float" => match keyword(tokens).as_deref() {
             Some("left") => {
                 d.float = Some(Float::Left);

@@ -352,6 +352,35 @@ mod tests {
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
 
+    /// packet/hr-rule: `<hr>`'s UA shape is a ZERO-content-height box with
+    /// ONLY a solid top border (right/bottom/left stay `BorderSide::
+    /// default()`, unlike `box_style`'s helper above which uses `Edges::
+    /// all`) -- confirms `paint_box`/`border_px` already handle this
+    /// asymmetric, zero-height case correctly with no code change: the top
+    /// edge is its own independent `fill_rect` sized by ITS OWN border
+    /// width, not gated on `rect.h` being nonzero, so a 0-height box still
+    /// paints a visible 1px line spanning its full content width.
+    #[test]
+    fn zero_height_box_with_only_a_solid_top_border_paints_a_horizontal_rule_line() {
+        let mut s = MemSurface::new(10, 4, Color::WHITE);
+        let gray = Color::rgb(0x80, 0x80, 0x80);
+        let top = BorderSide { width: 1.0, style: BorderStyle::Solid, color: gray };
+        let style = ComputedStyle {
+            background_color: Color::TRANSPARENT,
+            border: Edges { top, right: BorderSide::default(), bottom: BorderSide::default(), left: BorderSide::default() },
+            ..ComputedStyle::default()
+        };
+        // hr's own box: full width, zero content height (matches `height: 0`
+        // in the UA sheet -- border adds its own 1px on top of that).
+        let fragments = vec![Fragment { rect: rect(0.0, 1.0, 10.0, 0.0), kind: FragmentKind::Box { style }, interactive: None }];
+        paint(&mut s, &fragments, &HashMap::new());
+        for x in 0..10 {
+            assert_eq!(px(&s, x, 1), gray, "row 1 (the box's own y) should be the gray rule line at col {x}");
+        }
+        assert_eq!(px(&s, 0, 0), Color::WHITE, "row above the rule must be untouched");
+        assert_eq!(px(&s, 0, 2), Color::WHITE, "row below the rule must be untouched (no bottom/side edges)");
+    }
+
     /// Review fix (Minor #2): a `Solid` border whose color is fully
     /// transparent (`a == 0`) should short-circuit in `border_px` rather
     /// than reaching a `fill_rect` call that blends every edge pixel to a

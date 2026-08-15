@@ -41,11 +41,16 @@
 //!   this module's own synthetic-fragment tests, ready for whenever a
 //!   pipeline actually emits one.)
 //! - `Box` fragments (a block box's background/border) render their
-//!   `background_color` as cell `bg` (see "Color" below) but still render
-//!   **no border** in text mode — v0 scope call, documented for the
-//!   DECISIONS ledger: even simple ASCII-art borders would need their own
-//!   cell-accurate box-drawing pass distinct from the text-placement rule
-//!   above; deferred rather than half-done.
+//!   `background_color` as cell `bg` (see "Color" below). Borders are still
+//!   mostly out of scope in text mode — a full cell-accurate box-drawing
+//!   pass (four sides, corners) is deferred rather than half-done — with
+//!   ONE exception (packet/hr-rule): a solid `>= 1px` TOP border alone draws
+//!   a `'─'` (U+2500) rule across the box's own width, in the border color,
+//!   via `draw_top_border_rule`. This exists specifically so `<hr>` (a
+//!   zero-content-height box with only `border-top` set in the UA sheet,
+//!   `style::ua::UA_CSS`) shows as a visible horizontal line instead of
+//!   blank space; right/bottom/left sides (and any non-`Solid` style) are
+//!   still never drawn.
 //! - **Paint order wins ties**: fragments are drawn in slice order (already
 //!   paint order per `layout::layout`'s contract), each write overwriting
 //!   whatever a prior fragment left in the same cell.
@@ -62,9 +67,12 @@
 //! - `Box { style }` fills the cells its rect covers with
 //!   `style.background_color` as the cell `bg` — but only when that color
 //!   isn't fully transparent (`a == 0`); a transparent box leaves whatever
-//!   `bg` was already there untouched, same as painting nothing. Borders
-//!   still render **nothing** in text mode (unchanged v0 scope call — ASCII-
-//!   art box-drawing is a distinct, still-deferred pass).
+//!   `bg` was already there untouched, same as painting nothing. Borders are
+//!   still otherwise out of scope in text mode (full ASCII-art box-drawing —
+//!   all four sides, corners — is a distinct, still-deferred pass), except
+//!   for the one solid top-border rule line `draw_top_border_rule` draws
+//!   (packet/hr-rule, `fg` = the border's own color) — see "What paints,
+//!   what doesn't" above.
 //! - `Text { text, style, .. }` sets each written cell's `ch` *and* `fg`
 //!   (from `style.color`) but never touches `bg`. Because paint order already
 //!   draws `Box` fragments before the `Text` fragments they contain (brief's
@@ -111,6 +119,7 @@
 //! to spare for an attacker- or user-inflated grid.
 
 use crate::layout::{Fragment, FragmentKind};
+use crate::style::computed::{BorderStyle, ComputedStyle};
 use crate::surface::Color;
 
 /// `pub(crate)`, not just private: the frames packet (`crate::frames`)
@@ -377,7 +386,10 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
         match &f.kind {
             FragmentKind::Text { text, style, .. } => write_marker(&mut rows, f, text, Some(style.color), cols),
             FragmentKind::Image { .. } => write_marker(&mut rows, f, "[img]", None, cols),
-            FragmentKind::Box { style } => fill_box(&mut rows, f, style.background_color, cols),
+            FragmentKind::Box { style } => {
+                fill_box(&mut rows, f, style.background_color, cols);
+                draw_top_border_rule(&mut rows, f, style, cols);
+            }
         }
     }
 
@@ -388,7 +400,10 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
 /// bounds in both axes. A fully transparent `bg` (`a == 0` — the UA default,
 /// and any author `background-color` that resolves to `transparent`) is a
 /// no-op: it leaves whatever a prior fragment already painted in those
-/// cells, same as "paints nothing". No border is drawn — see module docs.
+/// cells, same as "paints nothing". No border is drawn here — see
+/// `draw_top_border_rule` right below for the one border edge the tty
+/// backend does draw, and module docs for the rest of the (still deferred)
+/// border scope.
 ///
 /// Row/col spans use the same `cell_index` rounding `write_marker` and
 /// `render`'s own row-count math use, widened to at least one cell so a
@@ -406,6 +421,35 @@ fn fill_box(rows: &mut [Vec<Cell>], fragment: &Fragment, bg: Color, cols: usize)
         for cell in row.iter_mut().skip(col_start).take(col_end - col_start) {
             cell.bg = bg;
         }
+    }
+}
+
+/// Draw a horizontal rule (`'─'`, U+2500) across `fragment`'s TOP row when
+/// `style.border.top` is a solid, `>= 1px` border — the tty backend's first
+/// (and, per the packet brief, ONLY) border edge: `<hr>`'s UA rule (packet/
+/// hr-rule) is a zero-content-height box with just a solid top border, and
+/// this is what turns that into a visible `────────` line in text mode. No
+/// vertical/side borders, no other `BorderStyle` (only `Solid` is ever
+/// meaningful — see `BorderStyle`'s own doc comment): anything else is a
+/// silent no-op, same "paints nothing" posture `fill_box` takes for a
+/// transparent `bg`.
+///
+/// Uses the SAME column span `fill_box` computes for this fragment (clipped
+/// to the grid's width) — the rule spans exactly the box's own width, one
+/// row, so this is bounded by the grid's already-capped column count, never
+/// an unbounded loop.
+fn draw_top_border_rule(rows: &mut [Vec<Cell>], fragment: &Fragment, style: &ComputedStyle, cols: usize) {
+    let top = style.border.top;
+    if top.style != BorderStyle::Solid || !(top.width >= 1.0) {
+        return;
+    }
+    let row = cell_index(fragment.rect.origin.y, CELL_H);
+    let Some(row_cells) = rows.get_mut(row) else { return };
+    let col_start = cell_index(fragment.rect.origin.x, CELL_W).min(cols);
+    let col_end = cell_index(fragment.rect.origin.x + nonneg(fragment.rect.size.w), CELL_W).min(cols).max(col_start);
+    for cell in row_cells.iter_mut().skip(col_start).take(col_end - col_start) {
+        cell.ch = '─';
+        cell.fg = top.color;
     }
 }
 
@@ -758,7 +802,7 @@ mod tests {
         // 24px wide box at (0,0) -> 3 cells (0..3) on row 0.
         let fragments = vec![box_fragment_top_border(0.0, 0.0, 24.0, 0.0, border)];
         let grid = render(&fragments, 10);
-        assert_eq!(grid.row_text(0), "\u{2500}\u{2500}\u{2500}", "top border should draw '─' across the box's width");
+        assert_eq!(grid.row_text(0).trim_end(), "\u{2500}\u{2500}\u{2500}", "top border should draw '─' across the box's width");
         for col in 0..3 {
             assert_eq!(grid.cell_at(0, col).fg, gray, "col {col} should carry the border color");
         }

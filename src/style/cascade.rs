@@ -226,7 +226,7 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
             bottom: resolve_lp(d.padding.bottom, font_size, default.padding.bottom),
             left: resolve_lp(d.padding.left, font_size, default.padding.left),
         },
-        border: resolve_border(d.border, font_size),
+        border: resolve_border(d.border, d.border_top, font_size),
         float: own!(float),
         clear: own!(clear),
 
@@ -300,9 +300,25 @@ fn resolve_lp(v: Option<RawLength>, font_size: f32, default: LengthPercentage) -
 /// an unset style here (declared width/color with no keyword) also means
 /// "no visible border" — CSS's own initial `border-style: none`. A solid
 /// border with no explicit width falls back to the classic "medium" ≈3px.
-fn resolve_border(v: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
+///
+/// `top` (packet/hr-rule: the `border-top` longhand) overrides ONLY
+/// `Edges.top` after `v` (the `border` shorthand) has set its uniform
+/// baseline for all four sides — mirrors real CSS's longhand-wins-over-
+/// shorthand behavior for the one side both could touch. `<hr>`'s UA rule is
+/// the only caller that ever sets `top` without `v`, so this is exercised
+/// today as "no `border` at all, `border-top` sets just the top side, the
+/// other three stay `BorderSide::default()`".
+fn resolve_border(v: Option<BorderRaw>, top: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
+    let base = Edges::all(resolve_border_side(v, font_size));
+    match top {
+        None => base,
+        Some(t) => Edges { top: resolve_border_side(Some(t), font_size), ..base },
+    }
+}
+
+fn resolve_border_side(v: Option<BorderRaw>, font_size: f32) -> BorderSide {
     match v {
-        None => Edges::all(BorderSide::default()),
+        None => BorderSide::default(),
         Some(b) => {
             let style = b.style.unwrap_or(BorderStyle::None);
             let width = if style == BorderStyle::Solid {
@@ -311,7 +327,7 @@ fn resolve_border(v: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
                 0.0
             };
             let color = b.color.unwrap_or(Color::BLACK);
-            Edges::all(BorderSide { width, style, color })
+            BorderSide { width, style, color }
         }
     }
 }
