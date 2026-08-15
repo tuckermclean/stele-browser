@@ -869,13 +869,13 @@ mod tests {
         assert_eq!(out[1], 0); // unused
         assert_eq!(&out[2..4], &11u16.to_le_bytes()); // major
         assert_eq!(&out[4..6], &0u16.to_le_bytes()); // minor
-        assert_eq!(&out[6..8], &19u16.to_le_bytes()); // name len
+        assert_eq!(&out[6..8], &18u16.to_le_bytes()); // name len
         assert_eq!(&out[8..10], &16u16.to_le_bytes()); // data len
         assert_eq!(&out[10..12], &0u16.to_le_bytes()); // unused
 
-        // name (19 bytes) + 1 pad byte -> 20
-        assert_eq!(&out[12..31], b"MIT-MAGIC-COOKIE-1");
-        assert_eq!(&out[31..32], &[0u8]); // pad
+        // name (18 bytes) + 2 pad bytes -> 20
+        assert_eq!(&out[12..30], b"MIT-MAGIC-COOKIE-1");
+        assert_eq!(&out[30..32], &[0u8, 0u8]); // pad
 
         // data (16 bytes, already a multiple of 4 -> no pad)
         assert_eq!(&out[32..48], &[0xAAu8; 16]);
