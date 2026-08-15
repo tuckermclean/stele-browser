@@ -71,6 +71,12 @@ struct Args {
     dump_text: Option<String>,
     dump_png: Option<(String, String)>,
     render_fb: Option<String>,
+    /// `--x11 <path-or-url>` (packet/x11): launch the interactive pixel
+    /// shell against a real X11 window (`run_x11`) instead of the tty
+    /// shell. Independent of `headless`/`source` -- checked first in
+    /// `main`, same "first recognized mode wins" posture as `--dump-text`/
+    /// `--dump-png`/`--render-fb` already have under `--headless`.
+    x11: Option<String>,
     cols: usize,
     /// `--stats` (M5, C2 "count what we refuse"): print the aggregated
     /// author-CSS-refusal counts to STDERR after cascading — see
@@ -101,7 +107,7 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, cols: DEFAULT_COLS, stats: false, no_bg_images: false, source: None }
+        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, x11: None, cols: DEFAULT_COLS, stats: false, no_bg_images: false, source: None }
     }
 }
 
@@ -138,6 +144,12 @@ fn parse_args(argv: &[String]) -> Args {
                 i += 1;
                 if let Some(v) = argv.get(i) {
                     out.render_fb = Some(v.clone());
+                }
+            }
+            "--x11" => {
+                i += 1;
+                if let Some(v) = argv.get(i) {
+                    out.x11 = Some(v.clone());
                 }
             }
             "--cols" => {
@@ -616,6 +628,323 @@ fn render_fb_opts(source: &str, no_bg_images: bool) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// packet/x11: the pixel-shell page-render pipeline. Mirrors
+// `render_fb_surface_opts`'s own fetch->parse->cascade->box-tree->layout->
+// paint steps (same content-driven-height derivation) but ALSO returns the
+// raw `Fragment` stream alongside the painted `Surface` -- `backend::x11`'s
+// pixel hit-test needs the fragments' `Interactive::Link` rects for
+// click-to-follow, which the painted pixels alone don't carry.
+// ---------------------------------------------------------------------------
+
+/// Render `url` (already resolved -- see `browser::History::current`) into
+/// a full-document `MemSurface` at `width` CSS px, alongside the
+/// `Fragment`s that produced it. Total: fetch/parse/layout failure is a
+/// clean `Err`, never a panic -- `run_x11` degrades to a blank page rather
+/// than propagating a panic into the event loop.
+fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fragment>), String> {
+    let response = fetch_response(url)?;
+    let html = String::from_utf8_lossy(&response.body);
+    let dom_tree = dom::parser::parse(&html);
+
+    if frames::find_frameset(&dom_tree).is_some() {
+        return Err("frameset documents are not supported by --x11".to_string());
+    }
+
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
+    let images = stele::images::collect_images(&dom_tree, &response.final_url);
+    let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
+        return Err("empty document (nothing to render)".to_string());
+    };
+
+    let viewport = Size { w: width as f32, h: HEADLESS_VIEWPORT_HEIGHT };
+    let fragments = layout::layout(&root, viewport);
+
+    // Content-driven height -- same derivation `dump_png_opts`/
+    // `render_fb_surface_opts` already use.
+    let mut content_bottom = 0.0f32;
+    for f in &fragments {
+        let y = f.rect.origin.y;
+        let h = f.rect.size.h;
+        if y.is_finite() && h.is_finite() {
+            content_bottom = content_bottom.max(y + h);
+        }
+    }
+    let height = if content_bottom.is_finite() && content_bottom > 0.0 { (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT) } else { 1 };
+
+    let bg_images = stele::bg_images::collect_bg_images(&styles, &response.final_url);
+
+    let mut surface = MemSurface::new(width, height, Color::WHITE);
+    raster::paint(&mut surface, &fragments, &bg_images);
+    Ok((surface, fragments))
+}
+
+/// Window pixel width, the drawable's bits-per-pixel, and the format's
+/// `scanline-pad` (bits) -> the byte stride `PutImage`'s `ZPixmap` data
+/// must use per scanline (rounded UP to `scanline_pad_bits`, per spec —
+/// the same padding convention `backend::fb::FbInfo.stride` already
+/// encodes, just derived here from the X11 setup reply's `PixmapFormat`
+/// instead of `/sys/class/graphics/fb0`'s own `stride` file).
+fn x11_row_stride(width: u32, bpp: u32, scanline_pad_bits: u32) -> u32 {
+    let pad = scanline_pad_bits.max(8);
+    let bits = width.saturating_mul(bpp);
+    let padded_bits = bits.div_ceil(pad) * pad;
+    padded_bits / 8
+}
+
+/// Crop `win_height` rows starting at document row `scroll_y` out of
+/// `surface`'s full-document RGBA8 pixels, into a fresh `width *
+/// win_height * 4`-byte buffer ready for [`fb::convert_to_fb_bytes`].
+/// `backend::fb::convert_to_fb_bytes` alone has no scroll-offset concept
+/// (it always clips to the top-left corner) — this is the scroll step in
+/// front of it. Rows/columns past `surface`'s own bounds (document shorter
+/// than the window, or narrower after a resize) are left `0` (white would
+/// need painting; `0`/black-transparent is what an X11 `PutImage` outside
+/// real content shows, matching every other "surface smaller than target"
+/// convention in this codebase).
+fn crop_surface_rows(surface: &MemSurface, width: u32, win_height: u32, scroll_y: u32) -> Vec<u8> {
+    let (sw, sh) = stele::surface::Surface::size(surface);
+    let bytes = surface.bytes();
+    let mut out = vec![0u8; (width as usize) * (win_height as usize) * 4];
+    let dst_row_bytes = width as usize * 4;
+    let src_row_bytes = sw as usize * 4;
+    let copy_w_bytes = (width.min(sw) as usize) * 4;
+
+    for row in 0..win_height {
+        let src_y = scroll_y + row;
+        if src_y >= sh {
+            break;
+        }
+        let dst_off = row as usize * dst_row_bytes;
+        let src_off = src_y as usize * src_row_bytes;
+        if src_off + copy_w_bytes <= bytes.len() && dst_off + copy_w_bytes <= out.len() {
+            out[dst_off..dst_off + copy_w_bytes].copy_from_slice(&bytes[src_off..src_off + copy_w_bytes]);
+        }
+    }
+    out
+}
+
+/// How many document pixel rows past the bottom of the window are still
+/// scrollable, given the full document height `doc_h` and the current
+/// window `win_h` — `0` when the whole document already fits.
+fn x11_max_scroll(doc_h: u32, win_h: u32) -> u32 {
+    doc_h.saturating_sub(win_h.min(doc_h))
+}
+
+/// Default X11 window size (CSS px) — no `--width`/`--height` flag yet (the
+/// packet brief doesn't ask for one); `ConfigureNotify` (a user resizing
+/// the window) reflows to whatever size the window manager/server actually
+/// grants, same as any other X11 client.
+const DEFAULT_X11_WIDTH: u32 = 1024;
+const DEFAULT_X11_HEIGHT: u32 = 768;
+
+/// Pixels scrolled per arrow-key press / mouse-wheel notch.
+const X11_LINE_SCROLL: u32 = 60;
+
+/// `stele --x11 <url>`: open a real X11 window (kdrive/Xfbdev, core
+/// protocol only — see `backend::x11`'s own doc comment for the wire
+/// details) and drive it interactively: `Expose` repaints the current
+/// frame; arrow keys/PageUp/PageDown/mouse wheel scroll (re-cropping +
+/// re-`PutImage`ing, no re-layout); `F5` reloads; a left click
+/// pixel-hit-tests the current fragment stream and, on a link hit,
+/// navigates; `ConfigureNotify` (a resize) re-lays-out at the new width;
+/// `q`/Escape quits.
+///
+/// Deliberately NOT unit-tested — same split as `run_browser`'s own doc
+/// comment: there is no X server in CI to open a window against. Every
+/// pure decision this loop makes (protocol encode/parse, keysym mapping,
+/// pixel hit-test) already IS unit-tested, in `backend::x11`; this
+/// function is thin glue over those plus this module's own
+/// `render_x11_page`/`crop_surface_rows`/`x11_row_stride`. Bounded/total
+/// throughout: every socket read goes through `XConnection`'s own
+/// fixed-size-buffer reads, and a page-load/reload/navigate failure prints
+/// to stderr and keeps the previous frame on screen rather than panicking.
+fn run_x11(source: &str) {
+    use stele::backend::x11::{self as xproto, XConnection};
+
+    let mut history = browser::History::new(resolve_url(source));
+
+    let mut conn = match XConnection::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("stele: --x11: failed to connect to the X server: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let depth = conn.setup.root_depth;
+    let Some(format) = conn.format_for_depth(depth) else {
+        eprintln!("stele: --x11: X server advertised no usable pixmap formats");
+        std::process::exit(1);
+    };
+    let bpp = format.bits_per_pixel as u32;
+    let scanline_pad = format.scanline_pad as u32;
+
+    let mut width = DEFAULT_X11_WIDTH;
+    let mut height = DEFAULT_X11_HEIGHT;
+
+    let window = match conn.create_window(width as u16, height as u16) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("stele: --x11: CreateWindow failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = conn.map_window(window) {
+        eprintln!("stele: --x11: MapWindow failed: {e}");
+        std::process::exit(1);
+    }
+    let gc = match conn.create_gc(window) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("stele: --x11: CreateGC failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Best-effort: a server that fails GetKeyboardMapping still gets a
+    // working (mouse-only) shell rather than a hard exit.
+    let (keysyms_per_keycode, keysyms) = conn.get_keyboard_mapping().unwrap_or_else(|e| {
+        eprintln!("stele: --x11: GetKeyboardMapping failed ({e}); keyboard input will be inert");
+        (0, Vec::new())
+    });
+    let min_keycode = conn.setup.min_keycode;
+
+    let mut scroll_y: u32 = 0;
+    let (mut surface, mut fragments) = match render_x11_page(history.current(), width) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("stele: --x11: initial page load failed: {e}");
+            (MemSurface::new(width, 1, Color::WHITE), Vec::new())
+        }
+    };
+
+    let redraw = |conn: &mut XConnection, surface: &MemSurface, width: u32, height: u32, scroll_y: u32| {
+        let cropped = crop_surface_rows(surface, width, height, scroll_y);
+        let stride = x11_row_stride(width, bpp, scanline_pad);
+        let fb_info = fb::FbInfo { width, height, bpp, stride };
+        match fb::convert_to_fb_bytes(&cropped, width, height, fb_info) {
+            Ok(bytes) => {
+                if let Err(e) = conn.put_image(window, gc, width as u16, height as u16, depth, &bytes, stride as usize) {
+                    eprintln!("stele: --x11: PutImage failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("stele: --x11: pixel conversion failed: {e}"),
+        }
+    };
+
+    redraw(&mut conn, &surface, width, height, scroll_y);
+
+    loop {
+        let event = match conn.next_event() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("stele: --x11: connection closed: {e}");
+                break;
+            }
+        };
+
+        match event {
+            xproto::XEvent::Expose => redraw(&mut conn, &surface, width, height, scroll_y),
+
+            xproto::XEvent::ConfigureNotify { width: w, height: h } => {
+                if w == 0 || h == 0 {
+                    continue; // a hostile/transient 0-sized geometry -- nothing sane to render
+                }
+                width = w as u32;
+                height = h as u32;
+                match render_x11_page(history.current(), width) {
+                    Ok((s, f)) => {
+                        surface = s;
+                        fragments = f;
+                    }
+                    Err(e) => eprintln!("stele: --x11: reflow after resize failed: {e}"),
+                }
+                let (_, doc_h) = stele::surface::Surface::size(&surface);
+                scroll_y = scroll_y.min(x11_max_scroll(doc_h, height));
+                redraw(&mut conn, &surface, width, height, scroll_y);
+            }
+
+            xproto::XEvent::KeyPress { keycode, .. } => {
+                let Some(sym) = xproto::keysym_for_keycode(keycode, min_keycode, keysyms_per_keycode, &keysyms) else { continue };
+                let Some(key) = xproto::keysym_to_key(sym) else { continue };
+                let (_, doc_h) = stele::surface::Surface::size(&surface);
+                let max_scroll = x11_max_scroll(doc_h, height);
+
+                match key {
+                    xproto::X11Key::Escape | xproto::X11Key::Char('q') => break,
+                    xproto::X11Key::Up => {
+                        scroll_y = scroll_y.saturating_sub(X11_LINE_SCROLL);
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    xproto::X11Key::Down => {
+                        scroll_y = (scroll_y + X11_LINE_SCROLL).min(max_scroll);
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    xproto::X11Key::PageUp => {
+                        scroll_y = scroll_y.saturating_sub(height);
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    xproto::X11Key::PageDown => {
+                        scroll_y = (scroll_y + height).min(max_scroll);
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    xproto::X11Key::F5 => {
+                        match render_x11_page(history.current(), width) {
+                            Ok((s, f)) => {
+                                surface = s;
+                                fragments = f;
+                                scroll_y = 0;
+                            }
+                            Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
+                        }
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    _ => {}
+                }
+            }
+
+            xproto::XEvent::ButtonPress { button, x, y } => {
+                let (_, doc_h) = stele::surface::Surface::size(&surface);
+                let max_scroll = x11_max_scroll(doc_h, height);
+                match button {
+                    4 => {
+                        // Wheel up.
+                        scroll_y = scroll_y.saturating_sub(X11_LINE_SCROLL);
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    5 => {
+                        // Wheel down.
+                        scroll_y = (scroll_y + X11_LINE_SCROLL).min(max_scroll);
+                        redraw(&mut conn, &surface, width, height, scroll_y);
+                    }
+                    1 => {
+                        let doc_x = x.max(0) as f32;
+                        let doc_y = y.max(0) as f32 + scroll_y as f32;
+                        if let Some(href) = xproto::hit_test_pixel(&fragments, doc_x, doc_y) {
+                            let new_url = history.current().resolve(&href);
+                            history.navigate(new_url.clone());
+                            match render_x11_page(&new_url, width) {
+                                Ok((s, f)) => {
+                                    surface = s;
+                                    fragments = f;
+                                    scroll_y = 0;
+                                }
+                                Err(e) => eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}"),
+                            }
+                            redraw(&mut conn, &surface, width, height, scroll_y);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            xproto::XEvent::Other => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // packet/shell-keyboard: the interactive shell. `stele::browser` (P7) owns
 // every actual DECISION (scroll/focus/key-parsing/history/frame rendering) —
 // pure and unit-tested there. What lives here is deliberately thin and NOT
@@ -1042,6 +1371,10 @@ fn main() {
     }
 
     let args = parse_args(&argv);
+    if let Some(source) = args.x11 {
+        run_x11(&source);
+        return;
+    }
     if args.headless {
         if let Some(source) = args.dump_text {
             // --stats goes to STDERR, printed before the golden-compared
