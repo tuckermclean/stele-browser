@@ -1896,6 +1896,101 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // `<table border>` default cell padding (packet/border-collapse
+    // follow-up): mirrors the `cellpadding` section directly above.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn table_border_with_no_cellpadding_gets_the_default_padding() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_padding_all(&cell.style.padding, DEFAULT_TABLE_BORDER_CELL_PADDING);
+        }
+    }
+
+    #[test]
+    fn table_border_with_explicit_cellpadding_zero_suppresses_the_default() {
+        // `cellpadding="0"` is a present attribute (even though it stamps
+        // literal 0px either way) -- its mere PRESENCE must suppress the
+        // default, per this function's own "no cellpadding attribute AT
+        // ALL" gate.
+        let d = dom::parser::parse(r#"<table border="1" cellpadding="0"><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn table_border_with_unparseable_cellpadding_still_suppresses_the_default() {
+        // Presence, not validity: an unparseable `cellpadding` still counts
+        // as "the author named this attribute" and must suppress the
+        // default too, even though `apply_table_cellpadding_attribute`
+        // itself stamps nothing for it (leaving cells at the CSS 0px
+        // default either way -- same observable padding, different reason).
+        let d = dom::parser::parse(r#"<table border="1" cellpadding="banana"><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn table_border_author_css_padding_wins_over_the_default() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("td { padding: 2px; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_padding_all(&cells[0].style.padding, 2.0);
+    }
+
+    #[test]
+    fn table_without_a_border_attribute_gets_no_default_padding() {
+        // Plain `<table>` (no `border` attribute at all): completely out of
+        // this function's scope, regardless of any author CSS border.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    #[test]
+    fn author_css_bordered_table_with_no_border_attribute_gets_no_default_padding() {
+        // The kitchen-sink shape: `border-collapse: collapse` + `td {
+        // border: 1px solid }` in author CSS, but NO `border` HTML
+        // attribute anywhere -- this packet's default-padding step must
+        // stay completely out of it (gated on the ATTRIBUTE, not the
+        // cascaded border), leaving the author's own (unset) padding
+        // exactly as written.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("table { border-collapse: collapse; } td { border: 1px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_padding_all(&cells[0].style.padding, 0.0);
+    }
+
+    // ------------------------------------------------------------------
     // `border-collapse: collapse` dedup (packet/border-collapse): mirrors
     // the `<table border="N">`/`cellpadding` sections above -- same post-
     // cascade, DEPTH_CAP-bounded, stop-at-nested-table walk, applied AFTER
