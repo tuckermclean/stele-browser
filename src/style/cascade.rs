@@ -262,6 +262,9 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
         // silently collapsing to 0 in practice.
         border_spacing_x: d.border_spacing_x.map(|l| raw_to_px(l, font_size)).unwrap_or(default.border_spacing_x),
         border_spacing_y: d.border_spacing_y.map(|l| raw_to_px(l, font_size)).unwrap_or(default.border_spacing_y),
+        // packet/border-collapse: non-inherited ("own") resolution -- see
+        // `ComputedStyle::border_collapse`'s own doc comment for why.
+        border_collapse: own!(border_collapse),
         float: own!(float),
         clear: own!(clear),
 

@@ -50,8 +50,8 @@ use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
-    AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto,
-    Dimension as CssDimension, TextAlign,
+    AlignItems, AlignSelf, BorderCollapse, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage,
+    LengthPercentageAuto, Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -304,6 +304,25 @@ fn finite_nonneg(v: f32) -> f32 {
         v
     } else {
         0.0
+    }
+}
+
+/// The `(x, y)` border-spacing gap `table_node`'s own resolved style feeds
+/// the table solver, per CSS `border-collapse` (packet/border-collapse): a
+/// `Collapse` table ignores `border-spacing`/`cellspacing` entirely (CSS
+/// spec behavior -- adjacent cells become flush against each other, sharing
+/// one border line, see `layout::box_tree`'s collapse-dedup step for the
+/// border-sharing half of this), so this returns `(0.0, 0.0)` regardless of
+/// what `border_spacing_x/y` resolved to. A `Separate` table (the default --
+/// every table that doesn't opt into `border-collapse: collapse`) is
+/// byte-identical to before this packet: straight `finite_nonneg` off the
+/// table's own resolved `border_spacing_x/y` (see `ComputedStyle::
+/// border_spacing_x`'s own doc comment).
+fn effective_border_spacing(style: &ComputedStyle) -> (f32, f32) {
+    if style.border_collapse == BorderCollapse::Collapse {
+        (0.0, 0.0)
+    } else {
+        (finite_nonneg(style.border_spacing_x), finite_nonneg(style.border_spacing_y))
     }
 }
 
@@ -656,9 +675,10 @@ fn measure_node<M: Metrics>(
             // hardcoded constant — see `ComputedStyle::border_spacing_x`'s
             // doc comment (falls back to the same 8.0/0.0 default when
             // nothing set it, so this is a no-op change for every table
-            // that doesn't use `border-spacing`/`cellspacing`).
-            let spacing_x = finite_nonneg(table_node.style.border_spacing_x);
-            let spacing_y = finite_nonneg(table_node.style.border_spacing_y);
+            // that doesn't use `border-spacing`/`cellspacing`). packet/
+            // border-collapse: a `Collapse` table gets `(0.0, 0.0)` instead
+            // — see `effective_border_spacing`'s own doc comment.
+            let (spacing_x, spacing_y) = effective_border_spacing(&table_node.style);
             let total_w = finite_nonneg(entry.table_layout.col_widths.iter().sum::<f32>() + col_gaps * spacing_x);
             let total_h = finite_nonneg(entry.table_layout.row_heights.iter().sum::<f32>() + row_gaps * spacing_y);
             TSize {
@@ -752,9 +772,10 @@ fn compute_table_cache_entry<M: Metrics>(
     // packet/table-spacing: read straight off the table's own resolved
     // style (falls back to the pre-existing 8.0/0.0 default — see
     // `ComputedStyle::border_spacing_x`'s doc comment), sanitized the same
-    // way every other layout-space scalar in this module is.
-    let spacing_x = finite_nonneg(table_node.style.border_spacing_x);
-    let spacing_y = finite_nonneg(table_node.style.border_spacing_y);
+    // way every other layout-space scalar in this module is. packet/
+    // border-collapse: `(0.0, 0.0)` instead when the table is collapsed —
+    // see `effective_border_spacing`'s own doc comment.
+    let (spacing_x, spacing_y) = effective_border_spacing(&table_node.style);
 
     let mut cells: Vec<CellSpec> = grid
         .cells

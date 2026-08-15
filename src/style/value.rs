@@ -5,7 +5,7 @@
 
 use crate::dom::AttrMap;
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float, FontFamily,
+    AlignItems, AlignSelf, BorderCollapse, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float, FontFamily,
     FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
     WhiteSpace,
 };
@@ -136,6 +136,11 @@ pub(crate) struct Declarations {
     /// every other `own!`-resolved field does.
     pub border_spacing_x: Option<RawLength>,
     pub border_spacing_y: Option<RawLength>,
+    /// `border-collapse: separate | collapse` (packet/border-collapse,
+    /// `ComputedStyle::border_collapse`'s own doc comment has the full
+    /// rationale). `Copy`, so it goes through the `overlay` `ov!` macro like
+    /// every other simple enum field here.
+    pub border_collapse: Option<BorderCollapse>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
 
@@ -182,6 +187,7 @@ impl Declarations {
         ov!(border_top);
         ov!(border_spacing_x);
         ov!(border_spacing_y);
+        ov!(border_collapse);
         ov!(float);
         ov!(clear);
         ov!(flex_direction);
@@ -409,6 +415,24 @@ pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
                 d.border_spacing_x = Some(RawLength::Px(n as f32));
                 d.border_spacing_y = Some(RawLength::Px(n as f32));
             }
+        }
+
+        // `<table border>` defaults to `border-collapse: collapse` (packet/
+        // border-collapse) -- but ONLY when there's no `cellspacing`
+        // attribute too: a bare `<table border=1>` should render as a clean
+        // single-line grid (real vintage rendering), while `<table border=1
+        // cellspacing=N>` explicitly asks for gaps between cells, so it must
+        // stay `separate`. Presence of `border` alone is the signal (its
+        // value isn't parsed/validated here -- `border="0"`/an unparseable
+        // value still sets the collapse hint; `layout::box_tree`'s own
+        // `table_border_attribute` independently decides whether any VISIBLE
+        // border actually gets stamped, a fully orthogonal concern from the
+        // border MODEL this hint selects). This is a presentational-tier
+        // hint (`fold_matching_declarations`'s tier `1`), so author CSS
+        // `border-collapse: separate` on the `<table>` itself still wins
+        // (tier `2` beats tier `1` per property, `Declarations::overlay`).
+        if attrs.get("border").is_some() && attrs.get("cellspacing").is_none() {
+            d.border_collapse = Some(BorderCollapse::Collapse);
         }
     }
 
@@ -1175,6 +1199,21 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 }
                 _ => false,
             },
+            _ => false,
+        },
+        // `border-collapse: separate | collapse` (packet/border-collapse):
+        // plain keyword property, same shape as `float`/`clear`/etc. above.
+        // Any other keyword (or no keyword at all) is unrecognized and the
+        // whole declaration is simply not applied (charter C2).
+        "border-collapse" => match keyword(tokens).as_deref() {
+            Some("collapse") => {
+                d.border_collapse = Some(BorderCollapse::Collapse);
+                true
+            }
+            Some("separate") => {
+                d.border_collapse = Some(BorderCollapse::Separate);
+                true
+            }
             _ => false,
         },
         "gap" => match tokens.first().and_then(token_to_raw_length) {
