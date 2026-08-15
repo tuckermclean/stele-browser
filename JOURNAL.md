@@ -426,6 +426,27 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-15 — CORRECT-2 · <hr> renders as a real horizontal rule (tty + pixel)
+
+- **Gap:** `<hr>` was a `display:block` void element with only a margin — an empty
+  box that rendered as blank space, no visible rule.
+- **Fix:** UA `hr { height:0; border-top:1px solid #808080; margin:0.5em 0; }`
+  (new `border-top` longhand in the CSS parser + a top-only override in
+  `cascade::resolve_border`). Pixel/fb: the existing border painter already
+  draws the top edge → a gray line, no backend change. TTY: new
+  `draw_top_border_rule` — the tty's first border rendering — draws `'─'`
+  (U+2500) across a box's top row in the border color, but ONLY when the top is
+  the box's SOLE solid border (so `<hr>` and intentional separator divs render a
+  rule; full 4-side-bordered tables/flex boxes draw nothing in tty, unchanged
+  from v0). Bounded by the clipped column span; no unsafe; frozen
+  `ComputedStyle`/`Edges<BorderSide>` byte-identical (only internal
+  `value::Declarations` gained a field).
+- **Rebless (orchestrator-viewed):** `kitchen-sink.tty.txt` + `kitchen-sink.png`
+  — that fixture already had an `<hr>`, which now shows its rule and gains real
+  1px geometry (content below shifts down); table/flex borders stay full in
+  pixel and absent in tty (confirmed no stray top-lines). New goldens
+  `hr-rule.txt` / `hr-rule.png`. 869 tests green. See D46.
+
 ## 2026-08-15 — CORRECT-1 · text-align: center/right now honored (+ <center>)
 
 - **Gap:** `text-align` was parsed + inherited in `ComputedStyle` but the inline
