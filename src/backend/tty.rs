@@ -41,11 +41,21 @@
 //!   this module's own synthetic-fragment tests, ready for whenever a
 //!   pipeline actually emits one.)
 //! - `Box` fragments (a block box's background/border) render their
-//!   `background_color` as cell `bg` (see "Color" below) but still render
-//!   **no border** in text mode — v0 scope call, documented for the
-//!   DECISIONS ledger: even simple ASCII-art borders would need their own
-//!   cell-accurate box-drawing pass distinct from the text-placement rule
-//!   above; deferred rather than half-done.
+//!   `background_color` as cell `bg` (see "Color" below). Borders are still
+//!   mostly out of scope in text mode — a full cell-accurate box-drawing
+//!   pass (four sides, corners) is deferred rather than half-done — with ONE
+//!   narrow exception (packet/hr-rule): a box whose top border is `Solid`,
+//!   `>= 1px`, AND whose OWN right/bottom/left are not ALSO a `Solid`/`>=
+//!   1px` border draws a `'─'` (U+2500) rule across the box's own width, in
+//!   the border color, via `draw_top_border_rule`. This exists specifically
+//!   so `<hr>` (a zero-content-height box with only `border-top` set in the
+//!   UA sheet, `style::ua::UA_CSS`) shows as a visible horizontal line
+//!   instead of blank space. The "sole solid side" gate matters: a box
+//!   bordered on all four sides (e.g. a `<table>` cell or a bordered flex
+//!   child, both real cases in `fixtures/kitchen-sink.html`) draws NOTHING
+//!   here — a lone top tick with no matching sides/bottom would look like a
+//!   glitch, not a border, and that box's real border still paints
+//!   correctly in the pixel/fb backend either way.
 //! - **Paint order wins ties**: fragments are drawn in slice order (already
 //!   paint order per `layout::layout`'s contract), each write overwriting
 //!   whatever a prior fragment left in the same cell.
@@ -62,9 +72,12 @@
 //! - `Box { style }` fills the cells its rect covers with
 //!   `style.background_color` as the cell `bg` — but only when that color
 //!   isn't fully transparent (`a == 0`); a transparent box leaves whatever
-//!   `bg` was already there untouched, same as painting nothing. Borders
-//!   still render **nothing** in text mode (unchanged v0 scope call — ASCII-
-//!   art box-drawing is a distinct, still-deferred pass).
+//!   `bg` was already there untouched, same as painting nothing. Borders are
+//!   still otherwise out of scope in text mode (full ASCII-art box-drawing —
+//!   all four sides, corners — is a distinct, still-deferred pass), except
+//!   for the one solid top-border rule line `draw_top_border_rule` draws
+//!   (packet/hr-rule, `fg` = the border's own color) — see "What paints,
+//!   what doesn't" above.
 //! - `Text { text, style, .. }` sets each written cell's `ch` *and* `fg`
 //!   (from `style.color`) but never touches `bg`. Because paint order already
 //!   draws `Box` fragments before the `Text` fragments they contain (brief's
@@ -111,6 +124,7 @@
 //! to spare for an attacker- or user-inflated grid.
 
 use crate::layout::{Fragment, FragmentKind};
+use crate::style::computed::{BorderSide, BorderStyle, ComputedStyle};
 use crate::surface::Color;
 
 /// `pub(crate)`, not just private: the frames packet (`crate::frames`)
@@ -377,7 +391,10 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
         match &f.kind {
             FragmentKind::Text { text, style, .. } => write_marker(&mut rows, f, text, Some(style.color), cols),
             FragmentKind::Image { .. } => write_marker(&mut rows, f, "[img]", None, cols),
-            FragmentKind::Box { style } => fill_box(&mut rows, f, style.background_color, cols),
+            FragmentKind::Box { style } => {
+                fill_box(&mut rows, f, style.background_color, cols);
+                draw_top_border_rule(&mut rows, f, style, cols);
+            }
         }
     }
 
@@ -388,7 +405,10 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
 /// bounds in both axes. A fully transparent `bg` (`a == 0` — the UA default,
 /// and any author `background-color` that resolves to `transparent`) is a
 /// no-op: it leaves whatever a prior fragment already painted in those
-/// cells, same as "paints nothing". No border is drawn — see module docs.
+/// cells, same as "paints nothing". No border is drawn here — see
+/// `draw_top_border_rule` right below for the one border edge the tty
+/// backend does draw, and module docs for the rest of the (still deferred)
+/// border scope.
 ///
 /// Row/col spans use the same `cell_index` rounding `write_marker` and
 /// `render`'s own row-count math use, widened to at least one cell so a
@@ -406,6 +426,50 @@ fn fill_box(rows: &mut [Vec<Cell>], fragment: &Fragment, bg: Color, cols: usize)
         for cell in row.iter_mut().skip(col_start).take(col_end - col_start) {
             cell.bg = bg;
         }
+    }
+}
+
+/// Draw a horizontal rule (`'─'`, U+2500) across `fragment`'s TOP row when
+/// its top border is the box's SOLE solid border — the tty backend's first
+/// (and, per the packet brief, ONLY) border edge: `<hr>`'s UA rule (packet/
+/// hr-rule) is a zero-content-height box with just a solid top border, and
+/// this is what turns that into a visible `────────` line in text mode.
+///
+/// Deliberately narrower than "any solid top border": a box with a full
+/// 4-side border (e.g. a bordered `<table>` cell, or a bordered flex child —
+/// both real cases in `fixtures/kitchen-sink.html`) does NOT get a rule here
+/// — with no matching side/bottom edges to accompany it (tty draws none —
+/// see module docs), a lone top tick over an otherwise-unbordered-looking
+/// cell reads as a rendering glitch, not a border, and the pixel/fb backend
+/// already draws all four of THAT box's edges correctly on its own. So the
+/// gate is: `top` is `Solid`/`>= 1px` AND none of right/bottom/left is ALSO
+/// a `Solid`/`>= 1px` border — i.e. this box's border is genuinely top-only
+/// (an `<hr>`, or an intentional author `border-top`-only separator), never
+/// one edge of a box that's bordered all the way around.
+///
+/// Uses the SAME column span `fill_box` computes for this fragment (clipped
+/// to the grid's width) — the rule spans exactly the box's own width, one
+/// row, so this is bounded by the grid's already-capped column count, never
+/// an unbounded loop.
+fn draw_top_border_rule(rows: &mut [Vec<Cell>], fragment: &Fragment, style: &ComputedStyle, cols: usize) {
+    let top = style.border.top;
+    if top.style != BorderStyle::Solid || !(top.width >= 1.0) {
+        return;
+    }
+    let is_solid = |side: BorderSide| side.style == BorderStyle::Solid && side.width >= 1.0;
+    if is_solid(style.border.right) || is_solid(style.border.bottom) || is_solid(style.border.left) {
+        // A full (or partial-but-not-top-only) border belongs to the still-
+        // deferred ASCII-art box-drawing pass, not this narrow rule-line
+        // special case — see this function's own doc comment.
+        return;
+    }
+    let row = cell_index(fragment.rect.origin.y, CELL_H);
+    let Some(row_cells) = rows.get_mut(row) else { return };
+    let col_start = cell_index(fragment.rect.origin.x, CELL_W).min(cols);
+    let col_end = cell_index(fragment.rect.origin.x + nonneg(fragment.rect.size.w), CELL_W).min(cols).max(col_start);
+    for cell in row_cells.iter_mut().skip(col_start).take(col_end - col_start) {
+        cell.ch = '─';
+        cell.fg = top.color;
     }
 }
 
@@ -614,6 +678,20 @@ mod tests {
         }
     }
 
+    /// A `Box` fragment whose style carries only a top border (the `<hr>`
+    /// shape: zero content height, one solid top edge) — every other side
+    /// stays `BorderSide::default()` (`BorderStyle::None`).
+    fn box_fragment_top_border(x: f32, y: f32, w: f32, h: f32, border: crate::style::computed::BorderSide) -> Fragment {
+        use crate::style::computed::Edges;
+        Fragment {
+            rect: Rect { origin: Point { x, y }, size: Size { w, h } },
+            kind: FragmentKind::Box {
+                style: ComputedStyle { border: Edges { top: border, ..Edges::all(Default::default()) }, ..ComputedStyle::default() },
+            },
+            interactive: None,
+        }
+    }
+
     fn text_fragment_fg(x: f32, y: f32, w: f32, h: f32, text: &str, fg: Color) -> Fragment {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
@@ -732,6 +810,56 @@ mod tests {
         let fragments = vec![box_fragment(0.0, 0.0, 24.0, 16.0)]; // default style: TRANSPARENT
         let grid = render(&fragments, 10);
         assert_eq!(grid.cell_at(0, 0).bg, Color::TRANSPARENT);
+    }
+
+    // ------------------------------------------------------- hr rule (packet/hr-rule)
+
+    #[test]
+    fn sole_solid_top_border_draws_a_horizontal_rule_across_the_box_width() {
+        use crate::style::computed::{BorderSide, BorderStyle};
+        let gray = Color::rgb(0x80, 0x80, 0x80);
+        let border = BorderSide { width: 1.0, style: BorderStyle::Solid, color: gray };
+        // 24px wide box at (0,0) -> 3 cells (0..3) on row 0. `box_fragment_top_border`
+        // sets ONLY the top side -- right/bottom/left stay `BorderSide::default()`
+        // (BorderStyle::None), the `<hr>` shape this gate is meant to catch.
+        let fragments = vec![box_fragment_top_border(0.0, 0.0, 24.0, 0.0, border)];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "\u{2500}\u{2500}\u{2500}", "top-only border should draw '─' across the box's width");
+        for col in 0..3 {
+            assert_eq!(grid.cell_at(0, col).fg, gray, "col {col} should carry the border color");
+        }
+        assert_eq!(grid.cell_at(0, 3).ch, ' ', "col 3 is outside the box and must stay blank");
+    }
+
+    #[test]
+    fn no_border_style_draws_nothing_regression_guard() {
+        use crate::style::computed::BorderSide;
+        // Default BorderSide (BorderStyle::None) must not draw a rule — the
+        // overwhelmingly common case (every box without an explicit border).
+        let fragments = vec![box_fragment_top_border(0.0, 0.0, 24.0, 0.0, BorderSide::default())];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "", "no border style set should draw no rule characters");
+    }
+
+    #[test]
+    fn full_four_side_solid_border_draws_no_tty_rule_regression_guard() {
+        // Coordinator-directed narrowing: a box bordered on ALL FOUR sides
+        // (a real `<table>` cell / bordered flex child shape, both present
+        // in fixtures/kitchen-sink.html via `border: 1px solid ...`) must
+        // draw NOTHING in tty -- a lone top tick with no matching sides/
+        // bottom (tty still draws none of those) reads as a glitch, not a
+        // border. The pixel/fb backend paints all four edges correctly on
+        // its own regardless.
+        use crate::style::computed::{BorderSide, BorderStyle, Edges};
+        let dark = Color::rgb(0x33, 0x33, 0x33);
+        let side = BorderSide { width: 1.0, style: BorderStyle::Solid, color: dark };
+        let fragments = vec![Fragment {
+            rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 24.0, h: 16.0 } },
+            kind: FragmentKind::Box { style: ComputedStyle { border: Edges::all(side), ..ComputedStyle::default() } },
+            interactive: None,
+        }];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "", "a fully-bordered box must draw no tty rule line");
     }
 
     #[test]

@@ -226,7 +226,7 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
             bottom: resolve_lp(d.padding.bottom, font_size, default.padding.bottom),
             left: resolve_lp(d.padding.left, font_size, default.padding.left),
         },
-        border: resolve_border(d.border, font_size),
+        border: resolve_border(d.border, d.border_top, font_size),
         float: own!(float),
         clear: own!(clear),
 
@@ -300,9 +300,25 @@ fn resolve_lp(v: Option<RawLength>, font_size: f32, default: LengthPercentage) -
 /// an unset style here (declared width/color with no keyword) also means
 /// "no visible border" — CSS's own initial `border-style: none`. A solid
 /// border with no explicit width falls back to the classic "medium" ≈3px.
-fn resolve_border(v: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
+///
+/// `top` (packet/hr-rule: the `border-top` longhand) overrides ONLY
+/// `Edges.top` after `v` (the `border` shorthand) has set its uniform
+/// baseline for all four sides — mirrors real CSS's longhand-wins-over-
+/// shorthand behavior for the one side both could touch. `<hr>`'s UA rule is
+/// the only caller that ever sets `top` without `v`, so this is exercised
+/// today as "no `border` at all, `border-top` sets just the top side, the
+/// other three stay `BorderSide::default()`".
+fn resolve_border(v: Option<BorderRaw>, top: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
+    let base = Edges::all(resolve_border_side(v, font_size));
+    match top {
+        None => base,
+        Some(t) => Edges { top: resolve_border_side(Some(t), font_size), ..base },
+    }
+}
+
+fn resolve_border_side(v: Option<BorderRaw>, font_size: f32) -> BorderSide {
     match v {
-        None => Edges::all(BorderSide::default()),
+        None => BorderSide::default(),
         Some(b) => {
             let style = b.style.unwrap_or(BorderStyle::None);
             let width = if style == BorderStyle::Solid {
@@ -311,7 +327,7 @@ fn resolve_border(v: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
                 0.0
             };
             let color = b.color.unwrap_or(Color::BLACK);
-            Edges::all(BorderSide { width, style, color })
+            BorderSide { width, style, color }
         }
     }
 }
@@ -401,6 +417,42 @@ mod tests {
         assert_eq!(styles[div].background_image.as_deref(), Some("x.png"));
         assert_eq!(styles[span].background_image, None);
         assert_eq!(styles[span].color, Color::rgb(0, 128, 0), "color still inherits normally");
+    }
+
+    #[test]
+    fn border_top_declaration_sets_only_the_top_side() {
+        // packet/hr-rule: `border-top` must override only `Edges.top`,
+        // leaving right/bottom/left at the CSS initial (`BorderStyle::None`)
+        // -- unlike the `border` shorthand, which sets all four uniformly.
+        let d = dom::parser::parse("<div>x</div>");
+        let sheet = parser::parse("div { border-top: 1px solid #808080; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        let top = styles[div].border.top;
+        assert_eq!(top.style, BorderStyle::Solid);
+        assert_eq!(top.width, 1.0);
+        assert_eq!(top.color, Color::rgb(0x80, 0x80, 0x80));
+        for side in [styles[div].border.right, styles[div].border.bottom, styles[div].border.left] {
+            assert_eq!(side, BorderSide::default(), "non-top sides must stay unset");
+        }
+    }
+
+    #[test]
+    fn hr_ua_rule_renders_as_a_zero_height_box_with_a_solid_top_border() {
+        // The UA sheet's own `hr` rule (packet/hr-rule): a thin full-width
+        // rule line, not the old blank-space rendering.
+        let d = dom::parser::parse("<hr>");
+        let styles = cascade(&d, &[]);
+        let hr = find(&d, "hr");
+        assert_eq!(styles[hr].display, Display::Block);
+        assert_eq!(styles[hr].height, Dimension::Px(0.0));
+        let top = styles[hr].border.top;
+        assert_eq!(top.style, BorderStyle::Solid);
+        assert_eq!(top.width, 1.0);
+        assert_eq!(top.color, Color::rgb(0x80, 0x80, 0x80));
+        assert_eq!(styles[hr].border.right, BorderSide::default());
+        assert_eq!(styles[hr].border.bottom, BorderSide::default());
+        assert_eq!(styles[hr].border.left, BorderSide::default());
     }
 
     #[test]

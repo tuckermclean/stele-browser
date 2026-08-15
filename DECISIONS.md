@@ -19,6 +19,21 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Rendering — <hr> horizontal rule
+
+### D46 — <hr> is a top-border rule; tty draws a rule only for a sole-top border
+`<hr>` gets `border-top:1px solid #808080; height:0` in the UA sheet (new
+`border-top` longhand parse + top-only cascade override). The pixel/fb backend
+draws it via the existing per-edge border painter (no change). The tty backend
+gains its FIRST border rendering: a `─` line across a box's top row — gated to
+fire ONLY when the top is the box's sole solid border. **Why the gate:** the tty
+has no vertical/bottom border support, so drawing a lone top `─` over a full
+4-side-bordered table cell or flex box looks broken; restricting to sole-top
+borders means only genuine rules/separators (`<hr>`, decorative `border-top`
+divs) render, and full-bordered boxes stay clean in tty exactly as before.
+**Rebless:** kitchen-sink (already contained an `<hr>`) — rule now visible + 1px
+geometry shift; table/flex unchanged. Frozen types untouched. Bounded/total.
+
 ## Layout — text-align
 
 ### D45 — text-align applied in the inline engine; <center> maps to it
