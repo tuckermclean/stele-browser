@@ -19,6 +19,22 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Backend — X11 client (hand-rolled)
+
+### D51 — X11 backend is a hand-rolled pure-Rust core-protocol client, no deps
+`stele --x11 <url>` speaks the X11 wire protocol directly (`backend/x11.rs`) over
+a unix socket — no libX11/xcb FFI, no x11rb, no new dependency, no unsafe. Chosen
+over x11rb (~0.2-0.6MB binary + a vendored crate) and libX11-FFI (unsafe + C
+cross-link) to keep the from-scratch/all-static/zero-unsafe charter; the
+bitmap-only target server means only a tiny core-protocol subset is needed
+(Stele self-renders every pixel into its own Surface and blits via PutImage, so
+the server's no-font/no-freetype construction is irrelevant). Pure
+encoders/parsers/hit-test are unit-tested; the socket + interactive loop
+(`run_x11`) are manual-only, mirroring `run_browser`'s thin-I/O split. Reuses
+`raster`/`Surface`, `fb.rs` pixel conversion, and the `browser.rs` model.
+Follow-ups: text-field editing in the X loop, partial-damage repaint, resize
+re-layout polish.
+
 ## Rendering — border-collapse + tty table grids
 
 ### D50 — border-collapse via shared-grid-line overlap geometry (not dedup)

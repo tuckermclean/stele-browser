@@ -426,6 +426,28 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-15 — X11 backend (spike) · stele --x11 <url> — a real window
+
+- Hand-rolled minimal X11 client (`src/backend/x11.rs`, self-contained, pure Rust
+  over `std::os::unix::net::UnixStream` — NO libX11, NO x11rb, NO new deps, NO
+  unsafe). Implements only the core-protocol slice Stele needs against a
+  bitmap-only kdrive/Xfbdev server: `$DISPLAY` parse, `.Xauthority`
+  MIT-MAGIC-COOKIE-1 extraction, connection setup encode + reply parse (id
+  base/mask, root/visual/depth, pixmap formats, max-request-length, keycodes),
+  id allocator, CreateWindow/MapWindow/CreateGC/PutImage/GetKeyboardMapping,
+  PutImage request-banding under max-request-length, keysym→Key table, core
+  event parse (KeyPress/ButtonPress/Expose/ConfigureNotify), `hit_test_pixel`
+  over `layout::Fragment`.
+- Reuses the existing render (`raster`→`Surface`) + `fb.rs` RGBA→screen-format
+  conversion + the `browser.rs` model. `main.rs::run_x11` is the manual-only
+  interactive loop (mirrors `run_browser`'s thin-I/O split): Expose repaint,
+  arrows/PageUp/PageDown/wheel scroll (crop + re-PutImage, no re-layout),
+  left-click hit-test → navigate, F5 reload, ConfigureNotify reflow, q/Esc quit.
+- 45 new unit tests cover every pure encoder/parser/hit-test (synthetic buffers);
+  the socket/loop is manual (can't open a window in CI). 718 tests green. See D51.
+- **Run:** inside `startx` (Xfbdev), `stele --x11 <url>` → a scrollable, clickable
+  window rendering the page. First graphical interactive backend.
+
 ## 2026-08-15 — CORRECT-6 · border-collapse: collapse (shared-grid-line geometry)
 
 - **border-collapse (freeze amendment):** `ComputedStyle.border_collapse:
