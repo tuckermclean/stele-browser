@@ -11,7 +11,7 @@ use crate::style::computed::{
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
-use crate::style::value::{BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
+use crate::style::value::{presentational_hints, BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
 use crate::style::{parser, ComputedStyle, Stylesheet};
 use crate::surface::Color;
 
@@ -81,7 +81,14 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                 }
                 Node::Element(el) => {
                     let info = ElementInfo::from_element(&el.name, &el.attrs);
-                    let mut decls = fold_matching_declarations(ua, author, &ancestors, &info);
+                    // Vintage HTML presentational attributes (packet/
+                    // presentational-attrs: <font color/size>, bgcolor,
+                    // align=, <body text>) -- computed straight from the
+                    // `Element` already in hand (its attrs aren't part of
+                    // `ElementInfo`) and folded in as their own cascade tier
+                    // below, between the UA sheet and author CSS.
+                    let presentational = presentational_hints(el.name.as_str(), &el.attrs);
+                    let mut decls = fold_matching_declarations(ua, author, &ancestors, &info, &presentational);
                     // Inline `style="..."` is the highest-precedence CSS
                     // origin (beats both UA and every author sheet
                     // regardless of specificity) — folded in last so it
@@ -110,29 +117,48 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
     }
 }
 
-/// Merge every UA + author rule that matches this element and fold their
-/// declarations onto one accumulator, in cascade precedence order: sorted
-/// globally by `(origin, specificity, source order)`, applied low-to-high so
-/// the highest-precedence match's fields win (`Declarations::overlay`).
+/// Merge every UA + presentational-hint + author rule that matches this
+/// element and fold their declarations onto one accumulator, in cascade
+/// precedence order: sorted globally by `(tier, specificity, source order)`,
+/// applied low-to-high so the highest-precedence match's fields win
+/// (`Declarations::overlay`).
 ///
-/// Author sheets always outrank the UA sheet regardless of specificity (real
-/// CSS origin ordering — we don't support `!important`, so normal-weight
-/// author always beats normal-weight UA). *Within* the author origin, every
-/// matching rule from *every* author sheet is compared by specificity
-/// together, with sheet index (then in-sheet source order) only breaking
-/// exact specificity ties — a later sheet must not automatically beat an
-/// earlier one on lower specificity (that was the bug: folding one sheet at
-/// a time made specificity only work within a single sheet).
-fn fold_matching_declarations(ua: &Stylesheet, author: &[Stylesheet], ancestors: &[ElementInfo], info: &ElementInfo) -> Declarations {
-    // (is_author_origin, specificity, sheet_index, in-sheet source order, declarations)
-    let mut candidates: Vec<(bool, Specificity, usize, u32, &Declarations)> = Vec::new();
+/// Three tiers, lowest to highest precedence (packet/presentational-attrs
+/// added the middle one): `0` UA sheet, `1` this element's presentational
+/// hints (`value::presentational_hints` -- `<font color>`, `bgcolor`, etc.),
+/// `2` author `<style>`/linked sheets. We don't support `!important`, so
+/// within a tier only specificity (then sheet index, then in-sheet source
+/// order) breaks ties -- exactly as before this packet, just with the old
+/// `is_author: bool` widened to a `u8` so a middle tier could slot in
+/// without disturbing UA-vs-author precedence at all (`0 < 2` still holds
+/// exactly like `false < true` did). The presentational-hint tier is a
+/// single bundle per element rather than a set of matched selector rules, so
+/// its specificity is irrelevant (nothing else shares its tier to break a
+/// tie against) -- pushed with `Specificity::default()`.
+///
+/// *Within* the author tier, every matching rule from *every* author sheet is
+/// compared by specificity together, with sheet index (then in-sheet source
+/// order) only breaking exact specificity ties — a later sheet must not
+/// automatically beat an earlier one on lower specificity (that was the bug:
+/// folding one sheet at a time made specificity only work within a single
+/// sheet).
+fn fold_matching_declarations(
+    ua: &Stylesheet,
+    author: &[Stylesheet],
+    ancestors: &[ElementInfo],
+    info: &ElementInfo,
+    presentational: &Declarations,
+) -> Declarations {
+    // (tier, specificity, sheet_index, in-sheet source order, declarations)
+    let mut candidates: Vec<(u8, Specificity, usize, u32, &Declarations)> = Vec::new();
 
     for r in parser::matching_rules(ua, ancestors, info) {
-        candidates.push((false, r.selector.specificity(), 0, r.order, &r.declarations));
+        candidates.push((0, r.selector.specificity(), 0, r.order, &r.declarations));
     }
+    candidates.push((1, Specificity::default(), 0, 0, presentational));
     for (sheet_index, sheet) in author.iter().enumerate() {
         for r in parser::matching_rules(sheet, ancestors, info) {
-            candidates.push((true, r.selector.specificity(), sheet_index, r.order, &r.declarations));
+            candidates.push((2, r.selector.specificity(), sheet_index, r.order, &r.declarations));
         }
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
@@ -776,11 +802,15 @@ mod tests {
 
     #[test]
     fn bgcolor_variants_agree_and_do_not_inherit() {
-        for val in ["#ffcc00", "ffcc00", "yellow"] {
+        for (val, expect) in [
+            ("#ffcc00", Color::rgb(0xff, 0xcc, 0x00)),
+            ("ffcc00", Color::rgb(0xff, 0xcc, 0x00)),
+            ("yellow", Color::rgb(255, 255, 0)),
+        ] {
             let html = format!(r#"<div bgcolor="{val}"><span>x</span></div>"#);
             let d = dom::parser::parse(&html);
             let styles = cascade(&d, &[]);
-            assert_eq!(styles[find(&d, "div")].background_color, Color::rgb(0xff, 0xcc, 0x00), "bgcolor={val}");
+            assert_eq!(styles[find(&d, "div")].background_color, expect, "bgcolor={val}");
             assert_eq!(styles[find(&d, "span")].background_color, Color::TRANSPARENT, "bgcolor must not inherit");
         }
     }

@@ -266,6 +266,134 @@ pub(crate) fn parse_color(tokens: &[Token]) -> Option<Color> {
     }
 }
 
+/// Parse an HTML color ATTRIBUTE value (as opposed to a CSS token stream --
+/// `parse_color` above): `#rgb`/`#rrggbb`, the same hex WITHOUT a leading
+/// `#` (vintage markup writes `bgcolor="FF0000"` freely), or a CSS named
+/// color, tried in that order. Total: anything else (garbage, empty, a
+/// partial hex run) simply fails to parse and the caller ignores the whole
+/// attribute (charter C2 -- unknown/unhandled input is ignored, never
+/// guessed at), never panics.
+fn parse_html_color(s: &str) -> Option<Color> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let hex_candidate = s.strip_prefix('#').unwrap_or(s);
+    hex_color(hex_candidate).or_else(|| named_color(s))
+}
+
+/// The HTML4 `<font size>` scale (curated dialect: absolute values `1..=7`,
+/// `3` the default) -- `resolve_font_size_attr` below maps an already-
+/// resolved size 1..=7 to its pixel value; index 7 (and anything the caller
+/// already clamped above it) falls through to the top of the scale.
+fn html_font_size_scale_px(size: i32) -> f32 {
+    match size {
+        1 => 10.0,
+        2 => 13.0,
+        3 => 16.0,
+        4 => 18.0,
+        5 => 24.0,
+        6 => 32.0,
+        _ => 48.0, // 7, and anything clamped to it
+    }
+}
+
+/// Parse a `<font size="...">` attribute value into a resolved pixel size,
+/// per the HTML4 font-size scale (brief: packet/presentational-attrs).
+/// Absolute values (`"1"`..`"7"`, no leading sign) map directly and OUT-OF-
+/// RANGE absolute values are ignored outright (no clamping) -- `"0"`/`"8"`
+/// are simply invalid, not "meant" 1 or 7. A leading `"+"`/`"-"` makes the
+/// value RELATIVE: N steps from the default size 3, clamped into `[1, 7]`
+/// before mapping (real HTML: relative sizes always resolve to something,
+/// they just saturate at the scale's ends). Total: any non-digit run after
+/// an optional sign (or no digits at all) fails to parse and the whole
+/// attribute is ignored -- never panics.
+fn font_size_attr_px(raw: &str) -> Option<f32> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (sign, digits): (i32, &str) = if let Some(rest) = s.strip_prefix('+') {
+        (1, rest)
+    } else if let Some(rest) = s.strip_prefix('-') {
+        (-1, rest)
+    } else {
+        (0, s)
+    };
+    // Digits only from here -- rejects garbage like "3.5", "++1" (the
+    // remainder after one stripped sign still starts with a sign), or a
+    // bare "+"/"-" with nothing after it, rather than letting `i32::parse`
+    // itself tolerate a second leading sign it otherwise would.
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: i32 = digits.parse().ok()?;
+    if sign == 0 {
+        // Absolute: exactly 1..=7, no clamping -- "0"/"8" are invalid, not
+        // "meant" 1 or 7.
+        (1..=7).contains(&n).then(|| html_font_size_scale_px(n))
+    } else {
+        // Relative: N steps from the default size 3, saturating into [1, 7].
+        let size = (3 + sign * n).clamp(1, 7);
+        Some(html_font_size_scale_px(size))
+    }
+}
+
+/// The presentational-hint cascade tier (packet/presentational-attrs): the
+/// vintage HTML presentational attributes a given element carries, folded
+/// into `Declarations` exactly the way a matched CSS rule would be. The
+/// cascade (`cascade::fold_matching_declarations`) slots this in as its own
+/// tier -- above the UA sheet, below author CSS and inline `style=` -- so
+/// these participate in real inheritance and can be overridden by author
+/// CSS, unlike a post-cascade `ComputedStyle` mutation.
+///
+/// Curated to the handful vintage markup actually leans on (brief): `bgcolor`
+/// on ANY element, `<font color>`/`<font size>`, `align=` on any element
+/// EXCEPT `<img>` (whose `align` stays a float hint -- see
+/// `layout::box_tree::apply_align_float_hint`, deliberately left untouched by
+/// this packet), and `<body text>`. Everything else (and any element/
+/// attribute combo not listed above) yields an empty `Declarations` --
+/// including unparseable attribute values, which are silently ignored rather
+/// than guessed at. DEFERRED (not implemented; follow-up packets): `<body
+/// link/vlink/alink>`, `<table border>`, `cellpadding`/`cellspacing`, `<td
+/// width/height/valign/nowrap>`, `<font face>`.
+pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
+    let mut d = Declarations::default();
+
+    if let Some(bg) = attrs.get("bgcolor") {
+        d.background_color = parse_html_color(bg);
+    }
+
+    if tag.eq_ignore_ascii_case("font") {
+        if let Some(color) = attrs.get("color") {
+            d.color = parse_html_color(color);
+        }
+        if let Some(size) = attrs.get("size") {
+            d.font_size = font_size_attr_px(size).map(RawLength::Px);
+        }
+    }
+
+    if tag.eq_ignore_ascii_case("body") {
+        if let Some(text) = attrs.get("text") {
+            d.color = parse_html_color(text);
+        }
+    }
+
+    if !tag.eq_ignore_ascii_case("img") {
+        if let Some(align) = attrs.get("align") {
+            d.text_align = match align.trim().to_ascii_lowercase().as_str() {
+                "left" => Some(TextAlign::Left),
+                "right" => Some(TextAlign::Right),
+                "center" => Some(TextAlign::Center),
+                "justify" => Some(TextAlign::Justify),
+                _ => None, // top/middle/bottom/unknown: vertical-align territory, not this packet's scope.
+            };
+        }
+    }
+
+    d
+}
+
 /// Extract just the color component of a `background` shorthand value
 /// (image/position/repeat/size are curated-out for now — image is a later
 /// packet's scope, brief §4). Scans left to right for the first token that
