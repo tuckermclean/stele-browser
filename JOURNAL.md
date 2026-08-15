@@ -426,6 +426,30 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-15 — CORRECT-5 · <table cellpadding/cellspacing> (border-spacing freeze amendment)
+
+- **Gap:** `cellpadding` and `cellspacing` did nothing.
+- **cellspacing → border-spacing (freeze amendment):** `ComputedStyle` gains
+  `border_spacing_x/y: f32` (defaults 8.0/0.0 — EXACTLY the old
+  `block::BORDER_SPACING_X/Y` constants, so no table golden shifts). CSS
+  `border-spacing: <len> <len>?` parses; `cellspacing="N"` → both axes. The
+  solver already honored `border_spacing_x/y`; `block.rs` now feeds them from
+  the table's own style instead of the constants.
+- **cellpadding → padding:** `apply_table_cellpadding_attribute`/`stamp_cell_padding`
+  in box_tree mirror the `<table border>` stamp (DEPTH_CAP-bounded, stops at
+  nested tables, author padding wins). NO measure/emit change was needed — taffy
+  border-box sizing + the universal `base_style` padding mapping already thread a
+  cell's padding through `cell_min_max_width`/`cell_content_layout`/`emit` (the
+  subagent verified this empirically). Non-inherited border-spacing (only a
+  table's own value is ever read). No unsafe. 646 tests green; no pre-existing
+  golden changed. Golden `table-spacing.png` (orchestrator-viewed): text inset by
+  6px padding, 4px gaps between cells. See D49.
+- **Note (→ next packet):** the visible cell gaps + doubled borders are the CSS
+  `separate` model (correct here — explicit cellspacing=4). `border-collapse:
+  collapse` (merged single grid lines) is the next packet; the default 8px
+  border-spacing is also oversized (tty constant leaking into pixels) and will be
+  addressed there.
+
 ## 2026-08-15 — CORRECT-4 · <table border=N> draws ruled tables
 
 - **Gap:** `<table border="1">` (vintage ruled tables) did nothing.

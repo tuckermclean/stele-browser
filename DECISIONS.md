@@ -19,6 +19,21 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Layout — Table cellpadding/cellspacing
+
+### D49 — cellspacing is a border-spacing freeze amendment; cellpadding rides padding
+`ComputedStyle` gains `border_spacing_x/y` (freeze amendment; defaults 8.0/0.0 =
+the old `block::BORDER_SPACING_X/Y` constants, so existing tables are
+byte-identical). CSS `border-spacing` + the `cellspacing` attr feed it; the table
+solver (which already supported spacing) reads it off the table's own style.
+`cellpadding` stamps `padding` onto cells in box_tree (mirroring the `<table
+border>` stamp; author CSS wins; stops at nested tables) — no cell measure/emit
+change needed because taffy border-box + the universal padding mapping already
+honor a cell's padding. border-spacing resolved non-inherited (only a table's own
+value is consulted). **Open (D50-to-be):** `border-collapse: collapse` for merged
+grid lines, and the oversized 8px default border-spacing (a tty-cell constant
+bleeding into the pixel backend; real HTML default is 2px).
+
 ## Rendering — <table border>
 
 ### D48 — <table border=N> stamps table + cell borders in box_tree
