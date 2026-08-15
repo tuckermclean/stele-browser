@@ -28,6 +28,7 @@ use stele::style::cascade;
 const BASIC_HTML: &str = include_str!("../fixtures/basic.html");
 const TABLES_HTML: &str = include_str!("../fixtures/tables.html");
 const FORMS_HTML: &str = include_str!("../fixtures/forms.html");
+const TEXT_ALIGN_HTML: &str = include_str!("../fixtures/text-align.html");
 const COLS: usize = 80;
 
 fn dump(html: &str, cols: usize) -> String {
@@ -63,6 +64,21 @@ fn forms_fixture_tty_dump_matches_golden() {
     let actual = dump(FORMS_HTML, COLS);
     let golden = include_str!("../goldens/forms.tty.txt");
     assert_eq!(actual, golden.trim_end_matches('\n'), "tty dump of fixtures/forms.html changed from the PROPOSED golden");
+}
+
+#[test]
+fn text_align_fixture_tty_dump_matches_golden() {
+    // PROPOSED golden (same discipline as the others in this file): `<center>`
+    // and `text-align: right` (packet `text-align`) were previously ignored
+    // entirely (every line flush-left) -- this fixture/golden pair is the
+    // first assertion that centered/right-aligned lines actually shift.
+    let actual = dump(TEXT_ALIGN_HTML, COLS);
+    let golden = include_str!("../goldens/text-align.txt");
+    assert_eq!(
+        actual,
+        golden.trim_end_matches('\n'),
+        "tty dump of fixtures/text-align.html changed from the PROPOSED golden"
+    );
 }
 
 #[test]

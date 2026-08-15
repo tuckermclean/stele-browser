@@ -426,6 +426,27 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-15 — CORRECT-1 · text-align: center/right now honored (+ <center>)
+
+- **Gap:** `text-align` was parsed + inherited in `ComputedStyle` but the inline
+  engine ignored it (module doc: "not attempted here") — every line rendered
+  left-aligned. And the UA sheet gave `<center>` only `display:block`, no
+  centering. So vintage centered headers/nav (68k.news' title + section bar)
+  rendered flush-left.
+- **Fix:** UA `center { text-align: center; }` (inherits to descendants).
+  `inline.rs` gains `align_offset`/`apply_line_align`: `text_align` is threaded
+  from the containing block through `layout_runs`, and at each line-close
+  (`<br>`, wrap, final flush) the line's runs shift right by
+  `Center => (avail-width)/2`, `Right => avail-width`, clamped ≥ 0, STACKED on
+  top of any float-exclusion offset. `max_width`/content-width reporting
+  untouched → shrink-to-fit + flex sizing unaffected; left-aligned output is
+  byte-identical. Justify treated as Left (v0). No frozen type; no unsafe.
+- **Rebless:** `goldens/flex-polite.png` — that fixture's own
+  `footer { text-align:center }` was previously silently ignored; the footer now
+  centers correctly (verified footer-only: 798/457600 px in an 8-row band, all
+  other content pixel-identical; orchestrator viewed old vs new). Golden
+  `text-align.txt` added. 598 tests green. See D45.
+
 ## 2026-08-14 — UI-9 · fix: block content inside an inline wrapper collapsed to one line (68k.news)
 
 - **Bug (user-reported, http://68k.news/):** every news list is

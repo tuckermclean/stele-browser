@@ -1,0 +1,7 @@
+
+                                Centered heading
+
+                                                                  Right aligned
+
+
+ Left as usual
