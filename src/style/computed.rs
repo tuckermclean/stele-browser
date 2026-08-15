@@ -357,5 +357,9 @@ mod tests {
         // (8.0/0.0), so no existing table's rendering shifts.
         assert_eq!(s.border_spacing_x, 8.0);
         assert_eq!(s.border_spacing_y, 0.0);
+        // packet/border-collapse freeze amendment: default MUST be
+        // `Separate` (CSS's own initial value), so no existing table's
+        // rendering shifts.
+        assert_eq!(s.border_collapse, BorderCollapse::Separate);
     }
 }

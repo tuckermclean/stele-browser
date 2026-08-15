@@ -1786,6 +1786,122 @@ mod tests {
         assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
     }
 
+    // ------------------------------------------------------------------
+    // `border-collapse: collapse` dedup (packet/border-collapse): mirrors
+    // the `<table border="N">`/`cellpadding` sections above -- same post-
+    // cascade, DEPTH_CAP-bounded, stop-at-nested-table walk, applied AFTER
+    // the border/cellpadding stamps.
+    // ------------------------------------------------------------------
+
+    fn assert_border_side(side: &BorderSide, style: BorderStyle, name: &str) {
+        assert_eq!(side.style, style, "{name} border style");
+    }
+
+    #[test]
+    fn table_border_attribute_collapses_to_top_left_only_cell_borders() {
+        // `<table border="1">` (no cellspacing) resolves to
+        // `border-collapse: collapse` (the presentational hint) -- so the
+        // box-tree builder's dedup step should keep only each cell's top and
+        // left border, zero its right and bottom, while the TABLE box itself
+        // keeps all four sides solid.
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_eq!(tables.len(), 1);
+        assert_border_all(&tables[0].style.border, 1.0);
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected two td boxes");
+        for cell in cells {
+            assert_border_side(&cell.style.border.top, BorderStyle::Solid, "top");
+            assert_border_side(&cell.style.border.left, BorderStyle::Solid, "left");
+            assert_border_side(&cell.style.border.right, BorderStyle::None, "right");
+            assert_border_side(&cell.style.border.bottom, BorderStyle::None, "bottom");
+        }
+    }
+
+    #[test]
+    fn table_border_with_cellspacing_stays_separate_all_four_cell_sides_solid() {
+        // `<table border="1" cellspacing="4">` stays `separate` (the
+        // presentational hint only fires with no `cellspacing`) -- the dedup
+        // step must not run at all, so every cell keeps all four solid
+        // sides, exactly like before this packet.
+        let d = dom::parser::parse(r#"<table border="1" cellspacing="4"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_border_all(&cell.style.border, 1.0);
+        }
+    }
+
+    #[test]
+    fn author_css_border_collapse_dedups_author_bordered_cells() {
+        // Author-CSS collapse: `table { border-collapse: collapse }` + `td {
+        // border: 1px solid #000 }` -- the dedup step operates on the
+        // CASCADED cell border regardless of whether it came from the
+        // presentational stamp or real author CSS.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td><td>b</td></tr></table>"#);
+        let sheet = parser::parse("table { border-collapse: collapse; } td { border: 1px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_border_side(&cell.style.border.top, BorderStyle::Solid, "top");
+            assert_border_side(&cell.style.border.left, BorderStyle::Solid, "left");
+            assert_border_side(&cell.style.border.right, BorderStyle::None, "right");
+            assert_border_side(&cell.style.border.bottom, BorderStyle::None, "bottom");
+        }
+    }
+
+    #[test]
+    fn separate_mode_table_border_unchanged_no_dedup() {
+        // Belt-and-suspenders: a table that never opts into collapse (no
+        // `border-collapse` anywhere, no `<table border>`) keeps every
+        // cell's border exactly as cascaded -- this packet must not touch
+        // `Separate` tables at all.
+        let d = dom::parser::parse(r#"<table><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("td { border: 2px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_border_all_colored(&cells[0].style.border, 2.0, Color::rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn table_border_collapse_nested_table_dedup_is_independent() {
+        // Same nested-table independence as `stamp_cell_borders`'s own test:
+        // the outer table's collapse must not reach into an inner table
+        // that stays separate (has its own `cellspacing`).
+        let d = dom::parser::parse(
+            r#"<table border="1"><tr><td><table border="1" cellspacing="4"><tr><td>inner</td></tr></table></td></tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected outer td + inner td");
+        // Pre-order: outer td (collapsed) first, inner td (separate) second.
+        assert_border_side(&cells[0].style.border.right, BorderStyle::None, "outer td right (collapsed)");
+        assert_border_side(&cells[0].style.border.bottom, BorderStyle::None, "outer td bottom (collapsed)");
+        assert_border_all(&cells[1].style.border, 1.0); // inner td: separate, all four sides solid
+        assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
+    }
+
     #[test]
     fn display_none_root_yields_none() {
         let d = dom::parser::parse("<html><body>x</body></html>");

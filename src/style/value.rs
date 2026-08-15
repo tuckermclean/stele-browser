@@ -1311,6 +1311,26 @@ mod tests {
         }
     }
 
+    // ---- packet/border-collapse: `border-collapse` property ----
+
+    #[test]
+    fn border_collapse_property_parses_collapse_and_separate() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-collapse", &toks("collapse"), &mut d));
+        assert_eq!(d.border_collapse, Some(BorderCollapse::Collapse));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("border-collapse", &toks("separate"), &mut d));
+        assert_eq!(d.border_collapse, Some(BorderCollapse::Separate));
+    }
+
+    #[test]
+    fn border_collapse_unknown_value_is_not_applied() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("border-collapse", &toks("bogus"), &mut d));
+        assert_eq!(d.border_collapse, None);
+    }
+
     #[test]
     fn unknown_property_is_not_applied() {
         let mut d = Declarations::default();
@@ -1719,5 +1739,31 @@ mod tests {
             assert_eq!(d.border_spacing_x, None, "cellspacing={v:?}");
             assert_eq!(d.border_spacing_y, None, "cellspacing={v:?}");
         }
+    }
+
+    // ---- packet/border-collapse: `<table border>` -> border-collapse hint ---
+
+    #[test]
+    fn table_border_with_no_cellspacing_sets_collapse_hint() {
+        let d = presentational_hints("table", &attrs(&[("border", "1")]));
+        assert_eq!(d.border_collapse, Some(BorderCollapse::Collapse));
+    }
+
+    #[test]
+    fn table_border_with_cellspacing_does_not_set_collapse_hint() {
+        let d = presentational_hints("table", &attrs(&[("border", "1"), ("cellspacing", "4")]));
+        assert_eq!(d.border_collapse, None);
+    }
+
+    #[test]
+    fn table_with_no_border_attribute_does_not_set_collapse_hint() {
+        let d = presentational_hints("table", &attrs(&[]));
+        assert_eq!(d.border_collapse, None);
+    }
+
+    #[test]
+    fn border_collapse_hint_only_applies_to_table_elements() {
+        let d = presentational_hints("div", &attrs(&[("border", "1")]));
+        assert_eq!(d.border_collapse, None);
     }
 }

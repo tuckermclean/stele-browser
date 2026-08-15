@@ -8,7 +8,7 @@
 //! point of the assertion.
 
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
-use stele::style::computed::{Display, Edges, LengthPercentage};
+use stele::style::computed::{BorderCollapse, Display, Edges, LengthPercentage};
 use stele::style::ComputedStyle;
 
 fn styled(display: Display) -> ComputedStyle {
@@ -391,6 +391,65 @@ fn table_with_default_style_still_uses_8px_border_spacing() {
     let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
     let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
     assert!((gap - 8.0).abs() < 0.5, "gap {gap} should stay the pre-existing 8px default");
+}
+
+// ---- packet/border-collapse: collapsed tables feed spacing 0 -------------
+
+fn table_with_spacing_and_collapse(
+    spacing_x: f32,
+    spacing_y: f32,
+    collapse: BorderCollapse,
+    children: Vec<LayoutNode>,
+) -> LayoutNode {
+    let mut style = styled(Display::Table);
+    style.border_spacing_x = spacing_x;
+    style.border_spacing_y = spacing_y;
+    style.border_collapse = collapse;
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+}
+
+/// A collapsed table ignores its own `border_spacing_x` entirely (CSS
+/// `border-collapse: collapse` spec behavior) -- even though this table's
+/// style sets a nonzero 20px `border_spacing_x` (same value
+/// `table_border_spacing_style_controls_the_gap_between_columns` above
+/// proves DOES produce a 20px gap for a `Separate` table), the solved gap
+/// between its two adjacent column boxes must be zero: cells sit flush
+/// against each other, no inter-cell gap at all.
+#[test]
+fn collapsed_table_ignores_border_spacing_cells_are_adjacent() {
+    let t = root_with(table_with_spacing_and_collapse(
+        20.0,
+        0.0,
+        BorderCollapse::Collapse,
+        vec![row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")])],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    assert_all_finite_nonneg(&fragments);
+    let boxes = box_fragments(&fragments);
+    let col0 = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
+    assert!((gap - 0.0).abs() < 0.5, "collapsed table should feed 0 border-spacing to the solver, got gap {gap}");
+}
+
+/// The flip side: the SAME style (20px `border_spacing_x`) with
+/// `border_collapse` left `Separate` still produces the 20px gap -- proves
+/// the zeroing above is specifically gated on `Collapse`, not some blanket
+/// regression.
+#[test]
+fn separate_table_with_same_spacing_style_still_shows_the_gap() {
+    let t = root_with(table_with_spacing_and_collapse(
+        20.0,
+        0.0,
+        BorderCollapse::Separate,
+        vec![row(vec![cell(1, 1, "aaaaaaaaaa"), cell(1, 1, "b")])],
+    ));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    let boxes = box_fragments(&fragments);
+    let col0 = *boxes.iter().find(|bx| (bx.rect.size.w - 80.0).abs() < 0.5).expect("col0 (80px) box present");
+    let col1 = *boxes.iter().find(|bx| (bx.rect.size.w - 8.0).abs() < 0.5).expect("col1 (8px) box present");
+    let gap = col1.rect.origin.x - (col0.rect.origin.x + col0.rect.size.w);
+    assert!((gap - 20.0).abs() < 0.5, "separate table should still show its own 20px border_spacing_x, got gap {gap}");
 }
 
 /// A single-cell, single-column table (no border-spacing gaps in play at
