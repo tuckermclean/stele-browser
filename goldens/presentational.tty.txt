@@ -1,0 +1,8 @@
+
+             Big purple centered heading
+
+
+ Paragraph on a pale-yellow background.
+
+
+                                                        Right-aligned red text.
