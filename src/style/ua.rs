@@ -39,6 +39,12 @@ thead, tbody, tfoot { display: table-row-group; }
 body { margin: 8px; }
 p { margin: 1em 0; }
 
+/* `<center>` (packet `text-align`): the presentational HTML element that
+   centers its content -- `text-align` is an inherited property (cascade.rs),
+   so this one rule on `center` itself is enough for descendant blocks/inline
+   content to center too, without repeating it per descendant. */
+center { text-align: center; }
+
 h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0; }
 h2 { font-size: 1.5em; font-weight: bold; margin: 0.75em 0; }
 h3 { font-size: 1.17em; font-weight: bold; margin: 0.83em 0; }

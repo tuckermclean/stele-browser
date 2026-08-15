@@ -6,9 +6,14 @@
 //! align=left` shape) at the containing block's edge with an exclusion that
 //! shortens overlapping line boxes so text wraps around it.
 //!
-//! Out of scope even after M4: text-align other than the default left flow
-//! (justify/center/right are a paint-time nicety, not attempted here),
-//! bidi/complex shaping (the `Metrics` seam is shaping-free by design),
+//! `text-align: center`/`right` (packet `text-align`) shift each completed
+//! line's fragments within that line's own float-aware available width —
+//! see [`layout_runs`]'s `text_align` parameter and `align_offset`.
+//! `justify` is treated as `left` (no inter-word stretching) — a documented
+//! v0 simplification; no fixture needs true justification.
+//!
+//! Out of scope even after that: bidi/complex shaping (the `Metrics` seam is
+//! shaping-free by design),
 //! cross-block float continuation (a float that outlives its own containing
 //! block's inline formatting context — M4 scope is "the float and the
 //! wrapping text share one IFC", the classic `<p><img align=left>text...
@@ -49,7 +54,7 @@ use std::rc::Rc;
 
 use crate::img::RgbaImage;
 use crate::layout::{Point, Rect, Size};
-use crate::style::computed::{Float as CssFloat, LineHeight};
+use crate::style::computed::{Float as CssFloat, LineHeight, TextAlign};
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
 
@@ -505,6 +510,42 @@ fn line_exclusion(y: f32, floats: &[PositionedFloat], available_width: f32) -> (
     (left, avail)
 }
 
+/// The rightward shift (never negative) a completed line's fragments need
+/// so the line reads as `text_align` says, within that line's own
+/// float-aware available width `avail` (see [`line_exclusion`]) given the
+/// line's used inline content width `content` (`cur_x` at the point the
+/// line is closed — NOT `avail`, so a line narrower than `avail` centers/
+/// right-aligns within the real available space, matching real UAs).
+/// `Left`/`Justify` never shift (v0 treats `Justify` as `Left` — see the
+/// module doc comment). A line wider than `avail` (the unbreakable-word
+/// overflow case `layout_runs` already documents as total) would make the
+/// raw `Center`/`Right` offset negative — clamped to `0.0` so an overflowing
+/// line stays flush at its ordinary left base rather than being shoved
+/// further left/off-line by a negative shift. Both inputs arrive already
+/// finite/non-negative (`avail` from [`line_exclusion`], `content` from
+/// [`clamp_dim`]-derived word widths), so no NaN/inf seam here.
+fn align_offset(_text_align: TextAlign, _avail: f32, _content: f32) -> f32 {
+    // RED-state stub: not yet implemented.
+    0.0
+}
+
+/// Shift every fragment already accumulated for the line about to close by
+/// `align_offset(text_align, avail, content)` — added to each
+/// [`PositionedRun::x`], which is relative to the line box's own left edge
+/// ([`LineBox::rect`]'s `origin.x`, itself the float-exclusion base from
+/// [`line_exclusion`]): the alignment shift stacks on top of that base
+/// rather than replacing it. A no-op (skips the loop) when the offset is
+/// exactly `0.0` — the overwhelmingly common `Left` case — so left-aligned
+/// output is byte-identical to before this shift existed.
+fn apply_line_align(positioned: &mut [PositionedRun], text_align: TextAlign, avail: f32, content: f32) {
+    let offset = align_offset(text_align, avail, content);
+    if offset > 0.0 {
+        for r in positioned.iter_mut() {
+            r.x += offset;
+        }
+    }
+}
+
 /// Break `runs` into lines that fit within `available_width` — placing any
 /// floated replaced atoms first (see [`place_floats`]) and shortening every
 /// line whose vertical span overlaps one (see [`line_exclusion`]) so text
@@ -526,7 +567,12 @@ fn line_exclusion(y: f32, floats: &[PositionedFloat], available_width: f32) -> (
 /// "floats with no following text" totality case) — the returned `size`
 /// reflects their footprint so the containing block still reserves room for
 /// them.
-pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics: &M) -> InlineLayout {
+pub fn layout_runs<M: Metrics>(
+    runs: &[InlineRun],
+    available_width: f32,
+    text_align: TextAlign,
+    metrics: &M,
+) -> InlineLayout {
     let available_width = if available_width.is_finite() && available_width > 0.0 { available_width } else { 0.0 };
 
     let float_specs = collect_float_specs(runs);
@@ -591,6 +637,7 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
                     let baseline = ascent + (line_height - (ascent + descent)) / 2.0;
                     (line_height, baseline)
                 };
+                apply_line_align(&mut cur_positioned, text_align, line_avail_width, cur_x);
                 lines.push(LineBox {
                     rect: Rect { origin: Point { x: line_offset_x, y }, size: Size { w: cur_x, h: line_height } },
                     baseline,
@@ -621,6 +668,7 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
             max_width = max_width.max(line_offset_x + cur_x);
             let line_height = max_line_height.max(max_ascent + max_descent);
             let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
+            apply_line_align(&mut cur_positioned, text_align, line_avail_width, cur_x);
             lines.push(LineBox {
                 rect: Rect { origin: Point { x: line_offset_x, y }, size: Size { w: cur_x, h: line_height } },
                 baseline,
@@ -693,6 +741,7 @@ pub fn layout_runs<M: Metrics>(runs: &[InlineRun], available_width: f32, metrics
         max_width = max_width.max(line_offset_x + cur_x);
         let line_height = max_line_height.max(max_ascent + max_descent);
         let baseline = max_ascent + (line_height - (max_ascent + max_descent)) / 2.0;
+        apply_line_align(&mut cur_positioned, text_align, line_avail_width, cur_x);
         lines.push(LineBox {
             rect: Rect { origin: Point { x: line_offset_x, y }, size: Size { w: cur_x, h: line_height } },
             baseline,
@@ -761,7 +810,7 @@ mod tests {
 
     #[test]
     fn empty_runs_produce_zero_lines() {
-        let out = layout_runs::<FixedMetrics>(&[], 1000.0, &FixedMetrics);
+        let out = layout_runs::<FixedMetrics>(&[], 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 0);
         assert_eq!(out.size, Size { w: 0.0, h: 0.0 });
     }
@@ -769,7 +818,7 @@ mod tests {
     #[test]
     fn whitespace_only_run_produces_zero_lines() {
         let runs = [run("   \t\n  ")];
-        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 0);
     }
 
@@ -777,7 +826,7 @@ mod tests {
     fn single_line_fits() {
         // "ab cd" -> 5 chars * 10px = 50px, well within 1000px.
         let runs = [run("ab cd")];
-        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         let line = &out.lines[0];
         assert_eq!(line.runs.len(), 1);
@@ -798,7 +847,7 @@ mod tests {
         // 45, wraps. Line 1: "aa". Line 2 starts with "bb"; "bb cc" = 20+10+
         // 20=50 > 45 too, so line 2: "bb", line 3: "cc".
         let runs = [run("aa bb cc")];
-        let out = layout_runs(&runs, 45.0, &FixedMetrics);
+        let out = layout_runs(&runs, 45.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 3);
         assert_eq!(out.lines[0].runs[0].text, "aa");
         assert_eq!(out.lines[1].runs[0].text, "bb");
@@ -813,7 +862,7 @@ mod tests {
         // Four words of 2 chars each = 20px, available width 50px fits
         // exactly two words + one space (20+10+20=50) per line.
         let runs = [run("aa bb cc dd")];
-        let out = layout_runs(&runs, 50.0, &FixedMetrics);
+        let out = layout_runs(&runs, 50.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 2);
 
         let l0 = &out.lines[0];
@@ -839,7 +888,7 @@ mod tests {
         // A single "word" of 20 chars (200px) with only 30px available: it
         // must not split, and must not panic — it just overflows its line.
         let runs = [run("aaaaaaaaaaaaaaaaaaaa")];
-        let out = layout_runs(&runs, 30.0, &FixedMetrics);
+        let out = layout_runs(&runs, 30.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].runs[0].text, "aaaaaaaaaaaaaaaaaaaa");
         assert_eq!(out.lines[0].runs[0].width, 200.0);
@@ -849,7 +898,7 @@ mod tests {
     #[test]
     fn overlong_word_among_others_gets_its_own_line() {
         let runs = [run("hi aaaaaaaaaaaaaaaaaaaa bye")];
-        let out = layout_runs(&runs, 30.0, &FixedMetrics);
+        let out = layout_runs(&runs, 30.0, TextAlign::Left, &FixedMetrics);
         // "hi" alone (20px), long word alone (200px), "bye" alone (30px).
         assert_eq!(out.lines.len(), 3);
         assert_eq!(out.lines[0].runs[0].text, "hi");
@@ -862,7 +911,7 @@ mod tests {
         // Two source runs sharing one line: "foo" (run 0) then " bar" via a
         // second run " bar" (run 1) — space belongs to run 1's leading text.
         let runs = [run("foo"), run(" bar")];
-        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         let positioned = &out.lines[0].runs;
         assert_eq!(positioned.len(), 2);
@@ -880,7 +929,7 @@ mod tests {
         // unbreakable visual word, must never split across lines even
         // though as separate PositionedRuns.
         let runs = [run("bold"), run("text")];
-        let out = layout_runs(&runs, 70.0, &FixedMetrics); // "boldtext" = 80px > 70px
+        let out = layout_runs(&runs, 70.0, TextAlign::Left, &FixedMetrics); // "boldtext" = 80px > 70px
         assert_eq!(out.lines.len(), 1, "glued word must not split even though it overflows");
         assert_eq!(out.lines[0].runs.len(), 2);
         assert_eq!(out.lines[0].runs[0].text, "bold");
@@ -893,7 +942,7 @@ mod tests {
     fn negative_or_nan_available_width_does_not_panic() {
         for w in [-10.0, f32::NAN, f32::NEG_INFINITY, 0.0] {
             let runs = [run("aa bb cc")];
-            let out = layout_runs(&runs, w, &FixedMetrics);
+            let out = layout_runs(&runs, w, TextAlign::Left, &FixedMetrics);
             // Every word overflows its own (zero-width) line rather than panicking.
             assert_eq!(out.lines.len(), 3);
         }
@@ -902,7 +951,7 @@ mod tests {
     #[test]
     fn explicit_line_height_overrides_metrics() {
         let runs = [run_with("hi", |s| s.line_height = LH::Px(40.0))];
-        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].rect.size.h, 40.0);
         // Half-leading centers the 10px (ascent+descent) glyph box in the
@@ -913,7 +962,7 @@ mod tests {
     #[test]
     fn deeply_nested_many_runs_stays_total() {
         let runs: Vec<InlineRun> = (0..500).map(|i| run(&format!("w{i} "))).collect();
-        let out = layout_runs(&runs, 200.0, &FixedMetrics);
+        let out = layout_runs(&runs, 200.0, TextAlign::Left, &FixedMetrics);
         assert!(!out.lines.is_empty());
         assert!(out.size.h > 0.0);
     }
@@ -927,7 +976,7 @@ mod tests {
         // "hi <atom 15x8> bye" all on one line: "hi"(20) + space(10) +
         // atom(15) + space(10) + "bye"(30) = 85, well within 1000px.
         let runs = [run("hi "), atom(15.0, 8.0), run(" bye")];
-        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         let positioned = &out.lines[0].runs;
         assert_eq!(positioned.len(), 3, "text, atom, text — three positioned runs on one line");
@@ -952,7 +1001,7 @@ mod tests {
         // real inline layout: an image doesn't shrink a shorter neighbor's
         // descent away, it just becomes the line's dominant ascent.
         let runs = [run("hi "), atom(15.0, 50.0)];
-        let out = layout_runs(&runs, 1000.0, &FixedMetrics);
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].baseline, 50.0, "baseline sits at the atom's bottom edge");
         assert_eq!(out.lines[0].rect.size.h, 52.0, "line height = atom ascent(50) + text descent(2)");
@@ -961,7 +1010,7 @@ mod tests {
     #[test]
     fn atom_wider_than_available_width_overflows_its_own_line_not_split() {
         let runs = [atom(500.0, 20.0)];
-        let out = layout_runs(&runs, 30.0, &FixedMetrics);
+        let out = layout_runs(&runs, 30.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].runs[0].width, 500.0);
     }
@@ -970,7 +1019,7 @@ mod tests {
     fn atom_wraps_to_its_own_line_when_it_does_not_fit_after_text() {
         // "aa"(20px) then an atom(15px): together 20+10(space)+15=45 > 40.
         let runs = [run("aa "), atom(15.0, 8.0)];
-        let out = layout_runs(&runs, 40.0, &FixedMetrics);
+        let out = layout_runs(&runs, 40.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 2);
         assert_eq!(out.lines[0].runs[0].text, "aa");
         assert_eq!(out.lines[1].runs[0].run_index, 1);
@@ -981,7 +1030,7 @@ mod tests {
     fn atom_with_nonfinite_or_negative_intrinsic_does_not_panic() {
         for (w, h) in [(f32::NAN, f32::INFINITY), (-5.0, -5.0), (f32::NEG_INFINITY, f32::NAN)] {
             let runs = [atom(w, h)];
-            let out = layout_runs(&runs, 100.0, &FixedMetrics);
+            let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
             assert_eq!(out.lines.len(), 1);
             assert!(out.lines[0].runs[0].width.is_finite());
             assert!(out.size.w.is_finite() && out.size.h.is_finite());
@@ -992,7 +1041,7 @@ mod tests {
     fn glued_word_next_to_atom_with_no_whitespace_stays_together() {
         // No whitespace between "x" and the atom -> unbreakable cluster.
         let runs = [run("x"), atom(60.0, 8.0)];
-        let out = layout_runs(&runs, 50.0, &FixedMetrics); // "x"(10) + atom(60) = 70 > 50
+        let out = layout_runs(&runs, 50.0, TextAlign::Left, &FixedMetrics); // "x"(10) + atom(60) = 70 > 50
         assert_eq!(out.lines.len(), 1, "glued atom+text must not split even though it overflows");
         assert_eq!(out.lines[0].runs.len(), 2);
         assert_eq!(out.lines[0].runs[0].x, 0.0);
@@ -1011,7 +1060,7 @@ mod tests {
         // (30px of height) exactly reach the float's y=30 bottom, so the
         // fourth line starts right at y=30 and must return to full width.
         let runs = [float_atom(40.0, 30.0, CssFloat::Left), run("aa bb cc dd ee ff gg hh")];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.floats.len(), 1);
         assert_eq!(out.floats[0].side, FloatSide::Left);
         assert_eq!(out.floats[0].rect, Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 40.0, h: 30.0 } });
@@ -1035,7 +1084,7 @@ mod tests {
     #[test]
     fn right_float_only_shortens_available_width_not_the_start_x() {
         let runs = [float_atom(40.0, 30.0, CssFloat::Right), run("aa bb cc dd")];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.floats[0].side, FloatSide::Right);
         assert_eq!(out.floats[0].rect.origin.x, 60.0); // 100 - 40
         assert_eq!(out.lines[0].rect.origin.x, 0.0, "a right float never offsets the line's start x");
@@ -1045,7 +1094,7 @@ mod tests {
     #[test]
     fn floats_with_no_following_text_are_still_placed_and_sized() {
         let runs = [float_atom(40.0, 30.0, CssFloat::Left)];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 0, "no text/atoms -> zero lines, per the empty-runs scope call");
         assert_eq!(out.floats.len(), 1, "the float itself must still be placed and returned");
         assert_eq!(out.size, Size { w: 40.0, h: 30.0 }, "size reflects the float's own footprint");
@@ -1061,7 +1110,7 @@ mod tests {
             float_atom(40.0, 50.0, CssFloat::Left),
             float_atom(40.0, 10.0, CssFloat::Left),
         ];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.floats.len(), 3);
         assert_eq!(out.floats[0].rect.origin, Point { x: 0.0, y: 0.0 });
         assert_eq!(out.floats[1].rect.origin, Point { x: 40.0, y: 0.0 });
@@ -1076,7 +1125,7 @@ mod tests {
             float_atom(20.0, 10.0, CssFloat::Left),
             float_atom(20.0, 10.0, CssFloat::Right),
         ];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.floats.len(), 4);
         for f in &out.floats {
             assert!(f.rect.origin.x.is_finite() && f.rect.origin.y.is_finite());
@@ -1086,7 +1135,7 @@ mod tests {
     #[test]
     fn float_wider_than_container_clamps_to_full_width() {
         let runs = [float_atom(500.0, 20.0, CssFloat::Left), run("hi")];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.floats[0].rect.size.w, 100.0, "clamped to the full container width");
         // Text has zero effective width on the overlapping line -> it still
         // gets placed (first-item-on-line overflow rule), not lost.
@@ -1098,7 +1147,7 @@ mod tests {
     fn float_with_nonfinite_or_zero_intrinsic_does_not_panic_or_hang() {
         for (w, h) in [(f32::NAN, f32::INFINITY), (0.0, 0.0), (-1.0, -1.0), (f32::NEG_INFINITY, f32::NAN)] {
             let runs = [float_atom(w, h, CssFloat::Left), run("hi there")];
-            let out = layout_runs(&runs, 100.0, &FixedMetrics);
+            let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
             assert!(out.size.w.is_finite() && out.size.h.is_finite());
             for f in &out.floats {
                 assert!(f.rect.size.w.is_finite() && f.rect.size.h.is_finite());
@@ -1110,7 +1159,7 @@ mod tests {
     fn many_floats_are_bounded_and_do_not_hang() {
         let mut runs: Vec<InlineRun> = (0..2000).map(|_| float_atom(5.0, 5.0, CssFloat::Left)).collect();
         runs.push(run("done"));
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert!(out.floats.len() <= MAX_FLOATS, "float placement must be bounded, not O(input)");
         assert!(out.size.w.is_finite() && out.size.h.is_finite());
     }
@@ -1118,7 +1167,7 @@ mod tests {
     #[test]
     fn clear_with_no_float_does_not_panic() {
         let runs = [run_with("hi", |s| s.clear = crate::style::computed::Clear::Left)];
-        let out = layout_runs(&runs, 100.0, &FixedMetrics);
+        let out = layout_runs(&runs, 100.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].runs[0].text, "hi");
     }
@@ -1134,7 +1183,7 @@ mod tests {
     #[test]
     fn zero_width_container_with_a_float_present_returns_promptly() {
         let runs = [float_atom(10.0, 10.0, CssFloat::Left), run("aa bb cc")];
-        let out = layout_runs(&runs, 0.0, &FixedMetrics);
+        let out = layout_runs(&runs, 0.0, TextAlign::Left, &FixedMetrics);
         // The float itself still gets placed (clamped to the zero-width
         // container per `place_floats`'s own clamp), and every word still
         // lands somewhere (first-item-on-line overflow rule) rather than
@@ -1145,5 +1194,94 @@ mod tests {
         for line in &out.lines {
             assert!(line.rect.size.w.is_finite());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // text-align: center/right (packet `text-align`).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn text_align_center_offsets_the_line_by_half_the_slack() {
+        // "hi there" = "hi"(20) + space(10) + "there"(50) = 80px content in
+        // a 200px available width -> offset = (200-80)/2 = 60.
+        let runs = [run("hi there")];
+        let out = layout_runs(&runs, 200.0, TextAlign::Center, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].runs[0].x, 60.0);
+        assert_eq!(out.lines[0].rect.size.w, 80.0, "reported line content width is unshifted");
+    }
+
+    #[test]
+    fn text_align_right_offsets_the_line_by_the_full_slack() {
+        // Same 80px content in 200px available -> offset = 200-80 = 120.
+        let runs = [run("hi there")];
+        let out = layout_runs(&runs, 200.0, TextAlign::Right, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].runs[0].x, 120.0);
+    }
+
+    #[test]
+    fn text_align_left_is_unchanged_offset_zero() {
+        let runs = [run("hi there")];
+        let out = layout_runs(&runs, 200.0, TextAlign::Left, &FixedMetrics);
+        assert_eq!(out.lines[0].runs[0].x, 0.0);
+    }
+
+    #[test]
+    fn text_align_center_multi_run_shifts_every_fragment_on_the_line() {
+        // Two source runs sharing one line ("foo"(30) + " bar"(40) = 70px
+        // content) in a 100px available width -> offset = (100-70)/2 = 15.
+        let runs = [run("foo"), run(" bar")];
+        let out = layout_runs(&runs, 100.0, TextAlign::Center, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        let positioned = &out.lines[0].runs;
+        assert_eq!(positioned.len(), 2);
+        assert_eq!(positioned[0].x, 15.0, "first fragment shifted by the offset");
+        assert_eq!(positioned[1].x, 45.0, "second fragment keeps its relative spacing, shifted by the same offset");
+    }
+
+    #[test]
+    fn text_align_center_each_wrapped_line_centers_independently() {
+        // Two words of 20px each with a 10px space, available width 50px:
+        // each word lands alone on its own line (20+10+20=50 > wait check
+        // below) -- pick widths so each line has different content width so
+        // the independence is actually observable.
+        // "aaaa"(40) then "bb"(20): "aaaa bb" = 40+10+20=70 > 60, so "aaaa"
+        // alone on line 1 (offset (60-40)/2=10), "bb" alone on line 2
+        // (offset (60-20)/2=20).
+        let runs = [run("aaaa bb")];
+        let out = layout_runs(&runs, 60.0, TextAlign::Center, &FixedMetrics);
+        assert_eq!(out.lines.len(), 2);
+        assert_eq!(out.lines[0].runs[0].text, "aaaa");
+        assert_eq!(out.lines[0].runs[0].x, 10.0);
+        assert_eq!(out.lines[1].runs[0].text, "bb");
+        assert_eq!(out.lines[1].runs[0].x, 20.0);
+    }
+
+    #[test]
+    fn text_align_offset_never_goes_negative_when_line_overflows_avail() {
+        // A single unbreakable 200px word in a 30px available width: the
+        // line overflows avail, so the raw center/right offset would be
+        // negative -- clamped to 0, staying at the ordinary left base.
+        let runs = [run("aaaaaaaaaaaaaaaaaaaa")]; // 20 chars * 10px = 200px
+        for align in [TextAlign::Center, TextAlign::Right] {
+            let out = layout_runs(&runs, 30.0, align, &FixedMetrics);
+            assert_eq!(out.lines.len(), 1);
+            assert_eq!(out.lines[0].runs[0].x, 0.0, "overflowing line never shifts negative");
+        }
+    }
+
+    #[test]
+    fn text_align_center_measures_within_the_float_reduced_available_width() {
+        // A 40x30 left float in a 100px container leaves 60px avail for the
+        // first line. "aa bb"(20+10+20=50px content) centered in that 60px
+        // -> offset = (60-50)/2 = 5, ADDED ON TOP of the float's own 40px
+        // line_offset_x base (per-fragment x is relative to the line box's
+        // own left edge, which already sits at line_offset_x=40).
+        let runs = [float_atom(40.0, 30.0, CssFloat::Left), run("aa bb")];
+        let out = layout_runs(&runs, 100.0, TextAlign::Center, &FixedMetrics);
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].rect.origin.x, 40.0, "float exclusion base unchanged");
+        assert_eq!(out.lines[0].runs[0].x, 5.0, "alignment offset measured within the reduced 60px avail width");
     }
 }

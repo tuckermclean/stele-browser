@@ -51,7 +51,7 @@ use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
     AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto,
-    Dimension as CssDimension,
+    Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -208,7 +208,15 @@ struct TableCacheEntry {
 /// shared `&TaffyTree`) the same interior-mutable access to the cache slot
 /// that `measure_node` (which taffy calls with `&mut NodeCtx`) has.
 enum NodeCtx<'a> {
-    Inline(Vec<InlineRun>),
+    /// `TextAlign` is the containing block's own (already-inherited, per
+    /// `cascade.rs`) value — threaded straight through from the
+    /// `LayoutNode` whose inline-level children this leaf folds together
+    /// (see both `translate_any`'s bare-`Text` arm and
+    /// `translate_container_children`'s grouping loop) so
+    /// `inline::layout_runs` can align each completed line without
+    /// re-deriving it from any individual run's own style (a run's style
+    /// governs its own font/color, not the containing block's alignment).
+    Inline(Vec<InlineRun>, TextAlign),
     Table(&'a LayoutNode, usize, RefCell<Option<TableCacheEntry>>),
 }
 
@@ -217,7 +225,7 @@ enum NodeCtx<'a> {
 /// taffy has computed final layout.
 enum Built<'a> {
     Container { style: &'a ComputedStyle, taffy_id: TNodeId, children: Vec<Built<'a>>, interactive: Option<Interactive> },
-    Inline { taffy_id: TNodeId, runs: Vec<InlineRun> },
+    Inline { taffy_id: TNodeId, runs: Vec<InlineRun>, text_align: TextAlign },
     Replaced {
         style: &'a ComputedStyle,
         taffy_id: TNodeId,
@@ -313,10 +321,11 @@ fn translate_any<'a>(
                 interactive: node.interactive.clone(),
             }];
             let style = base_style(&node.style);
+            let text_align = node.style.text_align;
             let id = taffy
-                .new_leaf_with_context(style, NodeCtx::Inline(runs.clone()))
+                .new_leaf_with_context(style, NodeCtx::Inline(runs.clone(), text_align))
                 .expect("taffy leaf alloc is infallible for a fresh tree");
-            Built::Inline { taffy_id: id, runs }
+            Built::Inline { taffy_id: id, runs, text_align }
         }
         BoxContent::Replaced { intrinsic, image } => {
             let mut style = base_style(&node.style);
@@ -566,10 +575,11 @@ fn translate_container_children<'a>(
                 j += 1;
             }
             let style = TStyle { size: TSize { width: auto(), height: auto() }, ..Default::default() };
+            let text_align = node.style.text_align;
             let id = taffy
-                .new_leaf_with_context(style, NodeCtx::Inline(runs.clone()))
+                .new_leaf_with_context(style, NodeCtx::Inline(runs.clone(), text_align))
                 .expect("taffy leaf alloc is infallible for a fresh tree");
-            out.push(Built::Inline { taffy_id: id, runs });
+            out.push(Built::Inline { taffy_id: id, runs, text_align });
             i = j;
         } else {
             out.push(translate_any(&node.children[i], taffy, depth, table_budget));
@@ -609,8 +619,8 @@ fn measure_node<M: Metrics>(
     };
     match node_context {
         None => TSize::ZERO,
-        Some(NodeCtx::Inline(runs)) => {
-            let out = inline::layout_runs(runs, avail_w, metrics);
+        Some(NodeCtx::Inline(runs, text_align)) => {
+            let out = inline::layout_runs(runs, avail_w, *text_align, metrics);
             TSize {
                 width: known_dimensions.width.unwrap_or(out.size.w),
                 height: known_dimensions.height.unwrap_or(out.size.h),
@@ -1032,9 +1042,9 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
         Built::Replaced { style, image, interactive, .. } => {
             push_replaced_fragment(out, Rect { origin, size }, image.clone(), style, interactive.clone());
         }
-        Built::Inline { runs, .. } => {
+        Built::Inline { runs, text_align, .. } => {
             let available_w = size.w;
-            let laid_out = inline::layout_runs(runs, available_w, metrics);
+            let laid_out = inline::layout_runs(runs, available_w, *text_align, metrics);
             for line in &laid_out.lines {
                 for run in &line.runs {
                     let run_origin =
