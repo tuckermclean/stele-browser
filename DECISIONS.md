@@ -19,6 +19,24 @@ resolve `<link>` against their own frame url. Revisit: `--stats` still counts
 only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 `rel="alternate stylesheet"` treated as a plain stylesheet (simplification).
 
+## Rendering — border-collapse + tty table grids
+
+### D50 — border-collapse model; tty draws box-drawing table grids
+Freeze amendment: `ComputedStyle.border_collapse: BorderCollapse` (default
+Separate). Collapse (from CSS, or a bare `<table border>` sans cellspacing):
+spacing forced to 0 + box_tree dedups cells to top+left borders (table keeps
+outer frame) → single grid lines in pixels. `<table border cellspacing=N>` opts
+back to separate. The tty gained box-drawing table rendering (`─`/`│` for
+`Display::Table`/`TableCell` bordered boxes; `<hr>`/non-table unchanged), plus a
+4px default cell padding for bare `<table border>` so a tty separator column
+always exists (no `Widget4` collision). **Why default-collapse for bare
+`<table border>`:** it's what authors expect (clean grid) and fixes the
+doubled-border complaint; explicit cellspacing or `border-collapse:separate`
+overrides. **Known limitation:** collapsed-table tty box-drawing JUNCTIONS are
+rough (`┌` where `│`/`┼` belong — top+left-only borders + naive corner logic);
+readable but not pretty — proper junction resolution deferred. Full CSS
+border-conflict resolution (differing adjacent borders) also deferred.
+
 ## Layout — Table cellpadding/cellspacing
 
 ### D49 — cellspacing is a border-spacing freeze amendment; cellpadding rides padding
