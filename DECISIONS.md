@@ -21,21 +21,24 @@ only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 
 ## Rendering — border-collapse + tty table grids
 
-### D50 — border-collapse model; tty draws box-drawing table grids
-Freeze amendment: `ComputedStyle.border_collapse: BorderCollapse` (default
-Separate). Collapse (from CSS, or a bare `<table border>` sans cellspacing):
-spacing forced to 0 + box_tree dedups cells to top+left borders (table keeps
-outer frame) → single grid lines in pixels. `<table border cellspacing=N>` opts
-back to separate. The tty gained box-drawing table rendering (`─`/`│` for
-`Display::Table`/`TableCell` bordered boxes; `<hr>`/non-table unchanged), plus a
-4px default cell padding for bare `<table border>` so a tty separator column
-always exists (no `Widget4` collision). **Why default-collapse for bare
-`<table border>`:** it's what authors expect (clean grid) and fixes the
-doubled-border complaint; explicit cellspacing or `border-collapse:separate`
-overrides. **Known limitation:** collapsed-table tty box-drawing JUNCTIONS are
-rough (`┌` where `│`/`┼` belong — top+left-only borders + naive corner logic);
-readable but not pretty — proper junction resolution deferred. Full CSS
-border-conflict resolution (differing adjacent borders) also deferred.
+### D50 — border-collapse via shared-grid-line overlap geometry (not dedup)
+`ComputedStyle.border_collapse` (freeze amendment, default Separate). Collapse is
+triggered by CSS `border-collapse: collapse` or a bare `<table border>` (no
+cellspacing; explicit cellspacing / `separate` overrides). **Geometry:** every
+cell keeps its full 4 borders; in collapse the table solver/emit places adjacent
+cells OVERLAPPING by one border-width so their shared borders coincide into a
+single 1px line, with the edge cells' outer borders (and the table frame, if any,
+based at its border-box origin) forming a complete outer frame; `border-spacing`
+is forced to 0. Colspan/rowspan span the correct grid lines and clip interior
+lines. **A first implementation that deduped cells to top+left borders was tried
+and DELETED** — it doubled the frame on bordered tables and deleted the
+right/bottom edges of frameless CSS-celled tables. **Verification:** orchestrator
+pixel-analyzed both `table-border.png` and `kitchen-sink.png` to confirm every
+line is 1px, the frame is closed on all four sides, and there are no column gaps.
+The tty draws box-drawing grids for table cells (`<hr>`/non-table unchanged), and
+a bare `<table border>` gets a 4px default cell padding so the tty separator has
+a column. **Limitation:** uniform border width only — differing per-cell border
+widths/styles still need real CSS border-conflict resolution (deferred).
 
 ## Layout — Table cellpadding/cellspacing
 

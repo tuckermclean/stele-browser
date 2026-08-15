@@ -426,32 +426,37 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
-## 2026-08-15 — CORRECT-6 · border-collapse: collapse (+ tty table grids)
+## 2026-08-15 — CORRECT-6 · border-collapse: collapse (shared-grid-line geometry)
 
-- **border-collapse (freeze amendment):** `ComputedStyle` gains
-  `border_collapse: BorderCollapse{Separate,Collapse}` (default Separate). CSS
-  `border-collapse` parses; a bare `<table border>` (no cellspacing) → collapse
-  presentational hint (author `separate` still wins). Collapse: `block.rs` feeds
-  spacing 0 to the solver; box_tree dedups each cell to top+left borders (table
-  keeps its outer frame) → single shared grid lines in the pixel backend.
-  Answers "shouldn't cell borders overlap?" — yes, in the collapse model, now
-  implemented. `<table border cellspacing=N>` stays separate.
-- **tty table grids:** the tty gained box-drawing table rendering
-  (`Display::Table`/`TableCell` boxes with solid borders draw `─`/`│`),
-  scoped so `<hr>` and non-table boxes are untouched. Separate tables render as
-  clean `┌──┐` cell boxes; collapsed tables render readable grids. **Default
-  cell padding (4px) for bare `<table border>`** (no author cellpadding) so the
-  tty separator always has a column — kills the `Widget4` collision. A
-  round-span bug (padded cells collapsing to one tty row, dropping a border)
-  was found and fixed (`span_end` ceiling math).
-- **Known cosmetic follow-up:** collapsed tables' tty box-drawing junctions are
-  rough (`┌` where `│`/`┬`/`┼` belong — top+left-only cells + simple corner
-  logic). Readable, not pretty; proper junction resolution (or tty-appropriate
-  full-box rendering for collapsed tables) is deferred.
-- Freeze change is only the `border_collapse` field/enum; no unsafe. Goldens
-  (orchestrator-viewed): `table-border.png` clean collapsed padded grid,
-  `kitchen-sink.png` table collapsed cleanly. `table-spacing.*` unchanged
-  (separate). 969 tests green. See D50.
+- **border-collapse (freeze amendment):** `ComputedStyle.border_collapse:
+  BorderCollapse{Separate,Collapse}` (default Separate). CSS `border-collapse`
+  parses; a bare `<table border>` (no cellspacing) → collapse hint (author
+  `separate` wins). `<table border cellspacing=N>` stays separate.
+- **Correct collapse geometry (the second, working design — the first was
+  wrong):** the initial attempt deduped each cell to top+left borders and leaned
+  on the table frame for right/bottom. That was architecturally broken —
+  bordered tables got 2px top/left (frame + cell border stacked), and
+  CSS-celled tables with NO table frame lost their right/bottom outer edges
+  entirely (open grid). It was DELETED. The working design keeps every cell's
+  full 4 borders and lays the table out so adjacent cells OVERLAP by exactly one
+  border-width, so shared edges land on the same pixels and render as a single
+  1px line; the first/last cells' outer borders form a complete frame (when the
+  table also has a frame border, the grid bases at the table's border-box origin
+  so the frame overlaps the edge cells too). `border-spacing` forced to 0 in
+  collapse. Colspan/rowspan cells span the right number of grid lines and
+  correctly suppress interior lines within their own span. Implemented in
+  `block.rs` (`collapse_grid_lines`/`collapse_cell_extent`/`collapse_adjust_cell_rects`);
+  no painter change. Uniform border width only (differing-width CSS conflict
+  resolution deferred).
+- **Pixel-verified (independently, by the orchestrator):** `table-border.png` —
+  lines at x{8,65,98}/y{8,33,58,83}, ALL 1px, no doubling, closed frame.
+  `kitchen-sink.png` — x{0,65,106,195}/y{611,636,661,686,711}, ALL 1px, complete
+  4-sided frame despite no table-level border, no column gaps, rowspan interior
+  line correctly clipped. Separate-mode goldens byte-identical.
+- **tty:** box-drawing table grids (`─`/`│`) for `Display::Table`/`TableCell`
+  bordered boxes; `<hr>`/non-table unchanged; grid-line rule lands at the far
+  grid-line index so collapsed cells' lines coincide. Default 4px cell padding
+  for bare `<table border>` keeps the tty separator readable. See D50.
 
 ## 2026-08-15 — CORRECT-5 · <table cellpadding/cellspacing> (border-spacing freeze amendment)
 
