@@ -5,3 +5,4 @@
 pub mod fb;
 pub mod raster;
 pub mod tty;
+pub mod x11;
