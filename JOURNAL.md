@@ -426,6 +426,22 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-15 — CORRECT-4 · <table border=N> draws ruled tables
+
+- **Gap:** `<table border="1">` (vintage ruled tables) did nothing.
+- **Fix (box_tree, post-cascade — `border` isn't inherited, so correct like the
+  `float` hint):** `apply_table_border_attribute` on each built `<table>`: parse
+  `border` as a non-neg int (absent/`0`/garbage → no-op); stamp the table box
+  with an `Npx` solid `#808080` border and every descendant `TableCell` with a
+  `1px` solid `#808080` border via a DEPTH_CAP-bounded `stamp_cell_borders` walk
+  that STOPS at nested `Display::Table` boxes (an inner `border=0` table governs
+  its own cells). Per-box gated on `border_is_cascade_default` so author CSS on
+  the table or any cell wins. Renders in the pixel/fb backend (existing border
+  painter); tty draws no 4-side borders by design (unchanged). Frozen types
+  untouched; no unsafe. 630 lib tests green; no pre-existing golden changed.
+  Golden `table-border.png` (orchestrator-viewed) shows a gray ruled table.
+  See D48.
+
 ## 2026-08-15 — CORRECT-3 · presentational attributes via a cascade tier
 
 - **Gap:** `<font color>`, `<font size>`, `bgcolor`, block-element `align=`, and

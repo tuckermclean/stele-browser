@@ -31,8 +31,9 @@ use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, Interactive, LayoutNode, Size};
-use crate::style::computed::{Display, Float, ListStyleType};
+use crate::style::computed::{BorderSide, BorderStyle, Display, Edges, Float, ListStyleType};
 use crate::style::ComputedStyle;
+use crate::surface::Color;
 
 /// Mirrors `layout::block::DEPTH_CAP` (private to that module). This walk is
 /// independent recursion — it never goes through `block`'s taffy translation
@@ -205,7 +206,11 @@ fn build_node<'a>(
             } else {
                 BoxContent::Container
             };
-            Some(LayoutNode { style, content, children, interactive: None })
+            let mut node = LayoutNode { style, content, children, interactive: None };
+            if el.name.as_str() == "table" {
+                apply_table_border_attribute(el, &mut node);
+            }
+            Some(node)
         }
     }
 }
@@ -288,6 +293,116 @@ fn apply_align_float_hint(el: &Element, style: &mut ComputedStyle) {
         "left" => style.float = Float::Left,
         "right" => style.float = Float::Right,
         _ => {} // top/middle/bottom/unknown: vertical-align territory, ignored here.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `<table border="N">` presentational attribute (packet/table-border):
+// vintage HTML's ruled-table hint. Like `align="left|right"` above, `border`
+// is NOT an inherited CSS property, so it can't be handled in the cascade
+// (P2) at all -- it's applied here, post-cascade, because this is the one
+// place that still has the DOM's TABLE->CELL ancestor relationship in hand
+// while a box tree is being built (`ComputedStyle`/`ElementInfo` carry no
+// ancestor attributes for the cascade to consult). A `<table>` element's own
+// box gets a solid `N`px border on all four sides; every descendant
+// `<td>`/`<th>` cell gets a solid 1px border (the classic HTML rendering:
+// the attribute's number sets the table's OUTER frame thickness, interior
+// cell rules are always 1px, regardless of N) -- both in the same mid-gray
+// (`#808080`) the UA sheet's `<hr>` rule already uses (packet/hr-rule),
+// since there's no "classic table gray" this dialect tracks separately.
+//
+// Gating: a box only gets stamped if its CASCADED border is still the CSS
+// default (`BorderStyle::None` on all four sides) -- exactly
+// `apply_align_float_hint`'s "only if still default" contract for `float`.
+// Since `border` isn't inherited, "still default" here correctly means "no
+// author rule (inline style, `<style>`, or linked sheet) set a border on
+// THIS box" -- author CSS always wins over a presentational attribute. The
+// table and each cell are gated independently: an author rule on `td` but
+// not on `table` still lets the table's own frame get stamped.
+// ---------------------------------------------------------------------------
+
+/// The color both the table's own frame and every cell's 1px rule are
+/// stamped with -- matches the UA sheet's `<hr>` rule color (packet/hr-rule)
+/// for a consistent "structural gray" across the dialect's presentational
+/// rendering, since there's no real "classic table border gray" this v0
+/// dialect tracks as its own constant.
+const TABLE_BORDER_GRAY: Color = Color::rgb(0x80, 0x80, 0x80);
+
+/// Every descendant `<td>`/`<th>` cell's rule width, per the classic HTML
+/// rendering -- see the module doc section above.
+const TABLE_CELL_BORDER_WIDTH: f32 = 1.0;
+
+/// Parse `<table>`'s `border` attribute: a non-negative integer pixel count.
+/// Absent, unparseable, or `0` all mean "no borders at all" (`None`);
+/// anything `>= 1` is Some(that width). Unlike `img_intrinsic`'s
+/// `width`/`height` (which accept any non-negative finite float), `border`
+/// is parsed as a plain integer -- HTML4's own grammar for this attribute --
+/// so `border="1.5"` is treated as unparseable (no borders), not rounded.
+fn table_border_attribute(el: &Element) -> Option<f32> {
+    let raw = el.attrs.get("border")?;
+    let n: u32 = raw.trim().parse().ok()?;
+    if n == 0 {
+        None
+    } else {
+        Some(n as f32)
+    }
+}
+
+/// `true` iff `border` carries no solid side at all -- the CSS initial
+/// value, and therefore the signal "no author rule touched this box's
+/// border" (border isn't inherited, so a non-default value here can only
+/// have come from an explicit author declaration on this exact element).
+fn border_is_cascade_default(border: &Edges<BorderSide>) -> bool {
+    [border.top, border.right, border.bottom, border.left].iter().all(|side| side.style == BorderStyle::None)
+}
+
+fn solid_border_side(width: f32) -> BorderSide {
+    BorderSide { width, style: BorderStyle::Solid, color: TABLE_BORDER_GRAY }
+}
+
+/// Stamp `<table border="N">`'s borders onto `table_box` (its own frame) and
+/// every `TableCell` box in its already-built subtree, per the module doc
+/// section above. `table_box` is the just-built `LayoutNode` for a `<table>`
+/// element -- its `children` are already fully constructed (recursion is
+/// bottom-up: `build_node` builds every child before the parent branch that
+/// called it returns), so any nested `<table>` underneath has ALREADY had
+/// this same function applied to itself, using its own `border` attribute.
+/// This function's own subtree walk (`stamp_cell_borders`) stops the instant
+/// it meets another `Display::Table` box, so it never re-stamps (or, worse,
+/// un-stamps) a nested table's own cells with the outer table's `N` -- that
+/// inner table's `border` attribute alone governs its own cells.
+fn apply_table_border_attribute(el: &Element, table_box: &mut LayoutNode) {
+    let Some(n) = table_border_attribute(el) else { return };
+    if border_is_cascade_default(&table_box.style.border) {
+        table_box.style.border = Edges::all(solid_border_side(n));
+    }
+    stamp_cell_borders(table_box, 0);
+}
+
+/// Walk `node`'s children (NOT `node` itself -- that's the table's own box,
+/// already handled by the caller) stamping a 1px gray border onto every
+/// still-default `TableCell` box, without descending into a nested
+/// `<table>`'s subtree (its own `Display::Table` box governs its own cells
+/// via its own `apply_table_border_attribute` call, already applied when
+/// THAT table was built). `DEPTH_CAP`-bounded like every other recursive
+/// walk in this module -- this only walks a subtree `build_node` already
+/// built (and therefore already bounded), but the bound is kept anyway so
+/// this function stays total on its own terms, not just by inheriting a
+/// caller's guarantee.
+fn stamp_cell_borders(node: &mut LayoutNode, depth: usize) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    for child in &mut node.children {
+        if child.style.display == Display::Table {
+            // A nested table's own `border` attribute (or its absence)
+            // governs its own cells -- do not descend into it.
+            continue;
+        }
+        if matches!(child.content, BoxContent::TableCell { .. }) && border_is_cascade_default(&child.style.border) {
+            child.style.border = Edges::all(solid_border_side(TABLE_CELL_BORDER_WIDTH));
+        }
+        stamp_cell_borders(child, depth + 1);
     }
 }
 
@@ -1306,6 +1421,188 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // `<table border="N">` presentational attribute (packet/table-border):
+    // a vintage-HTML ruled-table hint. `border` is NOT an inherited
+    // property, so this is applied post-cascade here (in box_tree, which
+    // alone knows the TABLE->CELL ancestor relationship `ComputedStyle`/
+    // `ElementInfo` don't carry) -- exactly the same rationale as
+    // `apply_align_float_hint`'s `float` hint above. See that section's own
+    // doc comment for the "post-cascade, gated on cascaded-default" pattern
+    // this mirrors.
+    // ------------------------------------------------------------------
+
+    /// Collect every node in `node`'s subtree (`node` included) matching
+    /// `pred`, in pre-order (a node is visited/pushed BEFORE its own
+    /// children are walked) -- tests below rely on that ordering to tell an
+    /// outer `<table>`'s own cell apart from a nested inner `<table>`'s cell
+    /// purely by which one appears first.
+    fn find_by<'a>(node: &'a LayoutNode, pred: &dyn Fn(&LayoutNode) -> bool, out: &mut Vec<&'a LayoutNode>) {
+        if pred(node) {
+            out.push(node);
+        }
+        for c in &node.children {
+            find_by(c, pred, out);
+        }
+    }
+
+    fn is_table_box(n: &LayoutNode) -> bool {
+        n.style.display == Display::Table
+    }
+
+    fn is_cell_box(n: &LayoutNode) -> bool {
+        matches!(n.content, BoxContent::TableCell { .. })
+    }
+
+    fn assert_border_all(border: &Edges<BorderSide>, width: f32) {
+        assert_border_all_colored(border, width, Color::rgb(0x80, 0x80, 0x80));
+    }
+
+    fn assert_border_all_colored(border: &Edges<BorderSide>, width: f32, color: Color) {
+        for (side, name) in [
+            (border.top, "top"),
+            (border.right, "right"),
+            (border.bottom, "bottom"),
+            (border.left, "left"),
+        ] {
+            assert_eq!(side.style, BorderStyle::Solid, "{name} border should be solid");
+            assert_eq!(side.width, width, "{name} border width");
+            assert_eq!(side.color, color, "{name} border color");
+        }
+    }
+
+    fn assert_no_border(border: &Edges<BorderSide>) {
+        for (side, name) in [
+            (border.top, "top"),
+            (border.right, "right"),
+            (border.bottom, "bottom"),
+            (border.left, "left"),
+        ] {
+            assert_eq!(side.style, BorderStyle::None, "{name} border should stay unset");
+        }
+    }
+
+    #[test]
+    fn table_border_attribute_stamps_table_and_1px_cell_borders() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td><td>b</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_eq!(tables.len(), 1, "expected one table box");
+        assert_border_all(&tables[0].style.border, 1.0);
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected two td boxes");
+        for cell in cells {
+            assert_border_all(&cell.style.border, 1.0);
+        }
+    }
+
+    #[test]
+    fn table_border_n_controls_table_frame_width_cells_stay_1px() {
+        let d = dom::parser::parse(r#"<table border="3"><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_eq!(tables.len(), 1);
+        assert_border_all(&tables[0].style.border, 3.0);
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        assert_border_all(&cells[0].style.border, 1.0);
+    }
+
+    #[test]
+    fn table_border_zero_or_absent_yields_no_borders() {
+        for html in [
+            r#"<table border="0"><tr><td>a</td></tr></table>"#,
+            r#"<table><tr><td>a</td></tr></table>"#,
+        ] {
+            let d = dom::parser::parse(html);
+            let styles = cascade::cascade(&d, &[]);
+            let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+            let mut tables = Vec::new();
+            find_by(&root, &is_table_box, &mut tables);
+            assert_eq!(tables.len(), 1);
+            assert_no_border(&tables[0].style.border);
+
+            let mut cells = Vec::new();
+            find_by(&root, &is_cell_box, &mut cells);
+            assert_eq!(cells.len(), 1);
+            assert_no_border(&cells[0].style.border);
+        }
+    }
+
+    #[test]
+    fn table_border_unparseable_attribute_yields_no_borders() {
+        let d = dom::parser::parse(r#"<table border="banana"><tr><td>a</td></tr></table>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_no_border(&tables[0].style.border);
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_no_border(&cells[0].style.border);
+    }
+
+    #[test]
+    fn table_border_attribute_never_overrides_author_css_border() {
+        let d = dom::parser::parse(r#"<table border="1"><tr><td>a</td></tr></table>"#);
+        let sheet = parser::parse("td { border: 2px solid #000000; }");
+        let styles = cascade::cascade(&d, std::slice::from_ref(&sheet));
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 1);
+        // Author CSS wins: the td keeps its own 2px black border, NOT the
+        // 1px gray presentational-attribute stamp.
+        assert_border_all_colored(&cells[0].style.border, 2.0, Color::rgb(0, 0, 0));
+
+        // The table itself has no author border, so it still gets the
+        // presentational 1px frame -- gating is per-box, not all-or-nothing
+        // for the whole table subtree.
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_eq!(tables.len(), 1);
+        assert_border_all(&tables[0].style.border, 1.0);
+    }
+
+    #[test]
+    fn table_border_nested_table_border_zero_does_not_inherit_outer_cells() {
+        let d = dom::parser::parse(
+            r#"<table border="1"><tr><td><table border="0"><tr><td>inner</td></tr></table></td></tr></table>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        let mut tables = Vec::new();
+        find_by(&root, &is_table_box, &mut tables);
+        assert_eq!(tables.len(), 2, "expected outer + inner table boxes");
+        // Pre-order: the outer table is visited before it recurses into the
+        // inner one.
+        assert_border_all(&tables[0].style.border, 1.0);
+        assert_no_border(&tables[1].style.border);
+
+        let mut cells = Vec::new();
+        find_by(&root, &is_cell_box, &mut cells);
+        assert_eq!(cells.len(), 2, "expected outer td + inner td");
+        // Pre-order: the outer td (wrapping the whole inner table) is
+        // visited before the inner td nested inside it.
+        assert_border_all(&cells[0].style.border, 1.0);
+        assert_no_border(&cells[1].style.border);
+        assert!(find_text(cells[1], "inner").is_some(), "cells[1] should be the inner td");
     }
 
     #[test]
