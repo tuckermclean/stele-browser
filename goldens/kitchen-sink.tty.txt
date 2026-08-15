@@ -36,13 +36,13 @@ Line two, after an explicit break.
 
 Table
 
-┌───────┌────┌──────────
-│Item   │Qty │Notes
-┌Widget─┌4───┌Blue──────
-│       ┌────┌──────────
-│       │2   │Red
-┌Gadget──────┌Backorder─
-│            │
+┌───────┌────┌───────────┐
+└Item───└Qty─└Notes──────┘
+┌Widget─┌4───┌Blue───────┐
+│       ┌────┌───────────┐
+└───────└2───└Red────────┘
+┌Gadget──────┌Backorder──┐
+└────────────└───────────┘
 
 Form
 
