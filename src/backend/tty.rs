@@ -395,19 +395,90 @@ pub fn render(fragments: &[Fragment], cols: usize) -> TextGrid {
 
     let mut rows: Vec<Vec<Cell>> = vec![vec![Cell::default(); cols]; rows_needed];
 
+    // packet/t3-inline-spacing (the D3 fix): `pending_box_boundary`/
+    // `last_text_end` are the two bits of state `synthesize_gap_start_col`
+    // needs to tell "two distinct elements' text abutting" apart from "one
+    // inline run's own internal split" -- see that function's own doc
+    // comment for the full rule.
+    let mut pending_box_boundary = false;
+    let mut last_text_end: Option<(usize, usize)> = None;
+
     for f in fragments {
         match &f.kind {
-            FragmentKind::Text { text, style, .. } => write_marker(&mut rows, f, text, Some(style.color), cols),
-            FragmentKind::Image { .. } => write_marker(&mut rows, f, "[img]", None, cols),
+            FragmentKind::Text { text, style, .. } => {
+                let row = cell_index(f.rect.origin.y, CELL_H);
+                let natural_col = cell_index(f.rect.origin.x, CELL_W);
+                let start_col = synthesize_gap_start_col(pending_box_boundary, last_text_end, row, natural_col);
+                let end_col = write_marker_at(&mut rows, row, start_col, text, Some(style.color), cols);
+                last_text_end = Some((row, end_col));
+                pending_box_boundary = false;
+            }
+            FragmentKind::Image { .. } => {
+                write_marker(&mut rows, f, "[img]", None, cols);
+                // Conservative: an `Image` placeholder's interaction with a
+                // FOLLOWING `Text` fragment isn't a case this packet's
+                // fixture corpus exercises either way, so leave it exactly
+                // as un-synthesized as it always was rather than guess.
+                last_text_end = None;
+                pending_box_boundary = false;
+            }
             FragmentKind::Box { style } => {
                 fill_box(&mut rows, f, style.background_color, cols);
                 draw_top_border_rule(&mut rows, f, style, cols);
                 draw_table_grid_lines(&mut rows, f, style, cols);
+                pending_box_boundary = true;
             }
         }
     }
 
     TextGrid { rows }
+}
+
+/// The tty half of "distinct adjacent inline-level runs must not abut with
+/// zero advance" (packet/t3-inline-spacing, the D3 fix -- see also
+/// `backend::raster`'s pixel-space sibling of this same rule). Returns the
+/// grid column a `Text` fragment's write should actually START at: either
+/// `natural_col` (`cell_index` applied to the fragment's own, un-adjusted
+/// `rect.origin.x`) unchanged, or -- when this run is at real risk of
+/// visually fusing with the run immediately before it -- one cell past
+/// where that previous run's own write finished.
+///
+/// `pending_box_boundary` is `true` exactly when a `Box` fragment (a
+/// block-level element's own background/border) was painted since the last
+/// `Text` fragment. M2 never gives an inline element (`<a>`, `<b>`, a bare
+/// run of sibling text nodes, ...) its own `Box` fragment (module docs
+/// above, "What paints, what doesn't"), and every `display: flex` item is
+/// blockified regardless of its own `display` (`layout::block`'s own module
+/// docs: "every child is its own taffy child node") -- so a `Box` fragment
+/// landing between two `Text` fragments can ONLY mean the second belongs to
+/// a DIFFERENT source element: a flex item, or an ordinary block-level
+/// sibling sharing a row. It can NEVER fire between two runs of one inline
+/// formatting context split across elements with no wrapping block box
+/// (`<b>bo</b>ld`'s "bo"/"ld" boundary, or `a<span>b</span>c`'s three
+/// pieces) -- neither ever has a `Box` fragment between its runs, by the
+/// same M2 rule.
+///
+/// `last_text_end` is `(row, col)` the PREVIOUS `Text` fragment's own write
+/// actually finished at (already cell-rounded, from `write_marker_at`'s
+/// return value) -- `None` before the first `Text` fragment, or right after
+/// a non-`Box` fragment (an `Image` placeholder; see `render`'s own
+/// handling). Deliberately conservative on both counts: this function only
+/// ever WIDENS a gap already at risk of vanishing, never invents one a
+/// pending boundary alone doesn't call for -- a comfortably-sized real gap,
+/// or two runs on different rows entirely, both pass through untouched.
+fn synthesize_gap_start_col(
+    pending_box_boundary: bool,
+    last_text_end: Option<(usize, usize)>,
+    row: usize,
+    natural_col: usize,
+) -> usize {
+    if !pending_box_boundary {
+        return natural_col;
+    }
+    match last_text_end {
+        Some((last_row, last_end_col)) if last_row == row && natural_col <= last_end_col => last_end_col + 1,
+        _ => natural_col,
+    }
 }
 
 /// Fill the cells `fragment.rect` covers with `bg`, clipped to the grid's
@@ -715,10 +786,22 @@ fn set_grid_ch(rows: &mut [Vec<Cell>], row: usize, col: usize, ch: char, fg: Col
 /// contains, same as a real terminal echoing whatever bytes it's given.
 fn write_marker(rows: &mut [Vec<Cell>], fragment: &Fragment, text: &str, fg: Option<Color>, cols: usize) {
     let row = cell_index(fragment.rect.origin.y, CELL_H);
+    let col = cell_index(fragment.rect.origin.x, CELL_W);
+    write_marker_at(rows, row, col, text, fg, cols);
+}
+
+/// The shared write loop `write_marker` above wraps for its own natural
+/// (never gap-adjusted) `col` -- factored out (packet/t3-inline-spacing) so
+/// `render`'s `Text` arm can instead pass a `start_col` already resolved
+/// through [`synthesize_gap_start_col`]. Returns the column one past the
+/// last cell actually written (`start_col` unchanged if `row` was out of
+/// bounds or `text` sanitizes to nothing), which `render` feeds back in as
+/// the next `Text` fragment's own `last_text_end`.
+fn write_marker_at(rows: &mut [Vec<Cell>], row: usize, start_col: usize, text: &str, fg: Option<Color>, cols: usize) -> usize {
     if row >= rows.len() {
-        return;
+        return start_col;
     }
-    let mut col = cell_index(fragment.rect.origin.x, CELL_W);
+    let mut col = start_col;
     let sanitized = crate::text::translit::resolve(text);
     for ch in sanitized.chars() {
         if col >= cols {
@@ -730,6 +813,7 @@ fn write_marker(rows: &mut [Vec<Cell>], fragment: &Fragment, text: &str, fg: Opt
         }
         col += 1;
     }
+    col
 }
 
 /// Map a layout-pixel coordinate to a clamped, non-negative cell index.
@@ -1639,5 +1723,85 @@ mod tests {
         canvas.blit(&first, 0, 0);
         canvas.blit(&second, 0, 0);
         assert_eq!(canvas.row_text(0), "BB  ");
+    }
+
+    // -------------------------------------------------------------------
+    // packet/t3-inline-spacing (the D3 fix): "distinct adjacent inline-
+    // level runs must not abut with zero advance" -- contract-tested both
+    // directions, see `synthesize_gap_start_col`'s own doc comment for the
+    // exact rule these fragment shapes are built to probe.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn distinct_flex_items_abutting_with_zero_gap_get_exactly_one_synthesized_space() {
+        // Two blockified flex items ("Security" then "Headers", each its
+        // own `Box` fragment ahead of its text — exactly the shape
+        // `layout::block::emit` produces for two adjacent `<a>` flex
+        // children) whose real geometry has them touching with literally
+        // zero advance (item two's box/text both start exactly where item
+        // one's text ends) — this is `fixtures/httpforever.html`'s
+        // `.footer__projects` bug (D3) in miniature.
+        let fragments = vec![
+            box_fragment(0.0, 0.0, 16.0, 16.0),
+            text_fragment(0.0, 0.0, 16.0, 16.0, "AB"),
+            box_fragment(16.0, 0.0, 16.0, 16.0),
+            text_fragment(16.0, 0.0, 16.0, 16.0, "CD"),
+        ];
+        let grid = render(&fragments, 6);
+        assert_eq!(grid.row_text(0), "AB CD ", "exactly one synthesized space between the two distinct flex items' text, not zero");
+    }
+
+    #[test]
+    fn a_real_comfortable_gap_between_distinct_flex_items_is_left_untouched() {
+        // Same shape as the zero-gap case above, but item two's box/text
+        // already start a full 2 cells (16px) past item one's text — no
+        // synthesis should fire; a real, already-visible gap must never be
+        // widened further.
+        let fragments = vec![
+            box_fragment(0.0, 0.0, 16.0, 16.0),
+            text_fragment(0.0, 0.0, 16.0, 16.0, "AB"),
+            box_fragment(32.0, 0.0, 16.0, 16.0),
+            text_fragment(32.0, 0.0, 16.0, 16.0, "CD"),
+        ];
+        let grid = render(&fragments, 6);
+        assert_eq!(grid.row_text(0), "AB  CD", "a real, already-visible gap must not be widened");
+    }
+
+    #[test]
+    fn intra_word_inline_split_gets_no_synthesized_space() {
+        // `<b>bo</b>ld` -- two `Text` fragments from ONE inline formatting
+        // context (a bold run then a plain run), abutting with zero real
+        // advance, but with NO `Box` fragment between them (M2 never gives
+        // an inline element its own `Box` — see `render`'s module docs).
+        // Must render as "bold", never "bo ld".
+        let fragments = vec![text_fragment(0.0, 0.0, 16.0, 16.0, "bo"), text_fragment(16.0, 0.0, 16.0, 16.0, "ld")];
+        let grid = render(&fragments, 4);
+        assert_eq!(grid.row_text(0), "bold");
+    }
+
+    #[test]
+    fn adjacent_inline_elements_with_no_source_whitespace_get_no_synthesized_space() {
+        // `a<span>b</span>c` -- three `Text` fragments from ONE inline
+        // formatting context (bare text, then a `<span>`'s text, then more
+        // bare text), same "no `Box` fragment between runs" shape as the
+        // intra-word case above. Must render as "abc", never "a b c".
+        let fragments = vec![
+            text_fragment(0.0, 0.0, 8.0, 16.0, "a"),
+            text_fragment(8.0, 0.0, 8.0, 16.0, "b"),
+            text_fragment(16.0, 0.0, 8.0, 16.0, "c"),
+        ];
+        let grid = render(&fragments, 3);
+        assert_eq!(grid.row_text(0), "abc");
+    }
+
+    #[test]
+    fn single_text_node_fragment_is_never_touched_by_gap_synthesis() {
+        // A lone `Text` fragment (no preceding fragment at all) must render
+        // exactly at its own natural cell — `pending_box_boundary` starts
+        // `false` and `last_text_end` starts `None`, so `synthesize_gap_
+        // start_col` is a no-op on the very first run in any document.
+        let fragments = vec![text_fragment(8.0, 0.0, 16.0, 16.0, "hi")];
+        let grid = render(&fragments, 4);
+        assert_eq!(grid.row_text(0), " hi ");
     }
 }

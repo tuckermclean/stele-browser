@@ -83,9 +83,21 @@ use crate::surface::{Color, MemSurface, Rect as PixelRect, Surface, TextRun};
 /// Every caller today passes `Color::WHITE` — the same fill color it hands
 /// `MemSurface::new` — so this changes no existing render.
 pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &HashMap<String, Rc<RgbaImage>>, canvas: Color) {
+    // packet/t3-inline-spacing (the D3 fix): the fb half of "distinct
+    // adjacent inline-level runs must not abut with zero advance" — the
+    // pixel-space sibling of `backend::tty::render`'s own `pending_box_
+    // boundary`/`last_text_end` tracking (see `synthesize_gap_rect`'s doc
+    // comment for the shared rule both backends implement, each in its own
+    // coordinate space).
+    let mut pending_box_boundary = false;
+    let mut last_text_end: Option<(f32, f32)> = None;
+
     for (i, fragment) in fragments.iter().enumerate() {
         match &fragment.kind {
-            FragmentKind::Box { style } => paint_box(surface, &fragment.rect, style, bg_images),
+            FragmentKind::Box { style } => {
+                paint_box(surface, &fragment.rect, style, bg_images);
+                pending_box_boundary = true;
+            }
             FragmentKind::Text { text, baseline, style } => {
                 // `None` (packet T1c amendment) means INDETERMINATE — the
                 // nearest containing box's visible background is a real
@@ -99,12 +111,71 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &Hash
                     Some(bg) => repair_fg(style.color, bg),
                     None => style.color,
                 };
-                paint_text(surface, &fragment.rect, text, *baseline, style, ink);
+                let rect = synthesize_gap_rect(pending_box_boundary, last_text_end, &fragment.rect);
+                paint_text(surface, &rect, text, *baseline, style, ink);
+                last_text_end = Some((rect.origin.y, rect.origin.x + finite_or(rect.size.w, 0.0)));
+                pending_box_boundary = false;
             }
             FragmentKind::Image { image } => {
                 surface.blit(to_pixel_rect(&fragment.rect), image);
+                // Conservative, same posture as `backend::tty::render`'s own
+                // `Image` handling: an image's interaction with a FOLLOWING
+                // `Text` fragment isn't a shape this packet's fixture corpus
+                // exercises either way, so leave it un-synthesized.
+                last_text_end = None;
+                pending_box_boundary = false;
             }
         }
+    }
+}
+
+/// How many layout pixels [`synthesize_gap_rect`] treats as "close enough"
+/// to call two runs' `y` the same row, and their `x`/end-`x` abutting
+/// rather than genuinely separated — both generous enough to absorb f32
+/// summation noise, nowhere near large enough to swallow a real (even
+/// small, deliberate) author gap.
+const ROW_EPSILON_PX: f32 = 1.0;
+const ABUT_EPSILON_PX: f32 = 0.5;
+
+/// The minimum separation [`synthesize_gap_rect`] forces between two
+/// distinct runs it judges to be abutting. `8.0`, matching `backend::
+/// tty::CELL_W` — not because this pixel backend has any character-cell
+/// grid of its own, but so the SAME document reads with comparable spacing
+/// between the two backends when this fallback is what's actually
+/// separating two runs (i.e. when the real CSS gap didn't reach here at
+/// all — see `layout::block::apply_flex` for the cases that DO carry a
+/// real gap through, which this constant never overrides — this only ever
+/// fires on top of an already-zero/negative real advance).
+const MIN_SYNTHESIZED_GAP_PX: f32 = 8.0;
+
+/// The fb half of "distinct adjacent inline-level runs must not abut with
+/// zero advance" (packet/t3-inline-spacing, the D3 fix — see `backend::
+/// tty::synthesize_gap_start_col`'s own doc comment for the tty sibling of
+/// this same rule, and this module's own "What paints, what doesn't"
+/// section for why a `Box` fragment is the right distinct-source signal).
+///
+/// Returns `text_rect` unchanged UNLESS `pending_box_boundary` is set (a
+/// `Box` fragment — meaning a DIFFERENT, blockified source element, never a
+/// split within one inline formatting context — was painted since the last
+/// `Text` fragment) AND this run's own natural origin would land at or
+/// before the previous run's own end on what's judged the same row (within
+/// [`ROW_EPSILON_PX`]/[`ABUT_EPSILON_PX`]) — i.e. only when the two would
+/// otherwise visually fuse or overlap. A non-finite origin is left
+/// untouched (nothing sane to compare it against).
+fn synthesize_gap_rect(pending_box_boundary: bool, last_text_end: Option<(f32, f32)>, text_rect: &LayoutRect) -> LayoutRect {
+    if !pending_box_boundary || !text_rect.origin.x.is_finite() || !text_rect.origin.y.is_finite() {
+        return *text_rect;
+    }
+    match last_text_end {
+        Some((last_y, last_end_x))
+            if (text_rect.origin.y - last_y).abs() <= ROW_EPSILON_PX
+                && text_rect.origin.x <= last_end_x + ABUT_EPSILON_PX =>
+        {
+            let mut adjusted = *text_rect;
+            adjusted.origin.x = last_end_x + MIN_SYNTHESIZED_GAP_PX;
+            adjusted
+        }
+        _ => *text_rect,
     }
 }
 
@@ -725,6 +796,107 @@ mod tests {
         for i in (0..s.bytes().len()).step_by(4) {
             assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
         }
+    }
+
+    // ---------------------------------------------- paint: gap synthesis (D3)
+
+    #[test]
+    fn synthesize_gap_rect_shifts_when_boundary_pending_and_runs_abut() {
+        let text_rect = rect(16.0, 0.0, 8.0, 16.0); // natural origin.x lands exactly where the previous run ended
+        let adjusted = synthesize_gap_rect(true, Some((0.0, 16.0)), &text_rect);
+        assert_eq!(adjusted.origin.x, 16.0 + MIN_SYNTHESIZED_GAP_PX);
+        assert_eq!(adjusted.origin.y, text_rect.origin.y);
+        assert_eq!(adjusted.size, text_rect.size, "only the x origin shifts, size is untouched");
+    }
+
+    #[test]
+    fn synthesize_gap_rect_leaves_a_real_gap_untouched() {
+        let text_rect = rect(40.0, 0.0, 8.0, 16.0); // a comfortable real gap already exists
+        let adjusted = synthesize_gap_rect(true, Some((0.0, 16.0)), &text_rect);
+        assert_eq!(adjusted.origin.x, 40.0, "a real, already-visible gap must not be widened");
+    }
+
+    #[test]
+    fn synthesize_gap_rect_is_a_noop_without_a_pending_boundary() {
+        // Same abutting geometry as the "shifts" test above, but no `Box`
+        // fragment intervened -- e.g. an intra-word inline split
+        // (`<b>bo</b>ld`) -- must never be nudged apart.
+        let text_rect = rect(16.0, 0.0, 8.0, 16.0);
+        let adjusted = synthesize_gap_rect(false, Some((0.0, 16.0)), &text_rect);
+        assert_eq!(adjusted.origin.x, 16.0);
+    }
+
+    #[test]
+    fn synthesize_gap_rect_is_a_noop_on_a_different_row() {
+        let text_rect = rect(0.0, 32.0, 8.0, 16.0); // same x as the "previous" end, but a different row
+        let adjusted = synthesize_gap_rect(true, Some((0.0, 16.0)), &text_rect);
+        assert_eq!(adjusted.origin.x, 0.0);
+    }
+
+    #[test]
+    fn synthesize_gap_rect_is_a_noop_with_no_previous_text() {
+        let text_rect = rect(0.0, 0.0, 8.0, 16.0);
+        let adjusted = synthesize_gap_rect(true, None, &text_rect);
+        assert_eq!(adjusted.origin.x, 0.0);
+    }
+
+    #[test]
+    fn distinct_flex_items_abutting_with_zero_gap_paint_visibly_separated_glyphs() {
+        // End-to-end: two `Box`-then-`Text` pairs (the shape `layout::
+        // block::emit` produces for two adjacent flex items) whose real
+        // geometry has them touching with zero advance must still paint
+        // with visibly separated ink -- the fb sibling of
+        // `backend::tty`'s own `distinct_flex_items_abutting_with_zero_
+        // gap_get_exactly_one_synthesized_space` contract test.
+        let mut s = MemSurface::new(40, 16, Color::WHITE);
+        let text_style = ComputedStyle { color: Color::BLACK, font_size: 16.0, ..ComputedStyle::default() };
+        let transparent_box = box_style(Color::TRANSPARENT, BorderSide::default());
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 8.0, 16.0), kind: FragmentKind::Box { style: transparent_box.clone() }, interactive: None },
+            Fragment {
+                rect: rect(0.0, 0.0, 8.0, 16.0),
+                kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style.clone() },
+                interactive: None,
+            },
+            Fragment { rect: rect(8.0, 0.0, 8.0, 16.0), kind: FragmentKind::Box { style: transparent_box }, interactive: None },
+            Fragment {
+                rect: rect(8.0, 0.0, 8.0, 16.0),
+                kind: FragmentKind::Text { text: "B".to_string(), baseline: 12.0, style: text_style },
+                interactive: None,
+            },
+        ];
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+
+        for y in 0..16 {
+            assert_eq!(px(&s, 8, y), Color::WHITE, "the synthesized gap column must carry no glyph ink (col x=8, y={y})");
+        }
+        let ink_in_shifted_region =
+            (16..24).any(|x| (0..16).any(|y| px(&s, x, y) == Color::rgb(0, 0, 0)));
+        assert!(ink_in_shifted_region, "the second item's glyph must still be painted, just shifted right by MIN_SYNTHESIZED_GAP_PX");
+    }
+
+    #[test]
+    fn intra_word_inline_split_paints_with_no_gap() {
+        // `<b>bo</b>ld` -- two `Text` fragments abutting with zero real
+        // advance and NO `Box` fragment between them -- must paint exactly
+        // as abutting as the input geometry says (no widening).
+        let mut s = MemSurface::new(20, 16, Color::WHITE);
+        let text_style = ComputedStyle { color: Color::BLACK, font_size: 16.0, ..ComputedStyle::default() };
+        let fragments = vec![
+            Fragment {
+                rect: rect(0.0, 0.0, 8.0, 16.0),
+                kind: FragmentKind::Text { text: "b".to_string(), baseline: 12.0, style: text_style.clone() },
+                interactive: None,
+            },
+            Fragment {
+                rect: rect(8.0, 0.0, 8.0, 16.0),
+                kind: FragmentKind::Text { text: "o".to_string(), baseline: 12.0, style: text_style },
+                interactive: None,
+            },
+        ];
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+        let ink_at_natural_col = (8..16).any(|x| (0..16).any(|y| px(&s, x, y) == Color::rgb(0, 0, 0)));
+        assert!(ink_at_natural_col, "the second run must paint at its own natural (un-shifted) position");
     }
 
     // ----------------------------------------------------------- paint: Image
