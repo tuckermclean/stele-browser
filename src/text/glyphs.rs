@@ -19,6 +19,26 @@
 //! - This note is duplicated in `REPORT.md`'s "Fonts / licenses" section per
 //!   the packet brief's license-check requirement.
 //!
+//! ### packet/t2-glyph-fallback: Latin-1 supplement
+//!
+//! - **Font**: `font8x8_ext_latin` (96 glyphs, U+00A0-U+00FF, 8 bytes/glyph)
+//!   — the SAME `font8x8` project's companion table to `font8x8_basic` above.
+//! - **Source**: <https://raw.githubusercontent.com/dhepper/font8x8/master/font8x8_ext_latin.h>
+//!   (same repository/author/license as `font8x8_basic`).
+//! - **License**: Public Domain (same header comment, same provenance chain
+//!   back to Marcel Sondaar / IBM's public-domain VGA fonts).
+//! - **Why this closes D2's atlas half**: the original M4 atlas embedded
+//!   ONLY `font8x8_basic` (ASCII), even though its own upstream project ships
+//!   a full Latin-1 supplement table too — the atlas didn't lack these
+//!   glyphs so much as never reach for them. This is that fix: any
+//!   `char` in `U+00A0..=U+00FF` (NBSP, `£`, `©`, `×`, accented Latin
+//!   letters, ...) now gets a REAL rasterized glyph instead of falling
+//!   through to [`FALLBACK_GLYPH`] — httpforever.com and most real prose
+//!   lean on exactly this range (curly-quote/dash punctuation is OUTSIDE
+//!   Latin-1 though — U+2000-206F General Punctuation — so THAT half of D2
+//!   is `text::translit`'s job, not this module's; see that module's own
+//!   doc comment for the resolution order between the two).
+//!
 //! ## Bit order (pins the raster — read before touching [`FONT8X8_BASIC`])
 //!
 //! Each glyph is 8 bytes, one byte per pixel row (row 0 = top). Within a
@@ -36,11 +56,22 @@
 //!
 //! The table covers `U+0000..=U+007F` (the full ASCII range the source file
 //! ships, control chars included — those simply render as their authored
-//! shape, mostly blank). [`lookup`] is total over *all* of `char`: any
-//! scalar value outside `0x00..=0x7F` (Latin-1 supplement, CJK, emoji,
-//! unassigned/private-use, ...) returns [`FALLBACK_GLYPH`], a small hollow
-//! "tofu" box, rather than panicking or silently vanishing — a real font's
-//! usual "missing glyph" convention, and easy to spot in a golden PNG.
+//! shape, mostly blank), PLUS (packet t2-glyph-fallback) `U+00A0..=U+00FF`
+//! (Latin-1 supplement) via [`FONT8X8_EXT_LATIN`]. [`lookup`] is total over
+//! *all* of `char`: any scalar value outside those two ranges (CJK, emoji,
+//! General Punctuation like em-dash/curly-quotes, unassigned/private-use,
+//! ...) returns [`FALLBACK_GLYPH`], a small hollow "tofu" box, rather than
+//! panicking or silently vanishing — a real font's usual "missing glyph"
+//! convention, and easy to spot in a golden PNG. In practice, though,
+//! [`FALLBACK_GLYPH`] itself is no longer what a document actually PAINTS
+//! for most of these: `text::translit::resolve` (the shared fb/tty
+//! transliteration seam, packet t2-glyph-fallback) checks [`has_glyph`]
+//! FIRST and, when it's `false`, substitutes an ASCII replacement (or skips
+//! the char and counts it) before either backend ever calls [`lookup`] — so
+//! this module's own `lookup`/[`FALLBACK_GLYPH`] are now mostly a
+//! lower-level primitive + safety net (still exercised directly by this
+//! module's own tests, and by any FUTURE caller that bypasses `translit`),
+//! not the last word on what a rendered document shows.
 
 /// The 8x8 public-domain `font8x8_basic` glyph table, ASCII 0x00-0x7F. See
 /// the module docs for the source URL, license, and bit-order convention.
@@ -176,6 +207,120 @@ const FONT8X8_BASIC: [[u8; 8]; 128] = [
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
 
+/// The `font8x8_ext_latin` table: the Latin-1 supplement companion to
+/// [`FONT8X8_BASIC`] (packet t2-glyph-fallback) — see the module docs'
+/// "Latin-1 supplement" section for the source URL/license. 96 glyphs,
+/// index `0` is `U+00A0` (NBSP) through index `95` = `U+00FF` (ÿ), so
+/// `FONT8X8_EXT_LATIN[code - 0xA0]` is the glyph for codepoint `code`.
+///
+/// Comments below are corrected to the actual (strictly sequential,
+/// `U+00A0..=U+00FF`) codepoint each row encodes — upstream's own comments
+/// contain a couple of copy-paste codepoint-number typos around U+00B2-B4
+/// (e.g. two consecutive rows both commented `U+00B2`); the BYTES here are
+/// copied verbatim from upstream (this is what actually matters — the
+/// comment text is not), and this module's own tests spot-check specific
+/// rows against known glyph shapes (`e_acute_matches_the_known_font8x8_
+/// ext_latin_bitmap`, etc.) rather than trusting either set of comments.
+#[rustfmt::skip]
+const FONT8X8_EXT_LATIN: [[u8; 8]; 96] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // U+00A0 no-break space
+    [0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x18, 0x00], // U+00A1 inverted !
+    [0x18, 0x18, 0x7E, 0x03, 0x03, 0x7E, 0x18, 0x18], // U+00A2 cent sign
+    [0x1C, 0x36, 0x26, 0x0F, 0x06, 0x67, 0x3F, 0x00], // U+00A3 pound sterling
+    [0x00, 0x00, 0x63, 0x3E, 0x36, 0x3E, 0x63, 0x00], // U+00A4 currency sign
+    [0x33, 0x33, 0x1E, 0x3F, 0x0C, 0x3F, 0x0C, 0x0C], // U+00A5 yen sign
+    [0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00], // U+00A6 broken bar
+    [0x7C, 0xC6, 0x1C, 0x36, 0x36, 0x1C, 0x33, 0x1E], // U+00A7 section sign
+    [0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // U+00A8 diaeresis
+    [0x3C, 0x42, 0x99, 0x85, 0x85, 0x99, 0x42, 0x3C], // U+00A9 copyright sign
+    [0x3C, 0x36, 0x36, 0x7C, 0x00, 0x00, 0x00, 0x00], // U+00AA feminine ordinal indicator
+    [0x00, 0xCC, 0x66, 0x33, 0x66, 0xCC, 0x00, 0x00], // U+00AB left guillemet
+    [0x00, 0x00, 0x00, 0x3F, 0x30, 0x30, 0x00, 0x00], // U+00AC not sign
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // U+00AD soft hyphen
+    [0x3C, 0x42, 0x9D, 0xA5, 0x9D, 0xA5, 0x42, 0x3C], // U+00AE registered sign
+    [0x7E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // U+00AF macron
+    [0x1C, 0x36, 0x36, 0x1C, 0x00, 0x00, 0x00, 0x00], // U+00B0 degree sign
+    [0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x7E, 0x00], // U+00B1 plus-minus sign
+    [0x1C, 0x30, 0x18, 0x0C, 0x3C, 0x00, 0x00, 0x00], // U+00B2 superscript two
+    [0x1C, 0x30, 0x18, 0x30, 0x1C, 0x00, 0x00, 0x00], // U+00B3 superscript three
+    [0x18, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // U+00B4 acute accent
+    [0x00, 0x00, 0x66, 0x66, 0x66, 0x3E, 0x06, 0x03], // U+00B5 micro sign
+    [0xFE, 0xDB, 0xDB, 0xDE, 0xD8, 0xD8, 0xD8, 0x00], // U+00B6 pilcrow sign
+    [0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00], // U+00B7 middle dot
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x30, 0x1E], // U+00B8 cedilla
+    [0x08, 0x0C, 0x08, 0x1C, 0x00, 0x00, 0x00, 0x00], // U+00B9 superscript one
+    [0x1C, 0x36, 0x36, 0x1C, 0x00, 0x00, 0x00, 0x00], // U+00BA masculine ordinal indicator
+    [0x00, 0x33, 0x66, 0xCC, 0x66, 0x33, 0x00, 0x00], // U+00BB right guillemet
+    [0xC3, 0x63, 0x33, 0xBD, 0xEC, 0xF6, 0xF3, 0x03], // U+00BC vulgar fraction one quarter
+    [0xC3, 0x63, 0x33, 0x7B, 0xCC, 0x66, 0x33, 0xF0], // U+00BD vulgar fraction one half
+    [0x03, 0xC4, 0x63, 0xB4, 0xDB, 0xAC, 0xE6, 0x80], // U+00BE vulgar fraction three quarters
+    [0x0C, 0x00, 0x0C, 0x06, 0x03, 0x33, 0x1E, 0x00], // U+00BF inverted ?
+    [0x07, 0x00, 0x1C, 0x36, 0x63, 0x7F, 0x63, 0x00], // U+00C0 A grave
+    [0x70, 0x00, 0x1C, 0x36, 0x63, 0x7F, 0x63, 0x00], // U+00C1 A acute
+    [0x1C, 0x36, 0x00, 0x3E, 0x63, 0x7F, 0x63, 0x00], // U+00C2 A circumflex
+    [0x6E, 0x3B, 0x00, 0x3E, 0x63, 0x7F, 0x63, 0x00], // U+00C3 A tilde
+    [0x63, 0x1C, 0x36, 0x63, 0x7F, 0x63, 0x63, 0x00], // U+00C4 A diaeresis
+    [0x0C, 0x0C, 0x00, 0x1E, 0x33, 0x3F, 0x33, 0x00], // U+00C5 A ring above
+    [0x7C, 0x36, 0x33, 0x7F, 0x33, 0x33, 0x73, 0x00], // U+00C6 AE
+    [0x1E, 0x33, 0x03, 0x33, 0x1E, 0x18, 0x30, 0x1E], // U+00C7 C cedilla
+    [0x07, 0x00, 0x3F, 0x06, 0x1E, 0x06, 0x3F, 0x00], // U+00C8 E grave
+    [0x38, 0x00, 0x3F, 0x06, 0x1E, 0x06, 0x3F, 0x00], // U+00C9 E acute
+    [0x0C, 0x12, 0x3F, 0x06, 0x1E, 0x06, 0x3F, 0x00], // U+00CA E circumflex
+    [0x36, 0x00, 0x3F, 0x06, 0x1E, 0x06, 0x3F, 0x00], // U+00CB E diaeresis
+    [0x07, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00], // U+00CC I grave
+    [0x38, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00], // U+00CD I acute
+    [0x0C, 0x12, 0x00, 0x1E, 0x0C, 0x0C, 0x1E, 0x00], // U+00CE I circumflex
+    [0x33, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00], // U+00CF I diaeresis
+    [0x3F, 0x66, 0x6F, 0x6F, 0x66, 0x66, 0x3F, 0x00], // U+00D0 Eth
+    [0x3F, 0x00, 0x33, 0x37, 0x3F, 0x3B, 0x33, 0x00], // U+00D1 N tilde
+    [0x0E, 0x00, 0x18, 0x3C, 0x66, 0x3C, 0x18, 0x00], // U+00D2 O grave
+    [0x70, 0x00, 0x18, 0x3C, 0x66, 0x3C, 0x18, 0x00], // U+00D3 O acute
+    [0x3C, 0x66, 0x18, 0x3C, 0x66, 0x3C, 0x18, 0x00], // U+00D4 O circumflex
+    [0x6E, 0x3B, 0x00, 0x3E, 0x63, 0x63, 0x3E, 0x00], // U+00D5 O tilde
+    [0xC3, 0x18, 0x3C, 0x66, 0x66, 0x3C, 0x18, 0x00], // U+00D6 O diaeresis
+    [0x00, 0x36, 0x1C, 0x08, 0x1C, 0x36, 0x00, 0x00], // U+00D7 multiplication sign
+    [0x5C, 0x36, 0x73, 0x7B, 0x6F, 0x36, 0x1D, 0x00], // U+00D8 O stroke
+    [0x0E, 0x00, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00], // U+00D9 U grave
+    [0x70, 0x00, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00], // U+00DA U acute
+    [0x3C, 0x66, 0x00, 0x66, 0x66, 0x66, 0x3C, 0x00], // U+00DB U circumflex
+    [0x33, 0x00, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00], // U+00DC U diaeresis
+    [0x70, 0x00, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x00], // U+00DD Y acute
+    [0x0F, 0x06, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x0F], // U+00DE Thorn
+    [0x00, 0x1E, 0x33, 0x1F, 0x33, 0x1F, 0x03, 0x03], // U+00DF sharp s
+    [0x07, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x7E, 0x00], // U+00E0 a grave
+    [0x38, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x7E, 0x00], // U+00E1 a acute
+    [0x7E, 0xC3, 0x3C, 0x60, 0x7C, 0x66, 0xFC, 0x00], // U+00E2 a circumflex
+    [0x6E, 0x3B, 0x1E, 0x30, 0x3E, 0x33, 0x7E, 0x00], // U+00E3 a tilde
+    [0x33, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x7E, 0x00], // U+00E4 a diaeresis
+    [0x0C, 0x0C, 0x1E, 0x30, 0x3E, 0x33, 0x7E, 0x00], // U+00E5 a ring above
+    [0x00, 0x00, 0xFE, 0x30, 0xFE, 0x33, 0xFE, 0x00], // U+00E6 ae
+    [0x00, 0x00, 0x1E, 0x03, 0x03, 0x1E, 0x30, 0x1C], // U+00E7 c cedilla
+    [0x07, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E, 0x00], // U+00E8 e grave
+    [0x38, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E, 0x00], // U+00E9 e acute
+    [0x7E, 0xC3, 0x3C, 0x66, 0x7E, 0x06, 0x3C, 0x00], // U+00EA e circumflex
+    [0x33, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E, 0x00], // U+00EB e diaeresis
+    [0x07, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00], // U+00EC i grave
+    [0x1C, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00], // U+00ED i acute
+    [0x3E, 0x63, 0x1C, 0x18, 0x18, 0x18, 0x3C, 0x00], // U+00EE i circumflex
+    [0x33, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00], // U+00EF i diaeresis
+    [0x1B, 0x0E, 0x1B, 0x30, 0x3E, 0x33, 0x1E, 0x00], // U+00F0 eth
+    [0x00, 0x1F, 0x00, 0x1F, 0x33, 0x33, 0x33, 0x00], // U+00F1 n tilde
+    [0x00, 0x07, 0x00, 0x1E, 0x33, 0x33, 0x1E, 0x00], // U+00F2 o grave
+    [0x00, 0x38, 0x00, 0x1E, 0x33, 0x33, 0x1E, 0x00], // U+00F3 o acute
+    [0x1E, 0x33, 0x00, 0x1E, 0x33, 0x33, 0x1E, 0x00], // U+00F4 o circumflex
+    [0x6E, 0x3B, 0x00, 0x1E, 0x33, 0x33, 0x1E, 0x00], // U+00F5 o tilde
+    [0x00, 0x33, 0x00, 0x1E, 0x33, 0x33, 0x1E, 0x00], // U+00F6 o diaeresis
+    [0x18, 0x18, 0x00, 0x7E, 0x00, 0x18, 0x18, 0x00], // U+00F7 division sign
+    [0x00, 0x60, 0x3C, 0x76, 0x7E, 0x6E, 0x3C, 0x06], // U+00F8 o stroke
+    [0x00, 0x07, 0x00, 0x33, 0x33, 0x33, 0x7E, 0x00], // U+00F9 u grave
+    [0x00, 0x38, 0x00, 0x33, 0x33, 0x33, 0x7E, 0x00], // U+00FA u acute
+    [0x1E, 0x33, 0x00, 0x33, 0x33, 0x33, 0x7E, 0x00], // U+00FB u circumflex
+    [0x00, 0x33, 0x00, 0x33, 0x33, 0x33, 0x7E, 0x00], // U+00FC u diaeresis
+    [0x00, 0x38, 0x00, 0x33, 0x33, 0x3E, 0x30, 0x1F], // U+00FD y acute
+    [0x00, 0x00, 0x06, 0x3E, 0x66, 0x3E, 0x06, 0x00], // U+00FE thorn
+    [0x00, 0x33, 0x00, 0x33, 0x33, 0x3E, 0x30, 0x1F], // U+00FF y diaeresis
+];
+
 /// The "missing glyph" fallback: a small hollow box, rendered for any `char`
 /// [`lookup`] doesn't have a real glyph for. Deliberately a left-right
 /// symmetric bit pattern (`0x7E`/`0x42`), so it renders identically
@@ -183,17 +328,41 @@ const FONT8X8_BASIC: [[u8; 8]; 128] = [
 /// wrong, unlike the real glyphs' bit order.
 const FALLBACK_GLYPH: [u8; 8] = [0x00, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x00];
 
+/// Low end of the embedded Latin-1 supplement range (packet
+/// t2-glyph-fallback) — [`FONT8X8_EXT_LATIN`]'s index `0`.
+const EXT_LATIN_START: u32 = 0xA0;
+
+/// High end (inclusive) of the embedded Latin-1 supplement range —
+/// [`FONT8X8_EXT_LATIN`]'s last index (`0xA0 + 96 - 1`).
+const EXT_LATIN_END: u32 = 0xFF;
+
+/// Whether the embedded atlas has a REAL glyph for `ch` — i.e. [`lookup`]
+/// would return actual authored glyph pixels rather than [`FALLBACK_GLYPH`].
+/// `pub(crate)`: `text::translit::resolve` (packet t2-glyph-fallback, the
+/// shared fb/tty transliteration seam) calls this FIRST, before ever
+/// consulting the transliteration table — resolution order (a) in that
+/// module's own doc comment. Covers the exact same two ranges [`lookup`]
+/// does (ASCII `0x00..=0x7F`, Latin-1 supplement `0xA0..=0xFF`); kept in
+/// lockstep with `lookup` by construction (both key off the same two range
+/// checks), and cross-checked directly by this module's own tests (see
+/// `has_glyph_agrees_with_lookup_never_returning_the_fallback_when_true`).
+pub(crate) fn has_glyph(ch: char) -> bool {
+    let code = ch as u32;
+    code < FONT8X8_BASIC.len() as u32 || (EXT_LATIN_START..=EXT_LATIN_END).contains(&code)
+}
+
 /// Look up the 8x8 glyph bitmap for `ch`: one `u8` per pixel row (row 0 =
 /// top), bit 0 (LSB) = leftmost pixel — see the module docs for the license
 /// and bit-order citations. Total over all of `char`: any scalar outside the
-/// embedded `0x00..=0x7F` table (never just ASCII 0x20-0x7E; the fuller
-/// range costs nothing extra and control chars degrade to their authored
-/// blank shape, not a fallback box) returns [`FALLBACK_GLYPH`] instead of
+/// embedded `0x00..=0x7F` (ASCII) and `0xA0..=0xFF` (Latin-1 supplement,
+/// packet t2-glyph-fallback) tables returns [`FALLBACK_GLYPH`] instead of
 /// panicking.
 pub(crate) fn lookup(ch: char) -> [u8; 8] {
     let code = ch as u32;
     if code < FONT8X8_BASIC.len() as u32 {
         FONT8X8_BASIC[code as usize]
+    } else if (EXT_LATIN_START..=EXT_LATIN_END).contains(&code) {
+        FONT8X8_EXT_LATIN[(code - EXT_LATIN_START) as usize]
     } else {
         FALLBACK_GLYPH
     }
@@ -235,8 +404,13 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_falls_back_to_the_tofu_box_not_a_panic() {
-        for ch in ['é', 'ñ', '日', '本', '😀', '🦀', char::REPLACEMENT_CHARACTER, '\u{10FFFF}'] {
+    fn non_latin1_falls_back_to_the_tofu_box_not_a_panic() {
+        // packet t2-glyph-fallback: 'é'/'ñ' moved OUT of this set — they're
+        // now real Latin-1 supplement glyphs (see
+        // `latin1_supplement_characters_have_real_glyphs_not_the_fallback`
+        // below) — this test now only covers scalars genuinely outside BOTH
+        // embedded tables (CJK, emoji, unassigned/private-use).
+        for ch in ['日', '本', '😀', '🦀', char::REPLACEMENT_CHARACTER, '\u{10FFFF}'] {
             assert_eq!(lookup(ch), FALLBACK_GLYPH, "expected fallback glyph for {ch:?}");
         }
     }
@@ -245,6 +419,72 @@ mod tests {
     fn totality_over_every_control_and_boundary_scalar_no_panic() {
         for ch in ['\u{0}', '\t', '\n', '\r', '\u{7f}', '\u{80}', '\u{D7FF}', '\u{E000}'] {
             let _ = lookup(ch); // must not panic
+        }
+    }
+
+    // --------------------------------------------- Latin-1 supplement (t2)
+
+    #[test]
+    fn latin1_supplement_characters_have_real_glyphs_not_the_fallback() {
+        for ch in ['\u{00A0}', 'é', 'ñ', 'ü', 'ß', '£', '©', '®', '×', 'ÿ'] {
+            assert_ne!(lookup(ch), FALLBACK_GLYPH, "{ch:?} (U+{:04X}) should have a real Latin-1 glyph", ch as u32);
+        }
+    }
+
+    #[test]
+    fn e_acute_matches_the_known_font8x8_ext_latin_bitmap() {
+        // Spot-check one row against the upstream table's own bytes (module
+        // doc: comments are corrected, bytes are copied verbatim) — a
+        // concrete anchor, same role `capital_a_is_the_known_font8x8_bitmap`
+        // plays for the ASCII table above.
+        assert_eq!(lookup('é'), [0x38, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E, 0x00]);
+    }
+
+    #[test]
+    fn nbsp_and_soft_hyphen_are_intentionally_blank_glyphs() {
+        // Real atlas coverage, per `has_glyph`, but the AUTHORED shape is an
+        // empty cell for both — distinct from FALLBACK_GLYPH (a hollow box)
+        // and distinct from "not covered at all".
+        assert_eq!(lookup('\u{00A0}'), [0u8; 8], "NBSP should render as blank, not a box");
+        assert_eq!(lookup('\u{00AD}'), [0u8; 8], "soft hyphen should render as blank, not a box");
+    }
+
+    #[test]
+    fn ext_latin_table_has_exactly_96_rows_spanning_u00a0_to_u00ff() {
+        assert_eq!(FONT8X8_EXT_LATIN.len(), 96);
+        assert_eq!(EXT_LATIN_END - EXT_LATIN_START + 1, 96);
+    }
+
+    #[test]
+    fn multiplication_sign_and_registered_sign_render_as_documented_by_the_t2_bug_report() {
+        // U+00D7 (x) and U+00AE (r) are both real-world punctuation the D2
+        // bug report calls out — both now atlas-covered directly (no
+        // transliteration needed for either at the atlas layer).
+        assert_ne!(lookup('\u{00D7}'), FALLBACK_GLYPH);
+        assert_ne!(lookup('\u{00AE}'), FALLBACK_GLYPH);
+    }
+
+    // -------------------------------------------------------- has_glyph (t2)
+
+    #[test]
+    fn has_glyph_is_true_for_ascii_and_latin1_false_outside_both_ranges() {
+        for ch in ['A', ' ', '~', '\u{00A0}', 'é', '×', '\u{00FF}'] {
+            assert!(has_glyph(ch), "{ch:?} should be covered");
+        }
+        for ch in ['\u{0080}', '\u{009F}', '\u{2014}', '日', '😀'] {
+            assert!(!has_glyph(ch), "{ch:?} should NOT be covered");
+        }
+    }
+
+    #[test]
+    fn has_glyph_agrees_with_lookup_never_returning_the_fallback_when_true() {
+        // Cross-check: `has_glyph` and `lookup` must never disagree about
+        // coverage — see `has_glyph`'s own doc comment on why this matters.
+        for code in 0x00u32..=0x2100 {
+            let Some(ch) = char::from_u32(code) else { continue };
+            if has_glyph(ch) {
+                assert_ne!(lookup(ch), FALLBACK_GLYPH, "has_glyph({ch:?}) is true but lookup returned the fallback");
+            }
         }
     }
 }

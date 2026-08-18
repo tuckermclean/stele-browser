@@ -7,12 +7,15 @@
 //! regenerates/adds it but never self-blesses; the orchestrator
 //! views/blesses.
 //!
-//! The font is ASCII-only, so a decoded non-ASCII character (©, —) renders
-//! as the "tofu" fallback glyph in a PNG — but `backend::tty`'s `TextGrid`
-//! stores real `char`s per cell (`write_marker` writes each source `char`
-//! verbatim; no ASCII-only substitution happens at the text-grid level, only
-//! in the bitmap-font PNG path), so the TEXT dump carries the actual decoded
-//! Unicode character. That's what these assertions check.
+//! Packet t2-glyph-fallback UPDATE: the atlas now covers the full Latin-1
+//! supplement (`text::glyphs`), so a decoded `©`/`®` (U+00A9/U+00AE) is a
+//! REAL rasterized glyph, not tofu — and `backend::tty::write_marker` now
+//! runs every `Text` fragment's string through `text::translit::resolve`
+//! before writing cells, so `—` (U+2014, em dash — General Punctuation,
+//! outside Latin-1) is transliterated to a plain ASCII `-` in the TEXT dump
+//! too, matching what the PNG path renders (see `text::translit`'s own
+//! module doc for the shared fb/tty resolution order). Both TTY and PNG
+//! output now agree on every character in this fixture.
 //!
 //! One entity in the required set — `&nbsp;` — needs a documented carve-out:
 //! see `nbsp_decodes_but_layout_s_frozen_whitespace_collapsing_normalizes_it_to_an_ordinary_space`
@@ -58,16 +61,24 @@ fn named_markup_entities_decode_to_their_literal_characters() {
 #[test]
 fn named_symbol_entities_decode_to_their_real_unicode_characters() {
     let actual = dump(ENTITIES_HTML, COLS);
-    assert!(actual.contains('\u{00A9}'), "&copy; should decode to U+00A9");
-    assert!(actual.contains('\u{00AE}'), "&reg; should decode to U+00AE");
-    assert!(actual.contains('\u{2014}'), "&mdash; should decode to U+2014 (also shared by the hex numeric check below)");
+    assert!(actual.contains('\u{00A9}'), "&copy; should decode to U+00A9 (real Latin-1 glyph, atlas-covered)");
+    assert!(actual.contains('\u{00AE}'), "&reg; should decode to U+00AE (real Latin-1 glyph, atlas-covered)");
+    // packet t2-glyph-fallback: &mdash; decodes to U+2014 at the DOM level
+    // (unchanged), but the RENDERED tty text now carries its
+    // transliteration ('-'), not the raw U+2014 -- see this file's own
+    // module doc comment.
+    assert!(actual.contains("a - b"), "&mdash; should decode to U+2014, then transliterate to '-' in the rendered dump");
+    assert!(!actual.contains('\u{2014}'), "the raw em dash must not survive rendering -- it's transliterated, not tofu'd");
 }
 
 #[test]
 fn numeric_and_hex_numeric_entities_decode_to_the_same_characters_as_their_named_equivalents() {
     let actual = dump(ENTITIES_HTML, COLS);
     assert!(actual.contains("NumCopy: \u{00A9}"), "&#169; (decimal numeric) should decode to U+00A9, same as &copy;");
-    assert!(actual.contains("HexDash: a \u{2014} b"), "&#x2014; (hex numeric) should decode to U+2014, same as &mdash;");
+    assert!(
+        actual.contains("HexDash: a - b"),
+        "&#x2014; (hex numeric) should decode to U+2014, same as &mdash;, then transliterate to '-' same as it"
+    );
 }
 
 #[test]

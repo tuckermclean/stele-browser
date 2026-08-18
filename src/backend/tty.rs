@@ -698,13 +698,29 @@ fn set_grid_ch(rows: &mut [Vec<Cell>], row: usize, col: usize, ch: char, fg: Col
 /// draw from) leaves each cell's `fg` at whatever it already was (the grid
 /// default unless something upstream already colored it). Either way `bg`
 /// is left untouched — see module docs' "text keeps the box's bg" rule.
+///
+/// Packet t2-glyph-fallback: `text` is run through `text::translit::resolve`
+/// FIRST — every char this backend actually writes into a cell is either a
+/// real atlas-covered character, an ASCII transliteration of one that
+/// isn't, or (for a genuinely unrepresentable char) simply absent. This
+/// keeps a `--dump-text` golden and a `--dump-png` screenshot of the SAME
+/// document in agreement about what the document's punctuation reads as —
+/// see `text::translit`'s own module doc for the full resolution order and
+/// why this backend, which has no glyph RASTERIZER of its own, still needs
+/// it (the atlas is the single source of truth for "can Stele represent
+/// this character," not just a PNG-path concern). One consequence: the
+/// number of chars WRITTEN can differ from `text.chars().count()` (e.g. an
+/// ellipsis becomes three `.`s, an unmappable emoji becomes zero chars) —
+/// `col` advances by however many characters the SANITIZED string actually
+/// contains, same as a real terminal echoing whatever bytes it's given.
 fn write_marker(rows: &mut [Vec<Cell>], fragment: &Fragment, text: &str, fg: Option<Color>, cols: usize) {
     let row = cell_index(fragment.rect.origin.y, CELL_H);
     if row >= rows.len() {
         return;
     }
     let mut col = cell_index(fragment.rect.origin.x, CELL_W);
-    for ch in text.chars() {
+    let sanitized = crate::text::translit::resolve(text);
+    for ch in sanitized.chars() {
         if col >= cols {
             break;
         }

@@ -707,6 +707,55 @@ else
   fi
 
   # ---------------------------------------------------------------------
+  # A3v/A3w -- packet t2-glyph-fallback's own goldens: fixtures/
+  # punctuation.html exercises em/en dash, curly quotes, ellipsis, bullet,
+  # nbsp, the multiplication sign, a right arrow, and (to prove the
+  # skip-and-count default actually skips rather than tofu-ing) an emoji and
+  # a CJK pair -- see `text::translit`'s own module doc for the atlas +
+  # transliteration resolution order this fixture is meant to exercise. A3v
+  # is the tty dump (same discipline as A3/A3b/.../A3s's own tty blocks
+  # above); A3w is the PNG dump (same byte-equality rationale as A3e/A3f/
+  # .../A3s's own PNG blocks). Same host binary, same blessing discipline,
+  # same independent block so a failure/bless of one doesn't short-circuit
+  # the other. (Numbered A3v/A3w, not A3t/A3u, to avoid colliding with
+  # packet t4-button-honesty's own controls.html checks right above, which
+  # landed on main first and already claimed A3t/A3u.)
+  GOLDEN_TTY_PUNCTUATION="goldens/punctuation.tty.txt"
+  GOLDEN_PNG_PUNCTUATION="goldens/punctuation.png"
+  FIXTURE_PUNCTUATION="fixtures/punctuation.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3v: host binary still not found at $HOST_BIN"
+  elif ! out_punctuation="$("$HOST_BIN" --headless --dump-text "$FIXTURE_PUNCTUATION" 2>/tmp/stele_a3v.err)"; then
+    bad "A3v: stele --headless --dump-text crashed on $FIXTURE_PUNCTUATION"
+    sed 's/^/    /' /tmp/stele_a3v.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_punctuation" > "$GOLDEN_TTY_PUNCTUATION"
+    pass "A3v: blessed punctuation tty golden -> $GOLDEN_TTY_PUNCTUATION (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_PUNCTUATION" <(printf '%s\n' "$out_punctuation") >/tmp/stele_a3v.diff 2>&1; then
+    pass "A3v: tty dump of $FIXTURE_PUNCTUATION matches golden"
+  else
+    bad "A3v: tty dump of $FIXTURE_PUNCTUATION differs from $GOLDEN_TTY_PUNCTUATION"
+    sed 's/^/    /' /tmp/stele_a3v.diff
+  fi
+
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3w: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_PUNCTUATION" /tmp/stele_a3w.png 2>/tmp/stele_a3w.err; then
+    bad "A3w: stele --headless --dump-png crashed on $FIXTURE_PUNCTUATION"
+    sed 's/^/    /' /tmp/stele_a3w.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3w.png "$GOLDEN_PNG_PUNCTUATION"
+    pass "A3w: blessed punctuation PNG golden -> $GOLDEN_PNG_PUNCTUATION (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_PUNCTUATION" ]; then
+    bad "A3w: no golden at $GOLDEN_PNG_PUNCTUATION to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_PUNCTUATION" /tmp/stele_a3w.png; then
+    pass "A3w: PNG dump of $FIXTURE_PUNCTUATION matches golden"
+  else
+    bad "A3w: PNG dump of $FIXTURE_PUNCTUATION differs from $GOLDEN_PNG_PUNCTUATION"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_PUNCTUATION") actual=$(wc -c < /tmp/stele_a3w.png)"
+  fi
+
+  # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline
   # markup, lists, blockquote, pre, hr, br, a table with colspan/rowspan, a
