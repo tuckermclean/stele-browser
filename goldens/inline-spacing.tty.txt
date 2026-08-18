@@ -3,11 +3,9 @@ Inline Spacing
 
 
 
-
 T3 inline-spacing (D3 fix): distinct flex items must never visually run
 together, and an inline run must never gain a space it didn't have in the
 source.
-
 
 Flex row, real (correctly parsed) two-value px gap
 
@@ -29,13 +27,10 @@ Alpha Beta Gamma
 Intra-word inline split (must stay "bold")
 
 
-
 bold
-
 
 Adjacent inline elements, no source whitespace (must
 stay "abc")
-
 
 
 abc

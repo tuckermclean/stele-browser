@@ -3,26 +3,20 @@
  List Markers
 
 
-
  A plain unordered list (default disc marker, rendered as an ASCII bullet):
-
 
       * First bullet item
       * Second bullet item
 
-
  A plain ordered list (default decimal marker):
-
 
       1. First ordinal item
       2. Second ordinal item
       3. Third ordinal item
 
-
  An ordered list nested inside the second item of another ordered list -- the
  nested list's own ordinals restart at 1, independent of the outer list's
  count:
-
 
       1. Outer item one
       2. Outer item two
@@ -32,19 +26,14 @@
 
       3. Outer item three
 
-
  A list with list-style-type: none -- no marker at all:
-
 
       No marker on this item
       Nor this one
 
-
  An ordered list starting at 5 via the start attribute:
-
 
       5. Fifth item
       6. Sixth item
-
 
  End of fixture.
