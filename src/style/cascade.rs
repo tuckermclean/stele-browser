@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 use crate::dom::{Dom, Node, NodeId};
 use crate::style::computed::{
-    BorderSide, BorderStyle, Dimension, Edges, GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize,
-    LengthPercentage, LengthPercentageAuto, LineHeight,
+    BorderSide, BorderStyle, BoxSizing, Dimension, Edges, GridRepetitionCount, GridTemplateComponent, GridTrack,
+    GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
@@ -309,6 +309,12 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         border_collapse: own!(border_collapse),
         float: own!(float),
         clear: own!(clear),
+        // packet/acid1-content-box: non-inherited ("own"), same shape as
+        // `border_collapse`/`float`/`clear` right above -- `own!` falls
+        // back to `ComputedStyle::default().box_sizing` (`BoxSizing::
+        // ContentBox`, CSS's real initial value) whenever nothing declared
+        // `box-sizing` at all.
+        box_sizing: own!(box_sizing),
 
         flex_direction: own!(flex_direction),
         flex_wrap: own!(flex_wrap),
@@ -726,6 +732,25 @@ mod tests {
             assert_eq!(side.style, BorderStyle::Solid);
             assert_eq!(side.color, Color::rgb(255, 0, 0));
         }
+    }
+
+    #[test]
+    fn box_sizing_defaults_to_content_box_when_never_declared() {
+        // CSS's real initial value -- packet/acid1-content-box.
+        let d = dom::parser::parse("<div>x</div>");
+        let styles = cascade(&d, &[]);
+        let div = find(&d, "div");
+        assert_eq!(styles[div].box_sizing, BoxSizing::ContentBox);
+    }
+
+    #[test]
+    fn box_sizing_border_box_can_be_declared_via_a_universal_selector() {
+        // fixtures/grid.html's own `* { box-sizing: border-box; }`.
+        let d = dom::parser::parse("<div>x</div>");
+        let sheet = parser::parse("* { box-sizing: border-box; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        assert_eq!(styles[div].box_sizing, BoxSizing::BorderBox);
     }
 
     #[test]

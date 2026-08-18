@@ -356,14 +356,14 @@ fn nested_floats_beneath_a_plain_wrapper_still_wrap_at_inner_width() {
 /// packet/acid1-content-box (re-applying packet/acid1-coherence's proof): a
 /// floated box's declared `width` must be its CONTENT size, with
 /// padding/border adding on top to reach the rendered (border-box) width --
-/// CSS's `box-sizing: content-box` initial value, which is the ONLY value
-/// this engine can mean (there is no `box-sizing` CSS property support at
-/// all, see `layout::block::float_box_sizing`'s own doc comment). Before
-/// this packet, `layout::block::base_style` never set taffy's `box_sizing`
-/// field at all, so every node silently fell back to taffy's OWN default
-/// (`BoxSizing::BorderBox`): the declared `width` pinned the BORDER-BOX
-/// size instead, so padding/border ate INTO the content area rather than
-/// adding beyond it.
+/// CSS's `box-sizing: content-box` initial value, which every element gets
+/// unless it explicitly declares `box-sizing: border-box` (real `box-sizing`
+/// CSS parsing, see `layout::block::map_box_sizing`'s own doc comment).
+/// Before this packet, `layout::block::base_style` never set taffy's
+/// `box_sizing` field at all, so every node silently fell back to taffy's
+/// OWN default (`BoxSizing::BorderBox`): the declared `width` pinned the
+/// BORDER-BOX size instead, so padding/border ate INTO the content area
+/// rather than adding beyond it.
 #[test]
 fn floated_box_with_padding_and_border_uses_content_box_sizing() {
     let html = r#"

@@ -5,8 +5,8 @@
 
 use crate::dom::AttrMap;
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderCollapse, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float, FontFamily,
-    FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
+    AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Display, FlexDirection, FlexWrap, Float,
+    FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
     WhiteSpace,
 };
 use crate::style::tokenizer::Token;
@@ -210,6 +210,14 @@ pub(crate) struct Declarations {
     pub border_collapse: Option<BorderCollapse>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
+    /// `box-sizing: content-box | border-box` (packet/acid1-content-box) --
+    /// `fixtures/grid.html`'s `* { box-sizing: border-box; }` is the one
+    /// fixture that declares it today; `None` (not `Some(ContentBox)`) is
+    /// "this element's cascade never mentioned it," resolved by `cascade::
+    /// resolve`'s `own!` to `ComputedStyle::default().box_sizing` (CSS's
+    /// real `ContentBox` initial value) the same way every other `own!`
+    /// field here defaults when unset.
+    pub box_sizing: Option<BoxSizing>,
 
     pub flex_direction: Option<FlexDirection>,
     pub flex_wrap: Option<FlexWrap>,
@@ -302,6 +310,7 @@ impl Declarations {
         ov!(border_collapse);
         ov!(float);
         ov!(clear);
+        ov!(box_sizing);
         ov!(flex_direction);
         ov!(flex_wrap);
         ov!(justify_content);
@@ -1704,6 +1713,23 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             _ => false,
         },
+        // packet/acid1-content-box: `fixtures/grid.html`'s `* { box-sizing:
+        // border-box; }` is the one fixture that declares this today --
+        // parsing it lets that page's explicit request be honored (its
+        // `.card` keeps its already-blessed pixels) instead of silently
+        // dropping the property the way this engine did before this
+        // packet (`Declarations::box_sizing`'s own doc comment).
+        "box-sizing" => match keyword(tokens).as_deref() {
+            Some("content-box") => {
+                d.box_sizing = Some(BoxSizing::ContentBox);
+                true
+            }
+            Some("border-box") => {
+                d.box_sizing = Some(BoxSizing::BorderBox);
+                true
+            }
+            _ => false,
+        },
         "flex-direction" => match keyword(tokens).as_deref() {
             Some("row") => {
                 d.flex_direction = Some(FlexDirection::Row);
@@ -2217,6 +2243,29 @@ mod tests {
         assert!(apply_property("border-color", &toks("black"), &mut d));
         assert!(d.border.is_none(), "border-width/-style/-color longhands must not also set the `border` shorthand field");
         assert!(d.border_top.is_none());
+    }
+
+    // ---- packet/acid1-content-box: `box-sizing` ----
+
+    #[test]
+    fn box_sizing_border_box_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("box-sizing", &toks("border-box"), &mut d));
+        assert_eq!(d.box_sizing, Some(BoxSizing::BorderBox));
+    }
+
+    #[test]
+    fn box_sizing_content_box_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("box-sizing", &toks("content-box"), &mut d));
+        assert_eq!(d.box_sizing, Some(BoxSizing::ContentBox));
+    }
+
+    #[test]
+    fn box_sizing_rejects_an_unknown_keyword() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("box-sizing", &toks("padding-box"), &mut d));
+        assert_eq!(d.box_sizing, None);
     }
 
     // ---- packet/table-spacing: `border-spacing` shorthand ----
