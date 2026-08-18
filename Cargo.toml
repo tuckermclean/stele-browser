@@ -51,6 +51,7 @@ taffy = { version = "0.13", default-features = false, features = [
     "flexbox",
     "block_layout",
     "float_layout",
+    "grid",
     "content_size",
 ] }
 
