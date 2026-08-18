@@ -1418,6 +1418,13 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 d.display = Some(Display::TableRowGroup);
                 true
             }
+            // packet/display-list-item: real CSS's own value for generating
+            // a list marker (bullet/ordinal) — see `Display::ListItem`'s own
+            // doc comment (`style/computed.rs`) for the full contract.
+            Some("list-item") => {
+                d.display = Some(Display::ListItem);
+                true
+            }
             _ => false,
         },
         "width" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.width = Some(l)).is_some(),
@@ -1920,6 +1927,22 @@ mod tests {
         let mut d = Declarations::default();
         assert!(apply_property("display", &toks("TABLE-CELL"), &mut d));
         assert_eq!(d.display, Some(Display::TableCell));
+    }
+
+    #[test]
+    fn parses_list_item_display_value() {
+        // packet/display-list-item: `display: list-item` must parse to the
+        // dedicated `Display::ListItem` variant, distinct from `Block` — see
+        // `Display::ListItem`'s own doc comment for why the distinction
+        // matters (list-marker emission).
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("list-item"), &mut d));
+        assert_eq!(d.display, Some(Display::ListItem));
+
+        // Case-insensitive, like the other display keywords.
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("LIST-ITEM"), &mut d));
+        assert_eq!(d.display, Some(Display::ListItem));
     }
 
     #[test]

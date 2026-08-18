@@ -62,7 +62,19 @@ pre { font-family: monospace; white-space: pre; margin: 1em 0; }
 ul, ol { margin: 1em 0; padding-left: 40px; }
 ul { list-style-type: disc; }
 ol { list-style-type: decimal; }
-li { display: block; }
+/* packet/display-list-item: real CSS's own default for `<li>` is `display:
+   list-item`, not `block` -- the distinction matters because only a
+   `list-item` box gets a synthesized marker (bullet/ordinal), see
+   `layout::box_tree::build_list_container_node`. `li` is still caught by the
+   generic `display: block` rule above (same pattern the table elements use,
+   `display: table`/`table-row`/... below); this later, more specific-in-
+   source-order rule overrides it, exactly like the table rules do. Author
+   CSS that overrides `display` away from `list-item` (`block`, `inline`,
+   ...) now correctly loses the marker -- see the packet's own report for the
+   contract this replaces (packet #58's `tag_is_li && display == Block`
+   stopgap, which could not tell "author wrote block on purpose" apart from
+   the UA default). */
+li { display: list-item; }
 
 blockquote { margin: 1em 40px; }
 /* `<hr>` (packet/hr-rule): a void element with no content of its own -- a

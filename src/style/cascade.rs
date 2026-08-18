@@ -475,6 +475,30 @@ mod tests {
     }
 
     #[test]
+    fn li_gets_list_item_display_from_ua_sheet_by_default() {
+        // packet/display-list-item: the UA default for `<li>` is `display:
+        // list-item` (real CSS), not `block` -- see `Display::ListItem`'s
+        // own doc comment (`style/computed.rs`) for why the distinction
+        // matters (list-marker emission, `layout::box_tree::
+        // build_list_container_node`).
+        let d = dom::parser::parse("<ul><li>a</li></ul>");
+        let styles = cascade(&d, &[]);
+        assert_eq!(styles[find(&d, "li")].display, Display::ListItem);
+    }
+
+    #[test]
+    fn author_css_can_override_li_display_away_from_list_item() {
+        // Author CSS wins over the UA default, same as any other property --
+        // `display: block`/`display: inline` on an `<li>` must resolve to
+        // exactly that value, not stay pinned at `ListItem`.
+        let d = dom::parser::parse(r#"<ul><li style="display: block;">a</li><li style="display: inline;">b</li></ul>"#);
+        let styles = cascade(&d, &[]);
+        let items: Vec<_> = find_all(&d, "li");
+        assert_eq!(styles[items[0]].display, Display::Block);
+        assert_eq!(styles[items[1]].display, Display::Inline);
+    }
+
+    #[test]
     fn child_inherits_color_and_font_family_from_parent() {
         let d = dom::parser::parse(r#"<div><span>x</span></div>"#);
         let sheet = parser::parse("div { color: green; font-family: monospace; }");
