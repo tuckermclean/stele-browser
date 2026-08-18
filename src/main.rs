@@ -118,7 +118,9 @@ struct Args {
     /// separate from `color_scheme` itself because it gates a SECOND,
     /// independent behavior: the pre-cascade `data-theme`/`data-mode`
     /// root-attribute stamp (`stamp_color_scheme`, called from
-    /// `dump_text_opts`/`dump_png_opts`/`render_fb_surface_opts`).
+    /// `dump_text_opts`/`dump_png_opts` — packet t1d-httpforever wired the
+    /// latter in; `render_fb_surface_opts`/`--render-fb` remains
+    /// `--color-scheme`-unaware, out of scope for that packet too).
     /// Stamping is flag-gated rather than unconditional so the DEFAULT
     /// (no flag at all) render path stays byte-for-byte identical to every
     /// already-blessed golden — see `stamp_color_scheme`'s own doc comment
@@ -522,25 +524,47 @@ fn blank_png() -> Vec<u8> {
 /// not this packet's job.
 #[cfg(test)]
 fn dump_png(source: &str) -> Vec<u8> {
-    dump_png_opts(source, false)
+    dump_png_opts(source, false, style::ColorScheme::Light, false)
 }
 
 /// [`dump_png`]'s real implementation, parameterized over `no_bg_images`
-/// (packet bg-image's `--no-bg-images` kill switch) — `dump_png` itself is a
-/// thin wrapper always passing `false` (bg-images ON), keeping every
-/// existing `dump_png` call site/test unchanged; `main`'s `--dump-png`
-/// branch calls this directly with `args.no_bg_images`.
-fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
+/// (packet bg-image's `--no-bg-images` kill switch) and, as of packet
+/// t1d-httpforever, `scheme`/`stamp` (packet t1b-color-scheme's
+/// `--color-scheme`, wired through here the SAME way `dump_text_opts`
+/// already wires them — see that function's own doc comment for the
+/// stamp-vs-scheme split). `dump_png` itself is a thin wrapper always
+/// passing `(false, ColorScheme::Light, false)`, keeping every existing
+/// `dump_png` call site/test unchanged; `main`'s `--dump-png` branch calls
+/// this directly with `args.no_bg_images`/`args.color_scheme`/
+/// `args.color_scheme_given`.
+///
+/// This closes a gap the original t1b-color-scheme packet left open: that
+/// packet scoped `--color-scheme` to `--dump-text` only (see the removed
+/// doc-comment note this replaces), which meant a page like httpforever.com
+/// — whose dark theme is reachable ONLY via `--color-scheme dark` (no
+/// `prefers-color-scheme` fallback) — could never be PNG-screenshotted in
+/// its dark theme at all. t1d-httpforever's own dark-theme fidelity fixture
+/// needs exactly that, so this packet finishes the wiring.
+fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Vec<u8> {
     let url = resolve_url(source);
     let response = match fetch_response(&url) {
         Ok(r) => r,
         Err(_) => return blank_png(),
     };
     let html = String::from_utf8_lossy(&response.body);
-    let dom_tree = dom::parser::parse(&html);
+    let mut dom_tree = dom::parser::parse(&html);
 
     if frames::find_frameset(&dom_tree).is_some() {
         return blank_png();
+    }
+
+    // Packet t1d-httpforever: same pre-cascade `data-theme`/`data-mode` stamp
+    // `dump_text_opts` applies, gated the same way (only when `--color-scheme`
+    // was actually given) — see `stamp_color_scheme`'s own doc comment for
+    // the full golden-churn rationale (the default, no-flag path must stay
+    // byte-for-byte identical to every already-blessed PNG golden).
+    if stamp {
+        stamp_color_scheme(&mut dom_tree, scheme);
     }
 
     // M5 + m5-link-css: feed cascade every author sheet in document order —
@@ -550,10 +574,10 @@ fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
     // `style=` needs no extra wiring: cascade reads it straight off each
     // Element it already walks. M5 media: `--dump-png`'s viewport width is
     // the fixed `DEFAULT_PNG_WIDTH` (below) — flatten any `@media` (in-CSS
-    // or a `<link media=...>` attribute) against THAT. Not `--color-scheme`-
-    // aware (packet t1b-color-scheme scoped that flag to `--dump-text` only
-    // — see that packet's PR for the rationale): always `Light` here.
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, style::ColorScheme::Light);
+    // or a `<link media=...>` attribute) against THAT, evaluated against
+    // `scheme` (packet t1d-httpforever: was hardcoded `Light`, now threaded
+    // through from the CLI the same way `dump_text_opts` already does).
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, scheme);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // Pixels matter on this path: fetch+decode every <img src> up front
     // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
@@ -610,14 +634,15 @@ fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
 /// directory, a hostile/invalid `out_path`).
 #[cfg(test)]
 fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
-    write_dump_png_opts(source, out_path, false)
+    write_dump_png_opts(source, out_path, false, style::ColorScheme::Light, false)
 }
 
 /// [`write_dump_png`]'s real implementation, parameterized over
-/// `no_bg_images` — see [`dump_png_opts`]'s doc comment for the same
-/// wrapper-over-parameterized-impl rationale.
-fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool) -> Result<(), String> {
-    let bytes = dump_png_opts(source, no_bg_images);
+/// `no_bg_images`/`scheme`/`stamp` — see [`dump_png_opts`]'s doc comment for
+/// the same wrapper-over-parameterized-impl rationale and the
+/// packet-t1d-httpforever `scheme`/`stamp` wiring specifically.
+fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Result<(), String> {
+    let bytes = dump_png_opts(source, no_bg_images, scheme, stamp);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
@@ -657,17 +682,39 @@ fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool) -> Resu
 /// borderline-compliant color across the threshold on very low-color-depth
 /// hardware. Auditing post-quantization is a reasonable follow-up, not
 /// this packet's job (brief scope).
+///
+/// Packet t1d-httpforever: thin wrapper always auditing at
+/// `(ColorScheme::Light, false)` — keeps every existing `audit_contrast`
+/// call site/test unchanged, same wrapper-over-parameterized-impl split as
+/// `dump_png`/`dump_png_opts`. `main`'s `--audit-contrast` branch calls
+/// [`audit_contrast_opts`] directly with `args.color_scheme`/
+/// `args.color_scheme_given`, so a page whose dark theme is reachable only
+/// via `--color-scheme dark` (httpforever.com's own `html[data-theme=dark]`
+/// gate, no `prefers-color-scheme` fallback) can actually be audited in its
+/// dark theme, not just its default light one.
+#[cfg(test)]
 fn audit_contrast(source: &str) -> Result<Vec<String>, String> {
+    audit_contrast_opts(source, style::ColorScheme::Light, false)
+}
+
+/// [`audit_contrast`]'s real implementation, parameterized over `scheme`/
+/// `stamp` — see that function's own doc comment and [`dump_png_opts`]'s for
+/// the shared rationale.
+fn audit_contrast_opts(source: &str, scheme: style::ColorScheme, stamp: bool) -> Result<Vec<String>, String> {
     let url = resolve_url(source);
     let response = fetch_response(&url)?;
     let html = String::from_utf8_lossy(&response.body);
-    let dom_tree = dom::parser::parse(&html);
+    let mut dom_tree = dom::parser::parse(&html);
 
     if frames::find_frameset(&dom_tree).is_some() {
         return Ok(Vec::new());
     }
 
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, style::ColorScheme::Light);
+    if stamp {
+        stamp_color_scheme(&mut dom_tree, scheme);
+    }
+
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, scheme);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
@@ -746,7 +793,10 @@ fn render_fb_surface_opts(source: &str, width: u32, no_bg_images: bool) -> Resul
     // Element it already walks. M5 media: `--render-fb`'s viewport width is
     // the real framebuffer width (`width` param) — flatten any `@media`
     // (in-CSS or a `<link media=...>` attribute) against that. Not
-    // `--color-scheme`-aware — see `dump_png_opts`'s identical note above.
+    // `--color-scheme`-aware — unlike `dump_png_opts` (wired by packet
+    // t1d-httpforever), `--render-fb` targets real hardware framebuffers,
+    // not the PNG-golden fixture corpus that packet's scope covers; wiring
+    // it through here too is a reasonable follow-up, not this packet's job.
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
@@ -869,7 +919,10 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
         return Err("frameset documents are not supported by --x11".to_string());
     }
 
-    // Not `--color-scheme`-aware — see `dump_png_opts`'s identical note.
+    // Not `--color-scheme`-aware — `--x11` is the interactive shell, which
+    // has no `--color-scheme` CLI flag to read at all (that flag is scoped
+    // to the `--headless` dump paths); out of scope for this and the
+    // t1b-color-scheme packet alike.
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
@@ -1357,9 +1410,10 @@ fn run_x11(source: &str) {
 /// what the status line prints).
 fn build_page_from_dom(dom_tree: dom::Dom, final_url: &Url, cols: usize) -> browser::Page {
     let viewport_width = cols as f32 * 8.0;
-    // Not `--color-scheme`-aware (packet t1b-color-scheme scoped that flag
-    // to `--dump-text` only, same as the other pixel/interactive paths —
-    // see `dump_png_opts`'s identical note).
+    // Not `--color-scheme`-aware — same rationale as `render_x11_page`'s
+    // identical note just above: the interactive shell has no
+    // `--color-scheme` CLI flag to read (scoped to the `--headless` dump
+    // paths only).
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, final_url, viewport_width, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let fragments = match build_box_tree(&dom_tree, &styles, &HashMap::new()) {
@@ -1783,7 +1837,7 @@ fn main() {
             if args.stats {
                 print_stats(&source, DEFAULT_PNG_WIDTH as f32);
             }
-            if let Err(e) = write_dump_png_opts(&source, &out_path, args.no_bg_images) {
+            if let Err(e) = write_dump_png_opts(&source, &out_path, args.no_bg_images, args.color_scheme, args.color_scheme_given) {
                 eprintln!("stele: --dump-png failed: {e}");
             }
             return;
@@ -1796,7 +1850,7 @@ fn main() {
             return;
         }
         if let Some(source) = args.audit_contrast {
-            match audit_contrast(&source) {
+            match audit_contrast_opts(&source, args.color_scheme, args.color_scheme_given) {
                 Ok(violations) if violations.is_empty() => {
                     println!("stele: --audit-contrast: 0 violations");
                 }
@@ -2066,6 +2120,63 @@ mod tests {
         assert!(dark_no_stamp.contains("MEDIA DARK TEXT"), "prefers-color-scheme is scheme-driven independent of stamping");
     }
 
+    // ---- t1d-httpforever: --color-scheme end-to-end via --dump-png ---------
+    //
+    // `dump_text_opts` already proved (above) that `scheme`/`stamp` toggle
+    // which `<p>`s are `display: block` vs `display: none`. `fixtures/
+    // color-scheme.html`'s three paragraphs stack vertically with no fixed
+    // height anywhere in the document, so which ones are visible changes the
+    // laid-out content height — and `dump_png_opts`'s own canvas height is
+    // content-derived (see its "content-driven height" comment) — so a
+    // correct color-scheme wiring must change the PNG's pixel dimensions
+    // between light and dark, not just its dump_text string. This is the
+    // pixel-path equivalent of `color_scheme_dark_flag_toggles_visible_text_
+    // via_stamped_attribute_and_media_query` above.
+
+    #[test]
+    fn dump_png_color_scheme_default_matches_the_pre_t1d_render() {
+        // Golden-churn safety: the DEFAULT (no --color-scheme given) render
+        // path must be byte-identical to the pre-t1d two-argument call --
+        // same rationale as dump_text's own
+        // `color_scheme_default_does_not_stamp_and_matches_the_pre_t1b_golden_path`.
+        let via_opts = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false);
+        let golden: &[u8] = include_bytes!("../goldens/basic.png");
+        assert_eq!(via_opts.as_slice(), golden, "the default (unstamped, Light) PNG path must not have changed");
+    }
+
+    #[test]
+    fn dump_png_color_scheme_dark_stamped_changes_the_rendered_pixels() {
+        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false);
+        let dark = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true);
+        assert_ne!(light, dark, "--color-scheme dark (stamped) must change which paragraphs paint, hence the PNG bytes");
+
+        let (_, light_h) = decode_png_dims(&light);
+        let (_, dark_h) = decode_png_dims(&dark);
+        assert_ne!(light_h, dark_h, "toggling which <p>s are display:none must change the content-driven canvas height");
+    }
+
+    #[test]
+    fn dump_png_color_scheme_dark_without_stamping_still_reads_media_queries() {
+        // `stamp = false` proves the two mechanisms (media evaluation vs
+        // attribute stamp) are independently wired on the pixel path too --
+        // mirrors dump_text's own
+        // `color_scheme_dark_without_stamping_only_affects_media_queries_not_attribute_selectors`.
+        let dark_no_stamp = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, false);
+        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false);
+        assert_ne!(dark_no_stamp, light, "prefers-color-scheme is scheme-driven independent of stamping, so the render must still differ");
+    }
+
+    #[test]
+    fn write_dump_png_opts_threads_color_scheme_through_to_disk() {
+        let dir = std::env::temp_dir().join(format!("stele-write-dump-png-color-scheme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let out = dir.join("dark.png");
+        write_dump_png_opts("fixtures/color-scheme.html", &out.to_string_lossy(), false, style::ColorScheme::Dark, true).expect("write should succeed");
+        let on_disk = std::fs::read(&out).expect("png should be written");
+        assert_eq!(on_disk, dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn resolve_url_passes_through_http_and_file_schemes() {
         assert_eq!(resolve_url("http://example.com/x").as_str(), "http://example.com/x");
@@ -2311,8 +2422,8 @@ mod tests {
     /// red tile pixels.
     #[test]
     fn no_bg_images_flag_produces_a_distinct_image_free_render() {
-        let with_images = dump_png_opts("fixtures/bg-image.html", false);
-        let without_images = dump_png_opts("fixtures/bg-image.html", true);
+        let with_images = dump_png_opts("fixtures/bg-image.html", false, style::ColorScheme::Light, false);
+        let without_images = dump_png_opts("fixtures/bg-image.html", true, style::ColorScheme::Light, false);
 
         assert_ne!(with_images, without_images, "--no-bg-images must change the render");
 

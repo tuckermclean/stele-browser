@@ -33,3 +33,50 @@ Stele's own checked-in goldens (which prove *stability*, not *correctness*).
   vertical stack, not the reference Mondrian grid. Blessing a golden now
   would just freeze the wrong picture; the diagnosis doc has the concrete,
   staged plan for closing the gap.
+
+## httpforever
+
+- **Source**: https://httpforever.com/ (Scott Helme's real-world, no-JS-
+  degradable marketing page for the "HTTP Forever" project).
+- **Fixture**: `fixtures/httpforever.html` — the page's raw markup with its
+  external `<link rel=stylesheet>` CSS INLINED into a single `<style>` block
+  (see `httpforever.style.css` below for the untouched source of that CSS),
+  so the fixture renders its full intended styling from a single `file://`
+  fetch with no network dependency at all. This is Stele's **canonical
+  dark-theme fidelity fixture**: `packet/t1a-var`, `packet/t1b-color-scheme`,
+  and `packet/t1c-contrast` (CSS custom properties, `--color-scheme`-driven
+  theme selection, and the contrast-repair covenant) all exist because this
+  page's real-world CSS leans on every one of them at once.
+- **Evidence**: `httpforever.raw.html` — an exact byte-for-byte copy of the
+  page's original, un-inlined markup (still referencing the external
+  `style.css`), kept as the untouched source-of-truth the inlined fixture
+  was derived from. `httpforever.style.css` — the page's own external
+  stylesheet, byte-for-byte, also untouched. `httpforever.chrome-reference.
+  pdf` — a Chrome-rendered "print to PDF" capture of the live page, the
+  external ground-truth reference this fixture's fidelity is judged against
+  (same role `css1-float-5526c.reference.gif` plays above, just a
+  full-page capture instead of a single conformance-test GIF).
+- **Theme mechanism**: httpforever.com's dark mode is **JS-only** in its own
+  right — reached in the browser via a `js/theme.js` toggle script that
+  flips `html[data-theme="dark"]`, with **no** `@media (prefers-color-
+  scheme: dark)` fallback anywhere in its CSS at all (grep `httpforever.
+  style.css` for `data-theme` vs `prefers-color-scheme` to confirm). Since
+  Stele runs no JavaScript by construction (charter C3), the ONLY way to
+  reach this page's dark theme through Stele is packet t1b-color-scheme's
+  `--color-scheme dark` flag, which stamps `data-theme="dark"` onto the
+  root `<html>` pre-cascade — the same no-JS approximation `stamp_color_
+  scheme`'s own doc comment describes. `goldens/httpforever.light.png` is
+  the undecorated default render; `goldens/httpforever.dark.png` is
+  `--headless --color-scheme dark --dump-png`.
+- **Status**: goldens are blessed for both themes as of packet
+  t1d-httpforever, and `--audit-contrast` reports zero violations against
+  this fixture in BOTH themes — proving the T1a/T1b/T1c contrast covenant
+  actually holds on a real, unmodified, dense real-world page, not just the
+  synthetic fixtures the earlier packets shipped their own tests against.
+  Per that packet's own scope note: em-dashes are still tofu (pending T2),
+  the footer's link list is still jammed together (pending T3), and any
+  button-shaped controls may still read as literal `[ Submit ]`-style
+  fallback text (pending T4) — this packet's bar is legibility (backgrounds
+  paint, the hero text is never invisible-on-its-background, zero contrast
+  violations), not full-dialect fidelity. These goldens are expected to be
+  re-blessed as those later packets land.
