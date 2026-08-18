@@ -310,3 +310,139 @@ deliberately left out (`font-variant`, CSS2.1 system-font keywords —
 nothing in this repo uses either). No other fixture in the repo uses the
 `font` shorthand (`grep -rn 'font:' fixtures/*.html` — only this one), so
 this fix is scoped: it cannot change any other golden's render.
+
+## Follow-up 2 (packet/acid1-nested-floats): the "nested floats collapse
+## into one vertical band" symptom is NOT present in current `main` —
+## root-caused and closed with evidence, not a new block-float engine
+
+This packet was scoped around a specific reported symptom: with the
+`font` shorthand fix applied, the outer `dt`/`dd` floats sit side by side
+correctly, but the `<li>`/`<blockquote>`/`<h1>` cards *inside* the
+floated `<dd>` were reported to collapse into a single vertical band
+(around x≈21-50%) instead of flowing left-to-right and wrapping into
+rows the way `dd`'s own 34em inner width should force. Investigating this
+with evidence (both static analysis of the vendored taffy 0.13 source and
+a live CI render, per this project's own "verify goldens with pixel
+analysis" discipline) found that **this symptom does not reproduce on
+current `main` (`f6a59c0`)** — it was already closed, as a side effect,
+by an earlier packet. This section documents the trail so the "why" is
+on record rather than silently rediscovered later.
+
+### 1. Does taffy 0.13's `float_layout` even support a float nested
+### beneath a floated ancestor?
+
+Yes, by construction — a floated box always gets its OWN fresh
+`BlockFormattingContext`, not the parent's:
+
+- `taffy-0.13.0/src/compute/block.rs`'s `generate_item_list` marks a
+  floated child `is_in_same_bfc: false` (float excluded via
+  `is_not_floated` in the flag's conjunction, around line 767).
+- A floated item is laid out via `tree.perform_child_layout(...)` (the
+  ordinary GENERIC recursive entry point, `compute/block.rs` ~line 956),
+  never `tree.compute_block_child_layout(...)` (the block-context-
+  threading call same-BFC children get, ~line 1166). Generic recursion
+  passes no `BlockContext`, so `compute_block_layout`
+  (`compute/block.rs:401-420`) takes its `_ => { let mut root_bfc =
+  BlockFormattingContext::new(); ... }` arm: a brand-new float context,
+  scoped to and sized from THIS float's own resolved border-box width
+  (`compute/block.rs:897-901`, `if block_ctx.is_bfc_root() {
+  block_ctx.set_width(container_outer_width); ...}`).
+- An ordinary (non-floated, non-table, non-scroll-container) block child
+  — e.g. `<ul>`, the wrapper between `dd` and its `<li>`s — is
+  `is_in_same_bfc: true`, so it's laid out via
+  `compute_block_child_layout` with the PARENT's `BlockContext` passed
+  through (`sub_context`, `compute/block.rs:93-109`), contributing
+  `insets` from its own margin/border/padding (zero for a bare `<ul>`)
+  but never resetting the shared `FloatContext`'s width
+  (`is_bfc_root()` is already `false` for it). So floats inside `<ul>`
+  register against the SAME `FloatContext` `<dd>` created, at `<dd>`'s
+  own inner content width — exactly the CSS 2.1 §9.4 rule ("floats
+  establish a new BFC; ordinary descendants don't") and exactly what
+  `fixtures/css1-float-5526c.html`'s `dd > ul > li` shape needs.
+
+### 2. Is this wired correctly on Stele's side?
+
+Yes — checked end to end, not just at the `base_style` call site:
+
+- `src/layout/block.rs`'s `base_style` (~line 1484) sets `float`/`clear`
+  on EVERY node's taffy `Style` unconditionally (display-independent, see
+  its own doc comment), so `dt`/`dd`/`li`/`blockquote`/`h1` all reach
+  taffy with the right `Float`/`Clear` value — this is the wiring
+  `packet/block-floats` (commit `88c404c`, already on `main` before this
+  packet started) landed, together with re-enabling taffy's own
+  `float_layout` cargo feature (`Cargo.toml`, `packet/block-floats`
+  comment).
+- `<li>` is `display: block` in this fixture (`li{display:block; /* i.e.,
+  suppress marker */ ...}`), so it is never folded into an inline-
+  formatting-context leaf by `is_inline_ish`
+  (`src/layout/block.rs:953-978`: a `Container` is only inline-ish when
+  its OWN `display == Inline`) — each `<li>` becomes its own real taffy
+  block node, individually floatable, exactly like the passing
+  `nested_floats_resolve_against_inner_containing_block_width` test's
+  `<div>`s.
+- `build_list_container_node` (`src/layout/box_tree.rs:963-1009`, landed
+  by `packet/display-list-item`) correctly suppresses the marker for this
+  exact case (`is_item = tag_is_li && node.style.display ==
+  Display::ListItem`, false here since the author CSS overrides to
+  `Block`) and otherwise pushes each `<li>` node through unmodified — no
+  extra wrapper is interposed between `<ul>` and its `<li>` children that
+  could break the BFC-sharing chain above.
+
+### 3. Empirical confirmation (not just static reading)
+
+- `tests/layout_block_floats.rs` already had
+  `nested_floats_resolve_against_inner_containing_block_width` (from
+  `packet/block-floats`), proving a float DIRECTLY inside a floated
+  parent wraps at the parent's inner width. Its own module doc flagged
+  taffy's "TODO: handle nested blocks with different widths" comment
+  (`compute/block.rs:896`) as an unexplored rough edge for the ONE shape
+  it deliberately did not cover: a floated child nested beneath a
+  **plain, non-floated wrapper** (`<dd> > <ul> > <li>`, not `<dd> >
+  <li>`) — precisely `fixtures/css1-float-5526c.html`'s own shape.
+- This packet added `nested_floats_beneath_a_plain_wrapper_still_wrap_at_
+  inner_width` (same file) to close exactly that gap: four 40px floats
+  inside an unsized `<div>` wrapper inside a 150px floated parent. Landed
+  as a "probe" commit, pushed to CI ahead of any fix — **it passed
+  immediately**, with no production code changes beyond the font-
+  shorthand cherry-pick. That is the direct evidence the wrapper shape
+  was never actually broken on `main`.
+- The real fixture, rendered by the actual CI-built `stele-host` binary
+  (`stele --headless --dump-png fixtures/css1-float-5526c.html`,
+  reproduced locally byte-for-byte from the same artifact) and analyzed
+  programmatically (PIL/`scipy.ndimage` connected-component labeling,
+  never eyeballed): the yellow cards form TWO separate components on row
+  1 (`x ≈ 21.2-26.1%` and `45.5-50.4%` of the 800px canvas, `y ≈ 12.8-
+  33.1%`) plus a third on row 2 (`x ≈ 35.6-41.8%`, `y ≈ 34.6-57.4%`) —
+  not one merged band. Re-expressed relative to the page's own non-
+  background bounding box (matching how the reference's proportions were
+  measured against its 531px window rather than Stele's fixed 800px
+  `--dump-png` viewport), the top row spans `x ≈ 32.4%-81.0%` versus the
+  W3C reference GIF's own measured `x ≈ 27.5%-89.5%` for the same row —
+  the same shape (two cards near the row's outer edges, a black card
+  between them), close in extent, not pixel-identical (expected: font
+  metrics, `dt`'s content-box em-scale, and viewport width all differ
+  from the reference's own rendering environment, all explicitly excused
+  by the test itself). Row order/content from `--dump-text` matches the
+  reference exactly: row 1 = "the way" / "the world ends, bang(), whimper()"
+  / "i grow old"; row 2 = "pluot?" / "bar maids," / "sing to me, erbarme
+  dich".
+
+### Conclusion
+
+The nested-float collapse this packet was scoped to fix does not exist
+on current `main` — it was already closed by `packet/block-floats`
+(`88c404c`) re-enabling and correctly wiring taffy 0.13's own
+`float_layout` block algorithm, which (per §1 above) already generalizes
+correctly to a float nested beneath a plain wrapper inside another float,
+with no Stele-side gap (per §2) and no taffy-side gap for this shape
+(per §3's new passing test). This packet's actual, necessary change is
+narrower than originally scoped: re-apply the `font` shorthand fix
+(`a15555c`, required — without it every `em` in the fixture, including
+its own float widths, is 1.6x too large against the fixed 800px
+`--dump-png` viewport) and bless `goldens/css1-float-5526c.png` off the
+now-coherent render, with the pixel evidence above in place of a rewrite
+of the block-level float placement engine. The `content-box` sizing
+change from the prior `packet/acid1-coherence` attempt (`b88f9cd`) is
+deliberately NOT part of this packet — it regressed this exact fixture
+(columns stacked vertically instead of side by side) when tried before,
+and nothing in this packet's evidence trail shows it's needed.
