@@ -293,7 +293,7 @@ fn drive_pipeline(bytes: &[u8], cols: usize, also_paint: bool) {
         };
         let width = (cols as u32 * 8).clamp(1, 800);
         let mut surface = MemSurface::new(width, height, Color::WHITE);
-        raster::paint(&mut surface, &fragments, &HashMap::new());
+        raster::paint(&mut surface, &fragments, &HashMap::new(), Color::WHITE);
         let _ = raster::encode_png(&surface);
     }
 }

@@ -687,6 +687,123 @@ pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
     d
 }
 
+/// Whether `name` (a `Token::Function` name) is a CSS gradient function
+/// this packet recognizes (packet T1c): the three gradient shapes, plus
+/// their `-webkit-`/`-moz-` legacy-prefixed spellings (still common in the
+/// wild on 1996-2010s-era pages this browser targets) -- matched case-
+/// insensitively, mirroring every other function-name check in this module
+/// (`rgb`/`rgba`/`url`).
+fn is_gradient_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "linear-gradient"
+            | "radial-gradient"
+            | "conic-gradient"
+            | "-webkit-linear-gradient"
+            | "-webkit-radial-gradient"
+            | "-webkit-conic-gradient"
+            | "-moz-linear-gradient"
+            | "-moz-radial-gradient"
+            | "-moz-conic-gradient"
+    )
+}
+
+/// Extract a REPRESENTATIVE SOLID color from a CSS gradient function's
+/// color stops (packet T1c): Stele has no gradient renderer (brief §4
+/// curates gradients out entirely -- see this module's own top-level doc
+/// comment), so rather than dropping a `background`/`background-image`/
+/// `background-color` declaration whose value is a gradient outright
+/// (real-world path: a `var()` custom property that resolves to one,
+/// packet T1a -- see `apply_property`'s own `"background-color"` doc
+/// comment), this picks the FIRST color stop that parses as a color and
+/// uses THAT as a flat fallback -- closer to what the page's author
+/// actually intended (SOME color, usually the gradient's own "start") than
+/// falling back to no background at all, which is exactly the motivating
+/// bug this packet fixes (light text vanishing against the default white
+/// canvas because the background meant to sit behind it got silently
+/// dropped).
+///
+/// `tokens[i]` must be the gradient's own `Token::Function(name)` (every
+/// caller checks `is_gradient_function` first). Direction/shape/position
+/// tokens (`180deg`, `to right`, `120% 140% at 50% -20%`, ...) and stop-
+/// position percentages (`45%`) are simply skipped -- this only cares
+/// about the FIRST token run that resolves to an actual color, the same
+/// left-to-right color hunt `parse_background_color_component` already
+/// does at the top level, just scoped to this one function's own argument
+/// tokens.
+///
+/// Returns `(color, next)`: `next` is the index just past the function's
+/// matching `RParen` (or `tokens.len()` if unterminated -- tolerated,
+/// never panics, mirrors every other tolerant-of-truncation scan in this
+/// module) regardless of whether a color was found, so callers can keep
+/// scanning past a no-color-stops gradient rather than getting stuck.
+/// Total: a nested function (e.g. an `rgba(...)` color stop) is skipped
+/// via a depth counter, not recursion, and the scan index only ever
+/// advances -- always terminates.
+fn parse_gradient_first_color_stop(tokens: &[Token], i: usize) -> (Option<Color>, usize) {
+    let mut j = i + 1;
+    let mut depth = 0i32;
+    let mut found: Option<Color> = None;
+    while j < tokens.len() {
+        match &tokens[j] {
+            Token::RParen if depth == 0 => {
+                j += 1;
+                break;
+            }
+            Token::RParen => {
+                depth -= 1;
+                j += 1;
+            }
+            Token::Function(name) if found.is_none() && (name.eq_ignore_ascii_case("rgb") || name.eq_ignore_ascii_case("rgba")) => {
+                let start = j;
+                let mut k = j + 1;
+                while k < tokens.len() && tokens[k] != Token::RParen {
+                    k += 1;
+                }
+                let end = (k + 1).min(tokens.len());
+                found = parse_color(&tokens[start..end]);
+                j = end;
+            }
+            Token::Function(_) => {
+                depth += 1;
+                j += 1;
+            }
+            Token::Hash(h) if found.is_none() => {
+                found = hex_color(h);
+                j += 1;
+            }
+            Token::Ident(name) if found.is_none() && named_color(name).is_some() => {
+                found = named_color(name);
+                j += 1;
+            }
+            _ => j += 1,
+        }
+    }
+    (found, j)
+}
+
+/// `background-color`'s own value parser (packet T1c): ordinary `parse_
+/// color` first (the overwhelming common case -- a plain color), falling
+/// back to [`parse_gradient_first_color_stop`] when the first token is a
+/// gradient function. Real CSS's `background-color` doesn't even accept a
+/// gradient -- the path that actually reaches this is `var()` substitution
+/// (packet T1a's `substitute_vars`, which runs BEFORE `apply_property`)
+/// leaving `background-color`'s value holding a full gradient function
+/// verbatim, e.g. `background-color: var(--brand-bg)` where `--brand-bg`
+/// was itself declared as `radial-gradient(...)`. Charter C2's "extract
+/// something useful rather than silently dropping" spirit (and this
+/// packet's own motivating bug) makes that worth a defined fallback rather
+/// than counting the whole declaration as ignored.
+fn parse_background_color_value(tokens: &[Token]) -> Option<Color> {
+    if let Some(c) = parse_color(tokens) {
+        return Some(c);
+    }
+    match tokens.first() {
+        Some(Token::Function(name)) if is_gradient_function(name) => parse_gradient_first_color_stop(tokens, 0).0,
+        _ => None,
+    }
+}
+
 /// Extract just the color component of a `background` shorthand value
 /// (image/position/repeat/size are curated-out for now — image is a later
 /// packet's scope, brief §4). Scans left to right for the first token that
@@ -703,6 +820,14 @@ pub(crate) fn presentational_hints(tag: &str, attrs: &AttrMap) -> Declarations {
 /// all — `apply_property` then counts the whole declaration against
 /// `ignored_declarations`, matching charter C2 (unknown/unhandled parts are
 /// ignored, never guessed at).
+///
+/// Packet T1c amendment: a gradient function (`linear-gradient`/`radial-
+/// gradient`/`conic-gradient`, optionally `-webkit-`/`-moz-` prefixed) is
+/// its own explicit arm rather than falling through to the generic
+/// catch-all below — see [`parse_gradient_first_color_stop`]'s own doc
+/// comment for the full rationale (Stele has no gradient renderer, so this
+/// extracts a REPRESENTATIVE SOLID from the gradient's first parseable
+/// color stop instead of silently dropping the declaration).
 fn parse_background_color_component(tokens: &[Token]) -> Option<Color> {
     let mut i = 0;
     while i < tokens.len() {
@@ -725,6 +850,13 @@ fn parse_background_color_component(tokens: &[Token]) -> Option<Color> {
                     return Some(c);
                 }
                 i = end;
+            }
+            Token::Function(name) if is_gradient_function(name) => {
+                let (color, next) = parse_gradient_first_color_stop(tokens, i);
+                if let Some(c) = color {
+                    return Some(c);
+                }
+                i = next;
             }
             Token::Hash(_) => {
                 if let Some(c) = parse_color(&tokens[i..i + 1]) {
@@ -1003,13 +1135,27 @@ fn parse_border_raw(tokens: &[Token]) -> Option<BorderRaw> {
 pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations) -> bool {
     match name {
         "color" => parse_color(tokens).map(|c| d.color = Some(c)).is_some(),
-        "background-color" => parse_color(tokens).map(|c| d.background_color = Some(c)).is_some(),
+        // packet T1c: `parse_background_color_value` is `parse_color` plus
+        // a gradient-first-stop fallback — see its own doc comment for why
+        // `background-color` (unlike `color`, `border-color`, ...) needs
+        // that fallback and the others deliberately don't.
+        "background-color" => parse_background_color_value(tokens).map(|c| d.background_color = Some(c)).is_some(),
         // Packet bg-image: `background-image: url(...)` sets the raw URL;
         // anything else (`none`, a garbage value, a malformed `url(...)`) is
         // simply not applied — see `parse_url_function`'s doc comment.
+        //
+        // Packet T1c: a gradient function IS valid real CSS here (`<image>`
+        // includes `<gradient>`) — Stele has no gradient renderer, so it
+        // sets `background_color` to the gradient's first parseable color
+        // stop instead (see `parse_gradient_first_color_stop`'s own doc
+        // comment), leaving `background_image` itself unset (a gradient
+        // isn't a fetchable URL for `bg_images::collect_bg_images`).
         "background-image" => match tokens.first() {
             Some(Token::Function(name)) if name.eq_ignore_ascii_case("url") => {
                 parse_url_function(tokens, 0).map(|(url, _)| d.background_image = Some(url.into_boxed_str())).is_some()
+            }
+            Some(Token::Function(name)) if is_gradient_function(name) => {
+                parse_gradient_first_color_stop(tokens, 0).0.map(|c| d.background_color = Some(c)).is_some()
             }
             _ => false,
         },
@@ -2115,5 +2261,78 @@ mod tests {
         let env = Env::default();
         let result = substitute_vars(&toks(&css), &env, &[], 0);
         assert_eq!(result, None, "depth cap must trip long before any real recursion overflow");
+    }
+
+    // ---- packet T1c: gradient -> representative-solid background fallback ----
+
+    #[test]
+    fn radial_gradient_background_shorthand_extracts_first_color_stop() {
+        let mut d = Declarations::default();
+        assert!(apply_property(
+            "background",
+            &toks("radial-gradient(120% 140% at 50% -20%, #46a35f 0%, #2f8f4e 45%, #206b39 100%)"),
+            &mut d
+        ));
+        assert_eq!(d.background_color, Some(Color::rgb(0x46, 0xa3, 0x5f)));
+    }
+
+    #[test]
+    fn linear_gradient_named_color_stops_picks_the_first() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("linear-gradient(180deg, red, blue)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn webkit_prefixed_gradient_in_background_image_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("-webkit-linear-gradient(top, #112233, #445566)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0x11, 0x22, 0x33)));
+    }
+
+    #[test]
+    fn moz_prefixed_gradient_in_background_image_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("-moz-radial-gradient(circle, green, yellow)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0, 128, 0)));
+    }
+
+    #[test]
+    fn gradient_with_no_parseable_color_stops_leaves_background_unset() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("linear-gradient(to right, nonsense-a, nonsense-b)"), &mut d));
+        assert!(d.background_color.is_none());
+    }
+
+    #[test]
+    fn background_color_property_itself_falls_back_to_a_gradients_first_stop() {
+        // Real-world path (packet T1a): a var() substitution BEFORE
+        // apply_property ever runs (cascade::resolve) can leave
+        // `background-color`'s own value holding a full gradient function
+        // -- real CSS wouldn't accept that for this property, but this
+        // packet extracts a usable color anyway rather than dropping it
+        // (the motivating bug: light text vanishing against the default
+        // white canvas when the gradient it was meant to sit on is dropped
+        // entirely).
+        let mut d = Declarations::default();
+        assert!(apply_property("background-color", &toks("linear-gradient(red, blue)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn ordinary_background_color_values_are_unaffected_by_the_gradient_fallback() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-color", &toks("#123456"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0x12, 0x34, 0x56)));
+    }
+
+    #[test]
+    fn garbage_gradient_like_function_name_does_not_panic() {
+        // Not a real gradient function name at all -- must fall through to
+        // "unrecognized declaration", never panic on the malformed function
+        // body.
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("not-a-gradient(oops"), &mut d));
+        assert!(d.background_color.is_none());
     }
 }

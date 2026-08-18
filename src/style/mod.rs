@@ -5,6 +5,7 @@
 pub mod author;
 pub mod cascade;
 pub mod computed;
+pub mod contrast;
 mod media;
 pub mod parser;
 
