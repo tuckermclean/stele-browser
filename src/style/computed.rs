@@ -60,6 +60,74 @@ pub enum Display {
     /// position/size a `Display::Block` box would; only marker emission
     /// differs.
     ListItem,
+    /// `display: grid` (SPIKE spike/taffy-grid: measuring taffy's `grid`
+    /// cargo feature — see `Cargo.toml`'s own doc comment). Mirrors how
+    /// `Display::Flex` maps straight onto taffy's own `Display::Flex`
+    /// (`layout::block::map_display`) — `Display::Grid` maps onto taffy's
+    /// `Display::Grid`, letting taffy's grid algorithm (not this engine)
+    /// place items. `grid-template-columns`/`grid-template-rows` (below)
+    /// are the only two grid properties this spike parses; explicit item
+    /// placement (`grid-column`/`grid-row`), `grid-template-areas`, and
+    /// `grid-auto-flow` are all unparsed — every item uses taffy's default
+    /// auto-placement (row-major, CSS's own `grid-auto-flow: row` initial
+    /// value).
+    Grid,
+}
+
+/// One grid track's size (SPIKE spike/taffy-grid): the parsed form of a
+/// bare `<length>` / `<percentage>` / `<flex>` (`fr`) value wherever a
+/// track size can appear — as a whole track (`GridTrack::Bare`) or as
+/// either half of a `minmax()` (`GridTrack::MinMax`). Mirrors taffy's own
+/// `MinTrackSizingFunction`/`MaxTrackSizingFunction`/`TrackSizingFunction`
+/// split (`layout::block::map_grid_track` maps this onto those) without
+/// depending on taffy's types here — `ComputedStyle` stays taffy-agnostic,
+/// same as every other field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridTrackSize {
+    Length(f32),
+    Percent(f32),
+    Fr(f32),
+}
+
+/// One grid track definition (SPIKE spike/taffy-grid): either a bare size
+/// (`1fr`, `200px`) or an explicit `minmax(<min>, <max>)`. A bare `<flex>`
+/// track (`GridTrack::Bare(GridTrackSize::Fr(_))`) is NOT the same as
+/// `MinMax(Fr(_), Fr(_))` — real CSS's own `<flex>` grammar production
+/// implies an automatic minimum (`minmax(auto, Nfr)`), which is exactly
+/// what taffy's generic `fr()` helper produces for a `TrackSizingFunction`
+/// (see `layout::block::map_grid_track`'s doc comment) — keeping `Bare`
+/// distinct from `MinMax` lets that mapping reach the correct taffy helper
+/// rather than reimplementing the auto-minimum rule here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridTrack {
+    Bare(GridTrackSize),
+    MinMax(GridTrackSize, GridTrackSize),
+}
+
+/// `repeat()`'s first argument (SPIKE spike/taffy-grid): an explicit count,
+/// or one of the two CSS auto-repeat keywords (`auto-fill`/`auto-fit`) —
+/// see MDN's `repeat()` reference for the (subtle) difference between the
+/// two; this engine doesn't need to distinguish them itself, it only
+/// forwards whichever was declared straight to taffy's own
+/// `RepetitionCount` (`layout::block::map_grid_template_component`), which
+/// implements both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridRepetitionCount {
+    Count(u16),
+    AutoFill,
+    AutoFit,
+}
+
+/// One component of a `grid-template-columns`/`grid-template-rows` value
+/// (SPIKE spike/taffy-grid): either a single track, or a `repeat(<count>,
+/// <track>+)` — CSS allows the whole value to be a mix of both (`200px
+/// repeat(2, 1fr) 100px`), so this is stored as a `Vec` of components on
+/// `ComputedStyle`, same shape as taffy's own `Style.grid_template_columns`
+/// (`GridTrackVec<GridTemplateComponent<S>>`) it maps onto.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GridTemplateComponent {
+    Single(GridTrack),
+    Repeat(GridRepetitionCount, Vec<GridTrack>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,6 +424,15 @@ pub struct ComputedStyle {
     /// not this translation layer), so this mapping needs no
     /// `flex-direction`-dependent branching.
     pub column_gap: Option<f32>,
+
+    // Grid (SPIKE spike/taffy-grid). Empty `Vec` (this field's default,
+    // same as `ComputedStyle::default()` below) means "no explicit
+    // template" — taffy's own `Style::DEFAULT` already treats an empty
+    // `grid_template_columns`/`rows` as CSS's own `none` initial value (an
+    // implicit, content-auto-sized grid), so an empty `Vec` here is a
+    // faithful "unset" rather than a special-cased sentinel.
+    pub grid_template_columns: Vec<GridTemplateComponent>,
+    pub grid_template_rows: Vec<GridTemplateComponent>,
 }
 
 impl Default for ComputedStyle {
@@ -404,6 +481,9 @@ impl Default for ComputedStyle {
             flex_basis: Dimension::Auto,
             gap: 0.0,
             column_gap: None,
+
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
         }
     }
 }

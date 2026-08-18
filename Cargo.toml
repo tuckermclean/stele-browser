@@ -45,6 +45,15 @@ rustix = { version = "1.1.4", default-features = false, features = ["termios", "
 # float`/`.clear` via `map_float`/`map_clear`; the bespoke inline-image float
 # mechanism (`layout::inline`) is untouched and keeps handling its own
 # narrower case unaffected by this feature.
+#
+# SPIKE (spike/taffy-grid): `grid` re-enabled here to measure whether
+# taffy's own CSS Grid algorithm is viable (size + fidelity) — this pulls in
+# `smallvec` transitively (taffy's `Cargo.toml`), which this Cargo.toml's
+# OWN doc comment above previously counted as part of `grid`'s dead weight
+# when it was dropped for binary size. `layout::block::apply_grid` wires
+# `ComputedStyle.grid_template_columns`/`.grid_template_rows` onto taffy's
+# `Style.grid_template_columns`/`.grid_template_rows`. Do NOT merge this
+# spike to main without re-evaluating the A2 binary-size budget.
 taffy = { version = "0.13", default-features = false, features = [
     "std",
     "taffy_tree",
@@ -52,6 +61,7 @@ taffy = { version = "0.13", default-features = false, features = [
     "block_layout",
     "float_layout",
     "content_size",
+    "grid",
 ] }
 
 # Charter C4: the rock does not unwind. Size-first for the 486 budget (A2 ≤ 2.0 MB).

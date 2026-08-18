@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head><title>Stele grid spike — repeat(auto-fill, minmax()) grid</title>
+<style>
+  body { margin: 0; background: #fff; }
+  .cell {
+    height: 100px;
+    color: white;
+    font: 24px sans-serif;
+    text-align: center;
+    line-height: 100px;
+  }
+  .a { background: #e74c3c; }
+  .b { background: #2ecc71; }
+  .c { background: #3498db; }
+  .d { background: #f1c40f; }
+</style>
+</head>
+<body>
+<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(200px,1fr)); gap:10px">
+  <div class="cell a">A</div><div class="cell b">B</div><div class="cell c">C</div><div class="cell d">D</div>
+</div>
+</body>
+</html>

@@ -9,6 +9,13 @@ use crate::style::computed::{
     FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
     WhiteSpace,
 };
+// SPIKE spike/taffy-grid: `RawGridTemplateComponent`/`RawGridTrack`/
+// `RawGridTrackSize`/`RawGridRepetitionCount` right below are this module's
+// own raw (unresolved-length) mirror of `computed::GridTemplateComponent`/
+// `GridTrack`/`GridTrackSize`/`GridRepetitionCount` — same split every other
+// length-bearing property here uses (`RawLength` vs. `LengthPercentage`),
+// so `cascade::resolve` can turn an `em` grid-track length into px against
+// the right font-size, exactly like `width`/`gap`/etc. already do.
 use crate::style::tokenizer::Token;
 use crate::surface::Color;
 
@@ -29,6 +36,43 @@ pub(crate) enum RawLength {
 pub(crate) enum RawLengthAuto {
     Length(RawLength),
     Auto,
+}
+
+/// SPIKE spike/taffy-grid: a raw grid-track size — a bare `<length>`/
+/// `<percentage>` (via [`RawLength`], resolved to px by `cascade::resolve`
+/// exactly like `width`/`gap`) or a `<flex>` (`fr`) value, which has no `em`
+/// component and so needs no cascade resolution at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RawGridTrackSize {
+    Length(RawLength),
+    Fr(f32),
+}
+
+/// SPIKE spike/taffy-grid: a raw grid track — either a bare size or an
+/// explicit `minmax(<min>, <max>)`. Mirrors `computed::GridTrack`; see that
+/// type's doc comment for why `Bare` and `MinMax` are kept distinct rather
+/// than folding `Bare` into `MinMax(size, size)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RawGridTrack {
+    Bare(RawGridTrackSize),
+    MinMax(RawGridTrackSize, RawGridTrackSize),
+}
+
+/// SPIKE spike/taffy-grid: `repeat()`'s raw first argument. Mirrors
+/// `computed::GridRepetitionCount`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RawGridRepetitionCount {
+    Count(u16),
+    AutoFill,
+    AutoFit,
+}
+
+/// SPIKE spike/taffy-grid: one raw component of a `grid-template-columns`/
+/// `grid-template-rows` value. Mirrors `computed::GridTemplateComponent`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RawGridTemplateComponent {
+    Single(RawGridTrack),
+    Repeat(RawGridRepetitionCount, Vec<RawGridTrack>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,6 +205,14 @@ pub(crate) struct Declarations {
     /// own field rather than overwriting `gap`.
     pub column_gap: Option<RawLength>,
 
+    /// SPIKE spike/taffy-grid. `None` means "no `grid-template-columns`
+    /// declared" (not "declared empty" -- CSS has no way to declare an
+    /// explicitly-empty template); `cascade::resolve` falls back to
+    /// `ComputedStyle::default`'s empty `Vec` the same way every other
+    /// `Option`-shaped field here does.
+    pub grid_template_columns: Option<Vec<RawGridTemplateComponent>>,
+    pub grid_template_rows: Option<Vec<RawGridTemplateComponent>>,
+
     /// Custom-property (`--name: <tokens>;`) declarations captured by this
     /// block (packet T1a — CSS custom properties + `var()`). Stored as RAW
     /// tokens, never eagerly resolved: a custom property's value may itself
@@ -242,6 +294,15 @@ impl Declarations {
         // semantics, just spelled with an explicit `.clone()`.
         if other.background_image.is_some() {
             self.background_image = other.background_image.clone();
+        }
+        // SPIKE spike/taffy-grid: `grid_template_columns`/`rows` are
+        // `Vec`-shaped (not `Copy`), same reason as `background_image`
+        // right above.
+        if other.grid_template_columns.is_some() {
+            self.grid_template_columns = other.grid_template_columns.clone();
+        }
+        if other.grid_template_rows.is_some() {
+            self.grid_template_rows = other.grid_template_rows.clone();
         }
         // Custom properties and var()-bearing deferred declarations both
         // cascade with the same last-write-wins-by-name semantics as every
@@ -1402,6 +1463,12 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 d.display = Some(Display::Flex);
                 true
             }
+            // SPIKE spike/taffy-grid: see `Display::Grid`'s own doc comment
+            // (`style/computed.rs`) for the full contract.
+            Some("grid") => {
+                d.display = Some(Display::Grid);
+                true
+            }
             Some("table") => {
                 d.display = Some(Display::Table);
                 true
@@ -1722,8 +1789,138 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             },
             _ => false,
         },
+        // SPIKE spike/taffy-grid: a track list of `<length>`/`<percentage>`/
+        // `<flex>` (`fr`) values and/or `repeat(<count>, <track>+)` (with
+        // `minmax(<min>, <max>)` inside either position) — see
+        // [`parse_grid_template`]'s own doc comment for the exact grammar
+        // subset this covers. Real CSS invalidates the WHOLE declaration on
+        // any unparseable component (same rule `apply_edges_shorthand`
+        // already follows for margin/padding/border shorthands) — never a
+        // partial/best-effort template.
+        "grid-template-columns" => match parse_grid_template(tokens) {
+            Some(v) => {
+                d.grid_template_columns = Some(v);
+                true
+            }
+            None => false,
+        },
+        "grid-template-rows" => match parse_grid_template(tokens) {
+            Some(v) => {
+                d.grid_template_rows = Some(v);
+                true
+            }
+            None => false,
+        },
         _ => false,
     }
+}
+
+/// SPIKE spike/taffy-grid: convert one track-size token into a
+/// [`RawGridTrackSize`] -- a bare `<flex>` (`fr`) dimension, or anything
+/// [`token_to_raw_length`] already understands (`<length>`/`<percentage>`).
+/// Negative `fr` values are invalid (CSS Grid §7.2.3) and rejected here
+/// (falls through to `token_to_raw_length`, which doesn't understand a
+/// `"fr"` unit either, so the whole token is correctly unparseable rather
+/// than silently clamped).
+fn token_to_grid_track_size(t: &Token) -> Option<RawGridTrackSize> {
+    if let Token::Dimension(v, unit) = t {
+        // `tokenizer::tokenize` already lowercases every unit string, so a
+        // plain `==` is enough (same reasoning `token_to_gap_length`'s own
+        // doc comment gives for its `"rem"` check).
+        if unit == "fr" && *v >= 0.0 {
+            return Some(RawGridTrackSize::Fr(*v));
+        }
+    }
+    token_to_raw_length(t).map(RawGridTrackSize::Length)
+}
+
+/// SPIKE spike/taffy-grid: parse one grid track starting at `tokens[i]` --
+/// either `minmax(<min>, <max>)` or a bare track size -- returning the
+/// parsed [`RawGridTrack`] and the index just past it. `None` on any
+/// malformed shape (missing comma/paren, unparseable size, `tokens` too
+/// short), matching this module's total/never-panics contract.
+fn parse_grid_track(tokens: &[Token], i: usize) -> Option<(RawGridTrack, usize)> {
+    match tokens.get(i)? {
+        Token::Function(name) if name.eq_ignore_ascii_case("minmax") => {
+            let min = token_to_grid_track_size(tokens.get(i + 1)?)?;
+            if tokens.get(i + 2)? != &Token::Comma {
+                return None;
+            }
+            let max = token_to_grid_track_size(tokens.get(i + 3)?)?;
+            if tokens.get(i + 4)? != &Token::RParen {
+                return None;
+            }
+            Some((RawGridTrack::MinMax(min, max), i + 5))
+        }
+        t => token_to_grid_track_size(t).map(|size| (RawGridTrack::Bare(size), i + 1)),
+    }
+}
+
+/// SPIKE spike/taffy-grid: parse `repeat(<count>, <track>+)` starting right
+/// AFTER the already-consumed `repeat(` function token (i.e. `tokens[i]` is
+/// the count argument) -- `<count>` is `auto-fill`, `auto-fit`, or a
+/// positive integer (CSS Grid §7.2.3.1); the track list is one or more
+/// tracks (a nested `repeat()` is real CSS's own restriction too, so
+/// [`parse_grid_track`] not accepting one here is correct, not a
+/// limitation). Returns the parsed component and the index just past the
+/// closing `)`.
+fn parse_grid_repeat(tokens: &[Token], i: usize) -> Option<(RawGridTemplateComponent, usize)> {
+    let count = match tokens.get(i)? {
+        Token::Ident(s) if s.eq_ignore_ascii_case("auto-fill") => RawGridRepetitionCount::AutoFill,
+        Token::Ident(s) if s.eq_ignore_ascii_case("auto-fit") => RawGridRepetitionCount::AutoFit,
+        Token::Number(n) if *n >= 1.0 && n.fract() == 0.0 => RawGridRepetitionCount::Count(*n as u16),
+        _ => return None,
+    };
+    if tokens.get(i + 1)? != &Token::Comma {
+        return None;
+    }
+    let mut idx = i + 2;
+    let mut tracks = Vec::new();
+    loop {
+        if tokens.get(idx)? == &Token::RParen {
+            break;
+        }
+        let (track, next_i) = parse_grid_track(tokens, idx)?;
+        tracks.push(track);
+        idx = next_i;
+    }
+    idx += 1; // consume the closing `)`
+    if tracks.is_empty() {
+        return None;
+    }
+    Some((RawGridTemplateComponent::Repeat(count, tracks), idx))
+}
+
+/// SPIKE spike/taffy-grid: `grid-template-columns`/`grid-template-rows`.
+/// Supports a track list mixing bare tracks and `repeat(<count>,
+/// <track>+)` (`minmax()` valid in either position) -- e.g. `1fr 1fr 1fr`,
+/// `200px 1fr`, `repeat(auto-fill, minmax(200px, 1fr))`, `200px repeat(2,
+/// 1fr)`. NOT covered (real CSS grid features this spike leaves unparsed --
+/// see the spike's own report): named lines (`[line-name]`), the
+/// `subgrid`/`masonry` keywords, and `grid-template-areas`' string-literal
+/// row syntax. `None` (declaration doesn't apply) on empty input or any
+/// unparseable component -- never a partial template.
+fn parse_grid_template(tokens: &[Token]) -> Option<Vec<RawGridTemplateComponent>> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Function(name) if name.eq_ignore_ascii_case("repeat") => {
+                let (component, next_i) = parse_grid_repeat(tokens, i + 1)?;
+                out.push(component);
+                i = next_i;
+            }
+            _ => {
+                let (track, next_i) = parse_grid_track(tokens, i)?;
+                out.push(RawGridTemplateComponent::Single(track));
+                i = next_i;
+            }
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
