@@ -28,17 +28,29 @@ png = "0.17"
 # UnixStream fd at once, which a single blocking stdin read can't do.
 rustix = { version = "1.1.4", default-features = false, features = ["termios", "std", "event"] }
 # Trimmed to what block.rs/inline.rs actually use (charter §158: block flow
-# = degenerate column flex + flexbox; no CSS grid, no taffy-side floats —
-# floats are bespoke inline work, M4; no CSS calc() in the dialect). Default
-# features also pull `grid` (and smallvec transitively via `grid`),
-# `float_layout`, `calc`, and `detailed_layout_info` — all dead weight here;
+# = degenerate column flex + flexbox; no CSS grid; no CSS calc() in the
+# dialect). Default features also pull `grid` (and smallvec transitively via
+# `grid`), `calc`, and `detailed_layout_info` — all dead weight here;
 # dropping them shrinks the binary (A2 <= 2.0 MB) and the vendoring/audit
 # surface.
+#
+# packet/block-floats: `float_layout` re-enabled -- proven viable by the
+# spike (spike/taffy-float-layout, PR #65) at +16KB binary cost (well within
+# the A2 <= 2.0MB budget): taffy's own block-level float placement replaces
+# what used to be a documented gap (block-level `float`/`clear` were
+# complete no-ops; only the bespoke `layout::inline` mechanism for floated
+# *inline replaced* atoms, e.g. `<img align=left>`, worked -- see
+# fixtures/evidence/css1-float-5526c.diagnosis.md). `layout::block::
+# base_style` wires `ComputedStyle.float`/`.clear` onto taffy's `Style.
+# float`/`.clear` via `map_float`/`map_clear`; the bespoke inline-image float
+# mechanism (`layout::inline`) is untouched and keeps handling its own
+# narrower case unaffected by this feature.
 taffy = { version = "0.13", default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",
     "block_layout",
+    "float_layout",
     "content_size",
 ] }
 
