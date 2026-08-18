@@ -638,6 +638,7 @@ pub fn hit_test_pixel(fragments: &[Fragment], x: f32, y: f32) -> Option<String> 
 // XConnection: the thin, manually-verified socket-I/O shim
 // =========================================================================
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -653,6 +654,42 @@ pub struct XConnection {
     stream: UnixStream,
     pub setup: SetupInfo,
     ids: IdAllocator,
+    /// Events read off the socket while waiting for a *reply* (X interleaves
+    /// events and replies on one stream — the MapNotify/Expose from an earlier
+    /// MapWindow arrive BEFORE a later request's reply). Drained by
+    /// [`Self::next_event`] before it touches the socket again.
+    pending: VecDeque<XEvent>,
+}
+
+/// Read 32-byte X packets from `stream`, queueing any *events* (first byte
+/// >= 2) into `pending` and skipping *errors* (first byte 0), until a *reply*
+/// (first byte 1) arrives; return the full reply (32-byte header + its
+/// `length`-word body). This is THE fix for the client's original hang: a
+/// reply read that naively grabbed the first 32 bytes would mistake a pending
+/// MapNotify/Expose event for the reply header, read its window field as a
+/// (huge) body length, and block forever on `read_exact`.
+fn read_reply(stream: &mut impl Read, pending: &mut VecDeque<XEvent>) -> Result<Vec<u8>, String> {
+    loop {
+        let mut hdr = [0u8; 32];
+        stream.read_exact(&mut hdr).map_err(|e| format!("read X packet: {e}"))?;
+        match hdr[0] {
+            1 => {
+                let words = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+                let mut body = vec![0u8; words * 4];
+                stream.read_exact(&mut body).map_err(|e| format!("read X reply body: {e}"))?;
+                let mut full = Vec::with_capacity(32 + body.len());
+                full.extend_from_slice(&hdr);
+                full.extend_from_slice(&body);
+                return Ok(full);
+            }
+            0 => continue, // error packet (32 bytes, no body) — skip while awaiting a reply
+            _ => {
+                if let Some(ev) = parse_event(&hdr) {
+                    pending.push_back(ev);
+                }
+            }
+        }
+    }
 }
 
 impl XConnection {
@@ -688,7 +725,7 @@ impl XConnection {
         let setup = parse_setup_reply(&full)?;
         let ids = IdAllocator::new(setup.resource_id_base, setup.resource_id_mask);
 
-        Ok(XConnection { stream, setup, ids })
+        Ok(XConnection { stream, setup, ids, pending: VecDeque::new() })
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -753,16 +790,10 @@ impl XConnection {
         let max_kc = self.setup.max_keycode;
         let count = max_kc.saturating_sub(min_kc).saturating_add(1);
         self.send(&encode_get_keyboard_mapping(min_kc, count))?;
-
-        let mut header = [0u8; 32];
-        self.stream.read_exact(&mut header).map_err(|e| format!("read keyboard-mapping reply header: {e}"))?;
-        let reply_words = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-        let mut body = vec![0u8; reply_words * 4];
-        self.stream.read_exact(&mut body).map_err(|e| format!("read keyboard-mapping reply body: {e}"))?;
-
-        let mut full = Vec::with_capacity(32 + body.len());
-        full.extend_from_slice(&header);
-        full.extend_from_slice(&body);
+        // Demux: events (MapNotify/Expose from the earlier MapWindow) can sit
+        // ahead of this reply on the stream — queue them, don't mistake one for
+        // the reply header. See `read_reply`.
+        let full = read_reply(&mut self.stream, &mut self.pending)?;
         parse_keyboard_mapping_reply(&full)
     }
 
@@ -771,9 +802,24 @@ impl XConnection {
     /// event this client doesn't recognize parses as `Ok(XEvent::Other)`
     /// rather than erroring — see [`parse_event`].
     pub fn next_event(&mut self) -> Result<XEvent, String> {
-        let mut buf = [0u8; 32];
-        self.stream.read_exact(&mut buf).map_err(|e| format!("read X event: {e}"))?;
-        Ok(parse_event(&buf).unwrap_or(XEvent::Other))
+        loop {
+            if let Some(ev) = self.pending.pop_front() {
+                return Ok(ev);
+            }
+            let mut buf = [0u8; 32];
+            self.stream.read_exact(&mut buf).map_err(|e| format!("read X event: {e}"))?;
+            match buf[0] {
+                // An unexpected reply in the event stream (has a body) — drain
+                // its body so we stay byte-aligned, then keep reading.
+                1 => {
+                    let words = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+                    let mut body = vec![0u8; words * 4];
+                    self.stream.read_exact(&mut body).map_err(|e| format!("drain X reply body: {e}"))?;
+                }
+                0 => return Ok(XEvent::Other), // error packet: 32 bytes, no body
+                _ => return Ok(parse_event(&buf).unwrap_or(XEvent::Other)),
+            }
+        }
     }
 }
 
@@ -1075,6 +1121,39 @@ mod tests {
             encode_set_input_focus(0x0140_0001),
             vec![42, 2, 3, 0, 0x01, 0x00, 0x40, 0x01, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn read_reply_queues_events_that_precede_the_reply() {
+        // Reproduces the original hang: a reply preceded on the stream by the
+        // MapNotify/Expose events an earlier MapWindow generated. The MapNotify
+        // packet's bytes[4..8] are huge (a window id) — the OLD code read those
+        // as a reply body length and blocked on a ~16MB read_exact forever.
+        use std::io::Cursor;
+        let mut wire = Vec::new();
+        let mut expose = [0u8; 32];
+        expose[0] = EVENT_CODE_EXPOSE; // 12
+        wire.extend_from_slice(&expose);
+        let mut mapnotify = [0u8; 32];
+        mapnotify[0] = 19; // MapNotify (unhandled -> Other), huge "length" field:
+        mapnotify[4..8].copy_from_slice(&0x0fff_ffffu32.to_le_bytes());
+        wire.extend_from_slice(&mapnotify);
+        let mut reply = [0u8; 32];
+        reply[0] = 1; // reply
+        reply[4..8].copy_from_slice(&1u32.to_le_bytes()); // 1 word = 4 body bytes
+        wire.extend_from_slice(&reply);
+        wire.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+
+        let mut cur = Cursor::new(wire);
+        let mut pending = VecDeque::new();
+        let full = read_reply(&mut cur, &mut pending).unwrap();
+        assert_eq!(full.len(), 36, "reply = 32 header + 4 body");
+        assert_eq!(full[0], 1);
+        assert_eq!(&full[32..36], &[0xaa, 0xbb, 0xcc, 0xdd]);
+        // Both preceding events were queued (not swallowed / misread):
+        assert_eq!(pending.pop_front(), Some(XEvent::Expose));
+        assert_eq!(pending.pop_front(), Some(XEvent::Other)); // MapNotify
+        assert!(pending.is_empty());
     }
 
     #[test]
