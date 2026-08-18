@@ -1476,12 +1476,38 @@ mod tests {
 
     #[test]
     fn multi_byte_utf8_is_placed_by_char_not_byte() {
-        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "é日x")];
+        // packet t2-glyph-fallback: '日' moved out of this fixture -- CJK is
+        // genuinely unmappable (no atlas glyph, no transliteration), so
+        // `write_marker`'s new `translit::resolve` pass now correctly DROPS
+        // it (see `write_marker_transliterates_and_skips_via_the_shared_
+        // translit_seam` below for that behavior in isolation). This test's
+        // own concern -- multi-byte UTF-8 placed by CHAR, not byte -- still
+        // needs two differently-byte-wide characters that both survive
+        // resolve(): 'é' is 2 UTF-8 bytes (Latin-1, atlas-covered,
+        // unchanged), '—' (em dash) is 3 UTF-8 bytes and transliterates to a
+        // single ASCII '-' -- a byte-indexed (rather than char-indexed) bug
+        // would misplace either.
+        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "é—x")];
         let grid = render(&fragments, 10);
         let row = grid.row_text(0);
         assert_eq!(row.chars().nth(0), Some('é'));
-        assert_eq!(row.chars().nth(1), Some('日'));
+        assert_eq!(row.chars().nth(1), Some('-'));
         assert_eq!(row.chars().nth(2), Some('x'));
+    }
+
+    // --------------------------------------- translit integration (t2)
+
+    #[test]
+    fn write_marker_transliterates_and_skips_via_the_shared_translit_seam() {
+        // packet t2-glyph-fallback: every Text fragment's string is run
+        // through `text::translit::resolve` before being written into grid
+        // cells -- an em dash transliterates to '-', and a genuinely
+        // unmappable CJK char is dropped entirely (not tofu, not the raw
+        // char) -- see `text::translit`'s own module doc for the full
+        // resolution order this backend and `backend::raster` both share.
+        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "a\u{2014}b\u{65E5}c")];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "a-bc", "em dash transliterates to '-', CJK char is dropped entirely");
     }
 
     #[test]
