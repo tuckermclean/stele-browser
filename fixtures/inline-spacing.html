@@ -12,13 +12,22 @@
      backend's zero-advance synthesis should ever fire here. */
   nav.pxgap { gap: 2px 20px; }
   /* The EXACT shape of fixtures/httpforever.html's `.footer__projects {
-     gap: .35rem 1.1rem; }` -- this engine has no `rem` unit support, so
-     BOTH values fail to parse and the whole declaration is dropped,
-     leaving a real, computed gap of 0. Distinct flex items must still
-     never visually run together -- this row is what the zero-advance
-     synthesis rule (`backend::tty::synthesize_gap_start_col`/
-     `backend::raster::synthesize_gap_rect`) exists for. */
+     gap: .35rem 1.1rem; }`. This engine's general length parser has no
+     `rem` support, but `gap` alone gets a narrowly-scoped `rem` ≈ `em`
+     approximation (`value::token_to_gap_length`) -- so this DOES resolve
+     to a real, non-zero gap (~5.6px row / ~17.6px column at this
+     document's 16px root font-size), the same fix that separates
+     httpforever's own footer links. */
   nav.remgap { gap: .35rem 1.1rem; }
+  /* No `gap` at all (CSS initial value: 0). Distinct flex items must still
+     never visually run together with zero real advance -- this is the
+     other, independent half of the D3 fix: the zero-advance synthesis
+     rule (`backend::tty::synthesize_gap_start_col` /
+     `backend::raster::synthesize_gap_rect`), which guarantees separation
+     regardless of whether a gap value could be resolved at all (covers
+     e.g. a `calc()`/`clamp()`-wrapped gap this parser can't understand
+     either, not just this specific rem shape). */
+  nav.nogap { }
 </style>
 </head>
 <body>
@@ -28,11 +37,14 @@
 together, and an inline run must never gain a space it didn't have in the
 source.</p>
 
-<h2>Flex row, real (correctly parsed) gap</h2>
+<h2>Flex row, real (correctly parsed) two-value px gap</h2>
 <nav class="pxgap"><a href="#">One</a><a href="#">Two</a><a href="#">Three</a></nav>
 
-<h2>Flex row, unparseable (rem) gap -- the httpforever D3 repro</h2>
+<h2>Flex row, the httpforever D3 repro (rem gap, scoped em approximation)</h2>
 <nav class="remgap"><a href="#">Security Headers</a><a href="#">Report URI</a><a href="#">Advertising</a></nav>
+
+<h2>Flex row, no gap declared (zero-advance synthesis only)</h2>
+<nav class="nogap"><a href="#">Alpha</a><a href="#">Beta</a><a href="#">Gamma</a></nav>
 
 <h2>Intra-word inline split (must stay "bold")</h2>
 <p><b>bo</b>ld</p>

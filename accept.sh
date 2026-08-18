@@ -757,18 +757,23 @@ else
 
   # ---------------------------------------------------------------------
   # A3x/A3y -- packet t3-inline-spacing's own goldens (fixtures/
-  # inline-spacing.html, the D3 fix): a flex row with a real, correctly
-  # two-value-parsed `gap` (must NOT get any synthesized extra space -- the
-  # real 20px column-gap is already enough), a second flex row whose `gap:
-  # .35rem 1.1rem` is the EXACT shape of fixtures/httpforever.html's
-  # `.footer__projects` (this engine has no `rem` unit, so that declaration
-  # is entirely unparseable and the real computed gap is 0 -- the
-  # zero-advance synthesis rule is what separates those links, not a real
-  # gap value), an intra-word inline split (`<b>bo</b>ld`, must stay
-  # "bold"), and adjacent inline elements with no source whitespace
-  # (`a<span>b</span>c`, must stay "abc"). A3x is the tty dump (same
-  # discipline as A3/A3b/.../A3v); A3y is the PNG dump (same byte-equality
-  # rationale as A3e/A3f/.../A3w).
+  # inline-spacing.html, the D3 fix), three flex rows plus two inline-run
+  # shapes:
+  #   1. a real, correctly two-value-parsed px `gap` (must NOT get any
+  #      synthesized extra space -- the real 20px column-gap is already
+  #      enough);
+  #   2. `gap: .35rem 1.1rem`, the EXACT shape of fixtures/httpforever.
+  #      html's `.footer__projects` -- resolved via `gap`'s own scoped
+  #      `rem` ≈ `em` approximation (`value::token_to_gap_length`), so this
+  #      is also a real, non-synthesized gap;
+  #   3. no `gap` declared at all (CSS initial value 0) -- separated ONLY
+  #      by the zero-advance synthesis rule, the independent safety net
+  #      that still applies when a gap can't be resolved at all;
+  #   4. an intra-word inline split (`<b>bo</b>ld`, must stay "bold");
+  #   5. adjacent inline elements with no source whitespace
+  #      (`a<span>b</span>c`, must stay "abc").
+  # A3x is the tty dump (same discipline as A3/A3b/.../A3v); A3y is the PNG
+  # dump (same byte-equality rationale as A3e/A3f/.../A3w).
   # ---------------------------------------------------------------------
   GOLDEN_TTY_INLINE_SPACING="goldens/inline-spacing.tty.txt"
   GOLDEN_PNG_INLINE_SPACING="goldens/inline-spacing.png"
