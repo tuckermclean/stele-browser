@@ -35,42 +35,69 @@
 //!
 //! ## Margin collapsing (D6, packet/t6-margin-collapse)
 //!
-//! Taffy has no notion of CSS margin collapsing — its degenerate-column-flex
-//! substrate treats every child's margin exactly like a flex item's margin
-//! (summed against its neighbor's), so two adjacent block siblings each
-//! carrying their own top/bottom margin got a DOUBLED gap (a real CSS
-//! engine collapses adjoining margins to `max(prev.margin_bottom,
-//! next.margin_top)`, CSS2.1 §8.3.1). Since taffy itself can't be taught
-//! this, [`compute_sibling_margin_overrides`] runs a pre-pass OUTSIDE taffy,
-//! over each non-flex container's own in-flow children, and rewrites the
-//! margin values fed to taffy for adjoining block siblings: the earlier
-//! sibling's margin-bottom becomes the max of the two original values, and
-//! the later sibling's margin-top becomes zero — the SAME visual gap taffy
-//! then produces by simply summing, because summing `max(a,b)` with `0` is
-//! `max(a,b)`.
+//! Two adjacent block siblings each carrying their own top/bottom margin
+//! got a DOUBLED gap pre-`t6` — a real CSS engine collapses adjoining
+//! margins to `max(prev.margin_bottom, next.margin_top)` (CSS2.1 §8.3.1),
+//! not their sum. The surprise (discovered mid-packet, see the extensive
+//! comment on [`compute_sibling_margin_overrides`] for the full story): the
+//! vendored taffy (0.13) `Display::Block` algorithm is NOT margin-collapsing
+//! -naive — it already implements REAL CSS collapsing natively. But it
+//! collapses every adjoining `Display::Block` sibling pair UNCONDITIONALLY;
+//! it has no concept of `float` at all (this engine never communicates float
+//! to taffy for block boxes) and its own border/padding checks only gate a
+//! DIFFERENT question (whether a box can be "collapsed through" as a
+//! pass-through for its PARENT's own margin) — never whether two ordinary
+//! siblings' margins should adjoin at all. So taffy's native behavior is
+//! "always collapse", not "never collapse" — the opposite problem from what
+//! this module's original (pre-fix) doc comment assumed, and NEITHER
+//! matches the exclusions this packet's contract wants.
+//!
+//! [`compute_sibling_margin_overrides`] runs a pre-pass OUTSIDE taffy, over
+//! each non-flex container's own in-flow children, and rewrites the margin
+//! values fed to taffy so taffy's own native collapsing can never produce
+//! anything other than what this function decided: the earlier sibling's
+//! margin-bottom becomes the FINAL desired gap (`max` when the pair should
+//! collapse, the ordinary `sum` when it shouldn't), and the later sibling's
+//! margin-top becomes zero — collapsing anything with a true zero is a
+//! no-op (`max(x, 0) == x` for the non-negative margins handled here), so
+//! whatever taffy's own algorithm does on top of these values afterward
+//! can't change the committed gap.
 //!
 //! In scope: adjacent in-flow block-level siblings only (CSS2.1's "adjoining
 //! margins"). A pair collapses only when nothing else separates them: no
 //! border or padding on either box's touching edge (a visible border/
-//! non-zero padding always ends adjoinment), and only whitespace-only text
-//! may sit between them in the DOM (real content, a float, or a flex item
-//! breaks the chain — see [`is_collapse_eligible_block`]). Percentage
-//! margins are left alone (summed, the pre-existing behavior): resolving a
-//! percentage margin needs the containing block's width, which isn't known
-//! yet at this translate-time pre-pass (only taffy's later layout pass
-//! knows it) — `auto` margins (which always compute to `0` for a top/bottom
-//! margin in this engine's normal-flow-only box model) collapse normally.
+//! non-zero padding always ends adjoinment — this packet's own contract,
+//! not literal upstream CSS2.1, which only applies that exclusion to
+//! parent/child adjoining, not sibling/sibling; implemented here regardless
+//! since taffy's native behavior needs overriding either way), and only
+//! whitespace-only text may sit between them in the DOM (real content, a
+//! float, or a flex item breaks the chain — see [`is_collapse_eligible_
+//! block`]). Percentage margins are left alone (taffy's own native
+//! collapsing behavior applies, unmodified): resolving a percentage margin
+//! needs the containing block's width, which isn't known yet at this
+//! translate-time pre-pass (only taffy's later layout pass knows it) —
+//! `auto` margins (which always compute to `0` for a top/bottom margin in
+//! this engine's normal-flow-only box model) collapse normally.
 //!
-//! Out of scope, deliberately NOT attempted this packet: a block's own
-//! margin collapsing with its first/last in-flow child's margin (CSS2.1
-//! §8.3.1's other collapsing case). Unlike the sibling case, that collapse
-//! doesn't just rewrite two neighboring margins — the child's margin
-//! visually moves OUTSIDE the parent's border edge, which breaks taffy's
-//! basic containment assumption (a child's box always sits within its
-//! parent's content box) and would need parent height/child-origin
-//! adjustments threaded back through `emit`, not just a `TStyle.margin`
-//! tweak. That's a materially bigger, riskier change than the pre-pass
-//! below; left as a documented follow-up rather than shipped half-working.
+//! Out of scope, NOT implemented by this packet's own pre-pass: a block's
+//! own margin collapsing with its first/last in-flow child's margin (CSS2.1
+//! §8.3.1's other collapsing case). Note this is subtly different from the
+//! sibling case: taffy's native `Display::Block` algorithm already performs
+//! SOME parent/child collapsing entirely on its own (`own_margins_collapse_
+//! with_children` in taffy's source — a container with zero top/bottom
+//! padding/border lets its own margin merge with its first/last child's),
+//! independent of and unaffected by anything in this file — this packet
+//! neither adds nor removes that behavior, and it predates `t6` (see the
+//! parenthetical below: earlier packets' tests already defended against it
+//! empirically, before this packet's own diagnosis of taffy's native
+//! collapsing existed). What IS out of scope is this pre-pass reaching in
+//! to CONTROL parent/child collapsing the way it controls sibling
+//! collapsing (e.g. to add this packet's own border/padding/float-style
+//! exclusions to that case too) — doing that properly would need parent
+//! height/child-origin adjustments threaded back through `emit`, not just a
+//! `TStyle.margin` tweak, since the child's margin can move outside the
+//! parent's own committed border-box in a way `MarginOverride` alone can't
+//! express. Left as a documented follow-up rather than shipped half-working.
 //! (The existing `nested_margin_padding_border_produce_expected_rects` /
 //! `asymmetric_margins_are_honored` tests in `tests/layout_block.rs`
 //! deliberately give their outer container nonzero padding — "blocks
@@ -706,14 +733,20 @@ impl MarginOverride {
 /// margins" — the sibling half only, see the module docs): not inline-level
 /// content (that's folded into an `Inline` taffy leaf, which has no margin
 /// of its own to collapse), and not floated (CSS2.1 §8.3.1 excludes floats
-/// from collapsing outright — this engine only actually floats `Replaced`
-/// atoms today, see `is_inline_ish`'s own doc comment, so this guard is
-/// presently defensive/future-proofing more than load-bearing, but it's
-/// what the spec requires and costs nothing to check). Flex items are
-/// excluded implicitly: `compute_sibling_margin_overrides` is only ever
-/// invoked over a NON-flex container's children (see
+/// from collapsing outright). This float check IS load-bearing, not merely
+/// defensive: taffy's own native `Display::Block` collapsing has no concept
+/// of `float` at all (this engine never communicates float status into
+/// taffy's `Style` for a block box — see `is_inline_ish`'s own doc comment
+/// on how float is handled today, bespoke-inline-only), so without this
+/// check and [`compute_sibling_margin_overrides`] explicitly overriding the
+/// pair to a summed (not collapsed) gap, taffy would collapse a floated
+/// sibling's margin with its neighbor's anyway, on its own initiative. Flex
+/// items are excluded implicitly: `compute_sibling_margin_overrides` is
+/// only ever invoked over a NON-flex container's children (see
 /// `translate_container_children`), so a flex item is never a candidate
-/// regardless of this function.
+/// regardless of this function — consistent either way, since taffy's OWN
+/// flexbox algorithm never does margin collapsing at all (confirmed by
+/// `flex_column_item_margins_do_not_collapse` in `tests/layout_block.rs`).
 fn is_collapse_eligible_block(n: &LayoutNode) -> bool {
     !is_inline_ish(n) && n.style.float == Float::None
 }
@@ -762,21 +795,54 @@ fn margin_px_for_collapse(v: LengthPercentageAuto) -> Option<f32> {
 /// The pre-pass at the heart of D6: for `children` (one non-flex
 /// container's own in-flow children, in document order — see
 /// `translate_container_children`'s non-flex branch, the only caller),
-/// compute a [`MarginOverride`] per child collapsing every adjoining pair of
-/// in-flow block-level siblings to `max(prev.margin_bottom,
-/// next.margin_top)` (module docs' "Margin collapsing" section has the full
-/// rationale). The returned `Vec` is parallel to `children` (same length,
+/// compute a [`MarginOverride`] per child that makes each adjoining pair of
+/// real (non-whitespace-only) block-level siblings resolve to EXACTLY the
+/// gap CSS2.1 wants: `max(prev.margin_bottom, next.margin_top)` when the
+/// pair is collapse-eligible and nothing separates them ([`margins_may_
+/// collapse`]), the ordinary summed `prev.margin_bottom + next.margin_top`
+/// otherwise. The returned `Vec` is parallel to `children` (same length,
 /// same order).
 ///
-/// Walks `children` once, tracking the most recent collapse-eligible block
-/// still "adjoining" the position being considered: a whitespace-only text
-/// child (CSS2.1 §9.2.2.1: generates no box) is transparent and doesn't
-/// break adjoinment; anything else that isn't itself a collapse-eligible
-/// block (real inline content, a float, ...) does. When two eligible blocks
-/// ARE adjoining and [`margins_may_collapse`] confirms nothing separates
-/// them, the earlier one's `bottom` override becomes the max and the later
-/// one's `top` override becomes `0` — taffy then sums `max` with `0` and
-/// gets `max`, the collapsed gap, using its ordinary (non-collapsing) sum.
+/// **Every** adjoining pair gets an explicit override, not just the ones
+/// that collapse — this is load-bearing, not belt-and-suspenders. Taffy
+/// 0.13's `Display::Block` algorithm (`taffy::compute::block`) implements
+/// real CSS margin collapsing NATIVELY, and unlike this function it does
+/// NOT gate sibling-to-sibling collapsing on border/padding/float at all
+/// (those only affect taffy's own "can this box be collapsed THROUGH"
+/// pass-through check, a different question — see `has_styles_preventing_
+/// being_collapsed_through` in taffy's source, which only ever gates a
+/// PARENT/child or pass-through relationship, never a plain sibling pair).
+/// So taffy will happily collapse two directly-adjacent `Display::Block`
+/// items' margins on its own initiative REGARDLESS of what this function
+/// decides — leaving a "should NOT collapse" pair's margins untouched
+/// (the pre-`t6` fix's original approach) does not make taffy sum them,
+/// it just lets taffy collapse them anyway. The only way to reliably
+/// override taffy's own decision is to feed it a `(sum, 0)` pair instead
+/// of `(a, b)`: taffy's own `collapse_with_margin`/`collapse_with_set`
+/// calls always resolve to `max`, and `max(sum, 0) == sum` for the
+/// non-negative margins this function handles — so committing the desired
+/// final value into the EARLIER box's margin-bottom and zeroing the LATER
+/// box's margin-top makes any further collapsing taffy performs on top of
+/// that a no-op, regardless of which formula (max or sum) produced the
+/// committed value. The same trick is what makes the actually-eligible
+/// pairs work too (`max(a, b)` committed with a trailing `0` collapses to
+/// itself) — the two cases share one code path below, differing only in
+/// which formula computes `gap`.
+///
+/// Walks `children` once, tracking the most recent REAL (non-whitespace,
+/// non-inline) block-level box still adjacent to the position being
+/// considered: a whitespace-only text child (CSS2.1 §9.2.2.1: generates no
+/// box) is transparent and doesn't break adjacency; real inline content
+/// does (never actually reached here in practice — such content is folded
+/// into an `Inline` run by the caller's own grouping loop before this
+/// function ever sees it, but the check is kept for clarity/defense).
+/// EVERY adjoining pair of real block-level boxes gets an override — even
+/// a collapse-INELIGIBLE one (a float): it still becomes `prev` for the
+/// pair after it, still gets an explicit (summed) override against its
+/// neighbor on each side, because taffy doesn't know it's floated and
+/// would otherwise collapse across it regardless (a chain like `[A, float,
+/// C]` needs BOTH the `(A, float)` and `(float, C)` pairs neutralized, not
+/// just the first).
 ///
 /// Each child can accumulate up to two independent overrides across the
 /// whole walk — one as the "later" sibling of the pair before it (its
@@ -784,11 +850,18 @@ fn margin_px_for_collapse(v: LengthPercentageAuto) -> Option<f32> {
 /// `bottom`) — computed from that child's own ORIGINAL cascaded margin in
 /// both cases (an already-overridden `top` never feeds a later `bottom`
 /// computation or vice versa), matching real CSS2.1 behavior for a chain of
-/// several touching boxes (each pair collapses independently) short of the
+/// several touching boxes (each pair resolved independently) short of the
 /// "empty self-collapsing box" refinement (CSS2.1 §8.3.1's own further
 /// special case for a box with zero height/border/padding/content, which
 /// can let THREE OR MORE margins collapse into one) — not implemented here,
 /// no fixture in this packet's golden set exercises it.
+///
+/// A pair whose margin isn't resolvable to a px value at this translate-time
+/// pre-pass (a `Percent` margin on either side — see [`margin_px_for_
+/// collapse`]) is left with NO override at all, on either box: this is the
+/// one case where taffy's own native collapsing behavior is NOT overridden
+/// (a documented limitation, not a choice — there's no containing-block
+/// width available here to resolve a percentage against).
 fn compute_sibling_margin_overrides(children: &[LayoutNode]) -> Vec<MarginOverride> {
     let mut overrides = vec![MarginOverride::default(); children.len()];
     let mut prev: Option<usize> = None;
@@ -796,18 +869,20 @@ fn compute_sibling_margin_overrides(children: &[LayoutNode]) -> Vec<MarginOverri
         if is_whitespace_only_text(child) {
             continue;
         }
-        if !is_collapse_eligible_block(child) {
+        if is_inline_ish(child) {
             prev = None;
             continue;
         }
         if let Some(p) = prev {
-            if margins_may_collapse(&children[p], child) {
-                let prev_bottom = margin_px_for_collapse(children[p].style.margin.bottom);
-                let next_top = margin_px_for_collapse(child.style.margin.top);
-                if let (Some(pb), Some(nt)) = (prev_bottom, next_top) {
-                    overrides[p].bottom = Some(pb.max(nt));
-                    overrides[i].top = Some(0.0);
-                }
+            let eligible = is_collapse_eligible_block(&children[p])
+                && is_collapse_eligible_block(child)
+                && margins_may_collapse(&children[p], child);
+            let prev_bottom = margin_px_for_collapse(children[p].style.margin.bottom);
+            let next_top = margin_px_for_collapse(child.style.margin.top);
+            if let (Some(pb), Some(nt)) = (prev_bottom, next_top) {
+                let gap = if eligible { pb.max(nt) } else { pb + nt };
+                overrides[p].bottom = Some(gap);
+                overrides[i].top = Some(0.0);
             }
         }
         prev = Some(i);
