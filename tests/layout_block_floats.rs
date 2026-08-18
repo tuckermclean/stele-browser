@@ -472,3 +472,94 @@ fn exact_fit_floats_stay_side_by_side_not_stacked() {
         left.origin.x + left.size.w
     );
 }
+
+/// packet/acid1-content-box regression: a floated box's OWN declared
+/// margin-top must never be zeroed by `layout::block::compute_sibling_
+/// margin_overrides` (the D6 sibling-margin-collapsing pre-pass) just
+/// because it follows a plain (non-floated) sibling in document order.
+/// This is `fixtures/css1-float-5526c.html`'s `dd > ul, dd > blockquote`
+/// shape, minimized: `dd`'s equivalent (OUTER, width 200px) has two direct
+/// children -- a plain WRAPPER (like `<ul>`, non-floated, containing only
+/// a floated child, so its own auto height collapses to 0 -- exactly
+/// `<ul>`'s shape) and a floated GREEN box declaring `margin-top: 20px`
+/// (like `<blockquote>`/`<h1>`, both `margin: 1em ...`). RED (inside
+/// WRAPPER) is 150px wide -- too wide to sit beside GREEN (also 150px) in
+/// the 200px OUTER, so GREEN unavoidably wraps below RED regardless of any
+/// margin, making RED's occupied bottom (not WRAPPER's near-zero margin
+/// floor) the actual binding constraint on GREEN's position -- this is
+/// exactly the structural shape (`compute_sibling_margin_overrides`'s own
+/// doc comment has the full mechanism) where the pre-fix bug's "steal
+/// margin-top from the float, stuff an equivalent amount into the
+/// preceding sibling's margin-bottom" trick does NOT cancel out (unlike a
+/// simpler 2-item [non-float, float] chain, where the stolen amount
+/// coincidentally lands back in the same place via the committed-margin
+/// floor -- unit-testable, but NOT a discriminating regression test).
+///
+/// Before this packet's fix: GREEN's margin-top silently became 0, so it
+/// rendered flush against RED's bottom (y = 50). After: GREEN's real 20px
+/// margin-top is honored, landing at RED's bottom + 20 (y = 70) -- matching
+/// what a non-floated sibling with the same margin would get, and matching
+/// Chrome's own rendering of the real fixture (pixel-verified: `dd`'s
+/// interior padding is uniform ~10px on all four sides, not 20px at the
+/// bottom).
+#[test]
+fn a_floated_sibling_after_a_plain_wrapper_keeps_its_own_top_margin() {
+    let html = r#"
+        <div style="width:200px;">
+            <div>
+                <div style="float:left;width:150px;height:50px;background-color:rgb(200,0,0);"></div>
+            </div>
+            <div style="float:left;width:150px;height:20px;margin-top:20px;background-color:rgb(0,200,0);"></div>
+        </div>
+    "#;
+    let fragments = render(html, 300.0);
+    let red = box_with_bg(&fragments, RED);
+    let green = box_with_bg(&fragments, GREEN);
+
+    assert_eq!(red.origin.y, 0.0, "red (row 1) starts at the top, no preceding content");
+    assert_eq!(red.size.h, 50.0);
+    assert!(
+        green.origin.y >= red.origin.y + red.size.h,
+        "green must not overlap red (y={}) -- red's bottom is {}",
+        green.origin.y,
+        red.origin.y + red.size.h
+    );
+    assert_eq!(
+        green.origin.y,
+        red.origin.y + red.size.h + 20.0,
+        "green's own 20px margin-top must be honored on top of red's bottom edge ({}), not zeroed by the sibling-margin-collapsing pre-pass -- got y={}",
+        red.origin.y + red.size.h,
+        green.origin.y
+    );
+}
+
+/// A floated box with FOUR DIFFERENT border widths (`fixtures/css1-float-
+/// 5526c.html`'s `blockquote { border-width: 1em 1.5em 2em .5em }` shape,
+/// in round px) must get a border-box size that sums the TRUE per-side
+/// widths -- `top+bottom` for height, `left+right` for width -- not some
+/// symmetric substitute (e.g. `2*top` or `2*left`). Content-box sizing
+/// (packet/acid1-content-box) makes this externally observable: content
+/// 50x90 + padding (10px top/bottom, 0 left/right) + border (top=10,
+/// right=15, bottom=20, left=5) must render at EXACTLY width=50+0+15+5=70,
+/// height=90+20+10+20=140 -- proven correct by both a standalone cascade
+/// unit test (`src/style/cascade.rs`'s `border_width_style_color_
+/// longhands_resolve_per_side_with_no_border_shorthand`) and this one,
+/// which additionally proves taffy/the emitted `Fragment` carries the
+/// asymmetric size through to the real paint-ready geometry, not just the
+/// intermediate `ComputedStyle`.
+#[test]
+fn floated_box_with_four_different_border_widths_sums_true_per_side_widths() {
+    let html = r#"
+        <div style="float:left;width:50px;height:90px;padding:10px 0;border-width:10px 15px 20px 5px;border-style:solid;border-color:black;background-color:rgb(200,0,0);"></div>
+    "#;
+    let fragments = render(html, 300.0);
+    let outer = box_with_bg(&fragments, RED);
+    assert_eq!(
+        outer.size.w, 70.0,
+        "border-box width must be content(50) + padding(0+0) + border(left=5,right=15) = 70, not a symmetric substitute"
+    );
+    assert_eq!(
+        outer.size.h, 140.0,
+        "border-box height must be content(90) + padding(10+10) + border(top=10,bottom=20) = 140, not a symmetric substitute"
+    );
+}
