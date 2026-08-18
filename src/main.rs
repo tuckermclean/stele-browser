@@ -770,14 +770,35 @@ enum ScrollBlit {
 /// sends nothing over the wire rather than needing its own separate
 /// early-out. `win_h == 0` degenerates to `Full` (nothing sane to copy),
 /// never a panic/div-by-zero (this function does no division at all).
-///
-/// TODO(packet/x11-perf): not yet implemented. Failing tests:
-/// `scroll_blit_scrolling_down_copies_up_and_paints_the_bottom_strip`,
-/// `scroll_blit_scrolling_up_copies_down_and_paints_the_top_strip`,
-/// `scroll_blit_jump_at_or_past_win_h_is_full`,
-/// `scroll_blit_no_op_scroll_paints_nothing`.
-fn scroll_blit(_old_scroll: u32, _new_scroll: u32, _win_h: u32) -> ScrollBlit {
-    todo!("scroll_blit: packet/x11-perf scroll planning not yet implemented")
+fn scroll_blit(old_scroll: u32, new_scroll: u32, win_h: u32) -> ScrollBlit {
+    if new_scroll == old_scroll {
+        return ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 0, copy_h: 0, strip_page_y: new_scroll, strip_dst_y: 0, strip_h: 0 };
+    }
+    if new_scroll > old_scroll {
+        // Scrolling DOWN: the page moves up under the window. Retained rows
+        // (window rows [d, win_h) of the OLD frame) become window rows
+        // [0, win_h-d) of the new frame -- CopyArea shifts them up by `d`.
+        // The strip below that (window rows [win_h-d, win_h)) is newly
+        // exposed page rows [new_scroll+(win_h-d), new_scroll+win_h).
+        let d = new_scroll - old_scroll;
+        if d >= win_h {
+            return ScrollBlit::Full;
+        }
+        let copy_h = win_h - d;
+        ScrollBlit::Partial { copy_src_y: d, copy_dst_y: 0, copy_h, strip_page_y: new_scroll + copy_h, strip_dst_y: copy_h, strip_h: d }
+    } else {
+        // Scrolling UP: the page moves down under the window. Retained rows
+        // (window rows [0, win_h-d) of the OLD frame) become window rows
+        // [d, win_h) of the new frame -- CopyArea shifts them down by `d`.
+        // The strip above that (window rows [0, d)) is newly exposed page
+        // rows [new_scroll, new_scroll+d).
+        let d = old_scroll - new_scroll;
+        if d >= win_h {
+            return ScrollBlit::Full;
+        }
+        let copy_h = win_h - d;
+        ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: d, copy_h, strip_page_y: new_scroll, strip_dst_y: 0, strip_h: d }
+    }
 }
 
 /// Default X11 window size (CSS px) — no `--width`/`--height` flag yet (the
