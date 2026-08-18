@@ -43,6 +43,13 @@ use stele::surface::{Color, MemSurface};
 
 const VIEWPORT_WIDTH: u32 = 800;
 
+/// The UA stylesheet's `body { margin: 8px; }` (`src/style/ua.rs`) adds this
+/// much to a bare `<body><img></body>` document's total content height (8px
+/// top + 8px bottom) on top of the `<img>`'s own intrinsic height -- the
+/// page-height assertions below account for it explicitly so they pin the
+/// exact expected height rather than a loose inequality.
+const BODY_MARGIN_V: u32 = 16;
+
 /// A fresh, never-repo-tree scratch directory per test (PID + a per-call
 /// discriminator to avoid collisions between tests in the same process).
 fn scratch_dir(name: &str) -> std::path::PathBuf {
@@ -131,7 +138,11 @@ fn relative_img_src_with_no_size_attrs_decodes_and_paints_at_an_arbitrary_direct
     }
 
     let (w, h, px) = decode_png(&png_bytes);
-    assert_eq!((w, h), (VIEWPORT_WIDTH, 5), "the page height should reflect the decoded image, not collapse to a 0x0 box");
+    assert_eq!(
+        (w, h),
+        (VIEWPORT_WIDTH, 5 + BODY_MARGIN_V),
+        "the page height should reflect the decoded image (plus the UA body margin), not collapse to just the margin"
+    );
     assert!(has_red_pixel(&px), "the decoded red image should actually be painted, not rendered blank");
 }
 
@@ -160,7 +171,7 @@ fn absolute_file_url_img_src_with_no_size_attrs_decodes_and_paints() {
     }
 
     let (w, h, px) = decode_png(&png_bytes);
-    assert_eq!((w, h), (VIEWPORT_WIDTH, 4));
+    assert_eq!((w, h), (VIEWPORT_WIDTH, 4 + BODY_MARGIN_V));
     assert!(has_red_pixel(&px), "the decoded red image should actually be painted, not rendered blank");
 }
 
