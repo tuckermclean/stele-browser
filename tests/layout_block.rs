@@ -8,7 +8,7 @@ use std::rc::Rc;
 use stele::img::RgbaImage;
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
 use stele::style::computed::{
-    BorderSide, BorderStyle, Dimension, Edges, FlexDirection, LengthPercentage, LengthPercentageAuto,
+    BorderSide, BorderStyle, Dimension, Edges, FlexDirection, Float, LengthPercentage, LengthPercentageAuto,
 };
 use stele::style::ComputedStyle;
 
@@ -176,6 +176,147 @@ fn asymmetric_margins_are_honored() {
 
     // parent height = padding-top(2) + margin-top(5) + child height(8) + margin-bottom(15) + padding-bottom(2)
     assert_eq!(boxes[0].rect.size.h, 2.0 + 5.0 + 8.0 + 15.0 + 2.0);
+}
+
+// -----------------------------------------------------------------------
+// D6: adjacent-sibling margin collapsing (CSS2.1 §8.3.1). Taffy has no
+// native concept of collapsing (it sums adjoining margins like a flex
+// column would) -- these are the classic contract cases the packet exists
+// to fix. Every tree below nests two block siblings directly inside a
+// plain block root (no padding/border on the root, so root/first-child
+// collapsing -- NOT implemented this packet, sibling-only -- never fires
+// and can't be confused with the sibling behavior under test).
+// -----------------------------------------------------------------------
+
+/// A `display: block` style with a fixed height and the given margin-top/
+/// margin-bottom (right/left left at the CSS initial `0`).
+fn block_with_vertical_margin(height: f32, margin_top: f32, margin_bottom: f32) -> ComputedStyle {
+    let mut style = block_style();
+    style.height = Dimension::Px(height);
+    style.margin = px_margin(margin_top, 0.0, margin_bottom, 0.0);
+    style
+}
+
+#[test]
+fn adjacent_block_siblings_collapse_to_the_larger_margin() {
+    // A: margin-bottom 20; B: margin-top 30 -- collapsed gap is max(20, 30)
+    // = 30, NOT the summed 50 taffy would produce natively.
+    let a = leaf_container(block_with_vertical_margin(10.0, 0.0, 20.0));
+    let b = leaf_container(block_with_vertical_margin(10.0, 30.0, 0.0));
+    let root = container(block_style(), vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3, "root + A + B");
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(a_box.rect.origin.y, 0.0);
+    assert_eq!(a_box.rect.size.h, 10.0);
+    assert_eq!(b_box.rect.origin.y, 10.0 + 30.0, "gap is max(20, 30), not 20 + 30");
+    // root's own height reflects the collapsed (not summed) gap too.
+    assert_eq!(boxes[0].rect.size.h, 10.0 + 30.0 + 10.0);
+}
+
+#[test]
+fn adjacent_block_siblings_with_equal_margins_collapse_to_that_margin() {
+    let a = leaf_container(block_with_vertical_margin(10.0, 0.0, 20.0));
+    let b = leaf_container(block_with_vertical_margin(10.0, 20.0, 0.0));
+    let root = container(block_style(), vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(b_box.rect.origin.y, a_box.rect.origin.y + a_box.rect.size.h + 20.0, "20 + 20 collapses to 20");
+}
+
+#[test]
+fn a_border_between_block_siblings_prevents_collapse() {
+    // B has a (zero-padding) top border: CSS2.1 says a border between two
+    // adjoining margins ends the adjoinment -- the gap must stay SUMMED.
+    let a = leaf_container(block_with_vertical_margin(10.0, 0.0, 20.0));
+    let mut b_style = block_with_vertical_margin(10.0, 30.0, 0.0);
+    b_style.border = px_border_all(2.0);
+    let b = leaf_container(b_style);
+    let root = container(block_style(), vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(
+        b_box.rect.origin.y,
+        a_box.rect.origin.y + a_box.rect.size.h + 20.0 + 30.0,
+        "a border between the boxes must prevent collapsing -- gap stays summed"
+    );
+}
+
+#[test]
+fn padding_between_block_siblings_prevents_collapse() {
+    // A has bottom padding: same rule, a padding gap also ends adjoinment.
+    let mut a_style = block_with_vertical_margin(10.0, 0.0, 20.0);
+    a_style.padding = Edges { top: LengthPercentage::Px(0.0), right: LengthPercentage::Px(0.0), bottom: LengthPercentage::Px(4.0), left: LengthPercentage::Px(0.0) };
+    let a = leaf_container(a_style);
+    let b = leaf_container(block_with_vertical_margin(10.0, 30.0, 0.0));
+    let root = container(block_style(), vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(
+        b_box.rect.origin.y,
+        a_box.rect.origin.y + a_box.rect.size.h + 20.0 + 30.0,
+        "padding between the boxes must prevent collapsing -- gap stays summed"
+    );
+}
+
+#[test]
+fn flex_column_item_margins_do_not_collapse() {
+    // Flex items never participate in margin collapsing (CSS Flexbox §4) --
+    // a flex column with the same 20/30 margins must keep the SUMMED gap,
+    // unlike the identical-looking block case above.
+    let flex_style = ComputedStyle {
+        display: stele::style::computed::Display::Flex,
+        flex_direction: FlexDirection::Column,
+        ..ComputedStyle::default()
+    };
+    let a = leaf_container(block_with_vertical_margin(10.0, 0.0, 20.0));
+    let b = leaf_container(block_with_vertical_margin(10.0, 30.0, 0.0));
+    let root = container(flex_style, vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(b_box.rect.origin.y, a_box.rect.origin.y + a_box.rect.size.h + 20.0 + 30.0, "flex items sum, never collapse");
+}
+
+#[test]
+fn floated_sibling_margins_do_not_collapse() {
+    // A float is pulled out of normal flow -- CSS2.1 §8.3.1 excludes floats
+    // from margin collapsing entirely, so a floated sibling keeps the
+    // summed gap even though it's otherwise an ordinary block box.
+    let a = leaf_container(block_with_vertical_margin(10.0, 0.0, 20.0));
+    let mut b_style = block_with_vertical_margin(10.0, 30.0, 0.0);
+    b_style.float = Float::Left;
+    let b = leaf_container(b_style);
+    let root = container(block_style(), vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(
+        b_box.rect.origin.y,
+        a_box.rect.origin.y + a_box.rect.size.h + 20.0 + 30.0,
+        "a floated sibling must not collapse its margin with its neighbor"
+    );
+}
+
+#[test]
+fn whitespace_only_text_between_block_siblings_does_not_break_collapsing() {
+    // Ordinary hand-formatted HTML puts a whitespace-only text node (a
+    // newline + indentation) between sibling block elements in the DOM;
+    // that text generates no box (CSS2.1 §9.2.2.1) and must not be treated
+    // as "real content separating the boxes" -- the two blocks must still
+    // collapse exactly as if the whitespace weren't there.
+    let a = leaf_container(block_with_vertical_margin(10.0, 0.0, 20.0));
+    let b = leaf_container(block_with_vertical_margin(10.0, 30.0, 0.0));
+    let root = container(block_style(), vec![a, text_node("  \n  "), b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3, "the whitespace-only text produces no Box fragment of its own");
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(b_box.rect.origin.y, a_box.rect.origin.y + a_box.rect.size.h + 30.0, "collapses through whitespace-only text");
 }
 
 #[test]
