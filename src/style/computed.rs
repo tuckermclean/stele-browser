@@ -324,6 +324,22 @@ pub struct ComputedStyle {
     pub flex_shrink: f32,
     pub flex_basis: Dimension,
     pub gap: f32,
+    /// The distinct COLUMN-gap value from a two-value `gap: <row-gap>
+    /// <column-gap>` shorthand (packet/t3-inline-spacing, the D3 fix).
+    /// `None` when only one value was ever declared (or none at all) --
+    /// `gap` alone then governs both axes, unchanged pre-existing
+    /// behavior. Kept as a SEPARATE `Option<f32>` rather than folding into
+    /// `gap` itself (which would need to become a `(f32, f32)` pair, a much
+    /// bigger ripple through every existing `gap`-reading call site and
+    /// test) -- see `layout::block::apply_flex`, the only reader, which
+    /// uses `column_gap.unwrap_or(gap)` for taffy's WIDTH axis and `gap`
+    /// unconditionally for the HEIGHT axis -- real CSS's own `column-gap`/
+    /// `row-gap` always mean "horizontal"/"vertical" spacing respectively,
+    /// regardless of `flex-direction` (taffy's own layout algorithm is what
+    /// maps a container's WIDTH-axis gap onto its actual main/cross axis,
+    /// not this translation layer), so this mapping needs no
+    /// `flex-direction`-dependent branching.
+    pub column_gap: Option<f32>,
 }
 
 impl Default for ComputedStyle {
@@ -371,6 +387,7 @@ impl Default for ComputedStyle {
             flex_shrink: 1.0,
             flex_basis: Dimension::Auto,
             gap: 0.0,
+            column_gap: None,
         }
     }
 }
@@ -398,5 +415,9 @@ mod tests {
         // `Separate` (CSS's own initial value), so no existing table's
         // rendering shifts.
         assert_eq!(s.border_collapse, BorderCollapse::Separate);
+        // packet/t3-inline-spacing: no distinct column-gap by default --
+        // `gap` alone governs both axes until a two-value shorthand says
+        // otherwise (see the field's own doc comment).
+        assert_eq!(s.column_gap, None);
     }
 }

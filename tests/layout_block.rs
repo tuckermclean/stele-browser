@@ -325,6 +325,30 @@ fn flex_row_lays_items_out_left_to_right_with_gap() {
     assert_eq!(boxes[2].rect.size.w, 50.0);
 }
 
+/// packet/t3-inline-spacing (the D3 fix): a two-value `gap: <row-gap>
+/// <column-gap>` must use the COLUMN-gap -- not the row-gap -- for a
+/// row-direction flex container's item-to-item HORIZONTAL advance. Before
+/// this packet `ComputedStyle` only carried one scalar `gap`, reused for
+/// both taffy axes, so a two-value declaration's column-gap was silently
+/// dropped by `value::apply_property`'s `"gap"` arm and the row-gap value
+/// did double duty -- see `ComputedStyle::column_gap`'s own doc comment and
+/// `fixtures/httpforever.html`'s `.footer__projects { gap: .35rem 1.1rem;
+/// }` for the real-world shape this reproduces. Distinct row (4.0) and
+/// column (40.0) values so a regression that reads the wrong field (or
+/// still reuses one scalar for both) shows up as a wrong `origin.x`, not a
+/// coincidentally-matching one.
+#[test]
+fn flex_row_uses_column_gap_not_row_gap_for_horizontal_item_spacing() {
+    let mut style = flex_row_style(4.0);
+    style.column_gap = Some(40.0);
+    let root = container(style, vec![leaf_container(flex_item_style(Some(50.0), 0.0)), leaf_container(flex_item_style(Some(50.0), 0.0))]);
+    let fragments = layout(&root, Size { w: 400.0, h: 100.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3, "container + 2 items");
+    assert_eq!(boxes[1].rect.origin.x, 0.0);
+    assert_eq!(boxes[2].rect.origin.x, 50.0 + 40.0, "second item must be offset by the COLUMN gap (40), not the row gap (4)");
+}
+
 /// Mirrors `fixtures/flex-polite.html`'s two-column `main`/`aside` layout: a
 /// `flex-grow: 1` item must take all the width its fixed-width sibling
 /// doesn't use (minus the gap between them), and the two items must sit

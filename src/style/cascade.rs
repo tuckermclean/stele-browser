@@ -315,6 +315,12 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         flex_shrink: own!(flex_shrink),
         flex_basis: resolve_dimension(d.flex_basis, font_size, default.flex_basis),
         gap: d.gap.map(|l| raw_to_px(l, font_size)).unwrap_or(default.gap),
+        // packet/t3-inline-spacing: `column_gap` only carries a value when
+        // the two-value `gap` shorthand actually declared a distinct
+        // column-gap -- `None` (not `default.column_gap`, which is always
+        // `None` anyway) is the correct un-set result, mirroring `d.gap`'s
+        // own `Option` shape one line up.
+        column_gap: d.column_gap.map(|l| raw_to_px(l, font_size)),
     }
 }
 
