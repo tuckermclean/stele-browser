@@ -7,7 +7,7 @@ Text & Inline Markup
 
 
 A paragraph with bold, italic, emphasis, and strong text, plus a link. Entities:
-© 2026 Stele Project — all rights reserved (© numeric copy too).
+© 2026 Stele Project - all rights reserved (© numeric copy too).
 
 
 Lists

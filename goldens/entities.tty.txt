@@ -25,13 +25,13 @@
  Nbsp: a b
 
 
- Mdash: a — b
+ Mdash: a - b
 
 
  NumCopy: © 2026
 
 
- HexDash: a — b
+ HexDash: a - b
 
 
  Bogus: &notanentity; stays literal
