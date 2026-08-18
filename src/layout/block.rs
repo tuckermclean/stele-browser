@@ -1205,8 +1205,21 @@ fn apply_flex(style: &mut TStyle, cs: &ComputedStyle) {
     style.flex_grow = grow;
     style.flex_shrink = shrink;
     style.flex_basis = map_dimension(cs.flex_basis);
+    // packet/t3-inline-spacing (the D3 fix): `column_gap` -- when a
+    // two-value `gap: <row-gap> <column-gap>` shorthand set one -- governs
+    // the WIDTH axis; `gap` alone governs the HEIGHT axis. Before this
+    // packet both axes fed from the same single `cs.gap` scalar, which for
+    // a two-value declaration (e.g. `fixtures/httpforever.html`'s
+    // `.footer__projects { gap: .35rem 1.1rem; }`) meant the row-gap value
+    // silently did double duty as the column-gap too -- see
+    // `ComputedStyle::column_gap`'s own doc comment and `value::apply_
+    // property`'s `"gap"` arm for the full D3 diagnosis.
     let gap = if cs.gap.is_finite() { cs.gap.max(0.0) } else { 0.0 };
-    style.gap = TSize { width: TLengthPercentage::length(gap), height: TLengthPercentage::length(gap) };
+    let column_gap = match cs.column_gap {
+        Some(v) if v.is_finite() => v.max(0.0),
+        _ => gap,
+    };
+    style.gap = TSize { width: TLengthPercentage::length(column_gap), height: TLengthPercentage::length(gap) };
 }
 
 fn map_display(d: Display) -> TDisplay {

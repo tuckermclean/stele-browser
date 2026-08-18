@@ -153,6 +153,13 @@ pub(crate) struct Declarations {
     pub flex_shrink: Option<f32>,
     pub flex_basis: Option<RawLengthAuto>,
     pub gap: Option<RawLength>,
+    /// The SECOND value of a two-value `gap: <row-gap> <column-gap>`
+    /// shorthand (packet/t3-inline-spacing, the D3 fix). `None` when only
+    /// one value was ever declared, in which case `gap` alone governs both
+    /// axes (unchanged pre-existing behavior) -- see
+    /// `ComputedStyle::column_gap`'s own doc comment for why this needs its
+    /// own field rather than overwriting `gap`.
+    pub column_gap: Option<RawLength>,
 
     /// Custom-property (`--name: <tokens>;`) declarations captured by this
     /// block (packet T1a — CSS custom properties + `var()`). Stored as RAW
@@ -227,6 +234,7 @@ impl Declarations {
         ov!(flex_shrink);
         ov!(flex_basis);
         ov!(gap);
+        ov!(column_gap);
         self.margin.overlay(&other.margin);
         self.padding.overlay(&other.padding);
         // `background_image` isn't `Copy` (see its field doc comment), so it
@@ -997,6 +1005,25 @@ fn classify_font_family(tokens: &[Token]) -> Option<FontFamily> {
     Some(FontFamily::Serif)
 }
 
+/// Diagnosis note (packet/t3-inline-spacing, the D3 investigation): `rem`
+/// is deliberately NOT one of the recognized units below -- this engine has
+/// no root-element-font-size plumbing through `cascade::resolve` (only the
+/// current/parent node's own already-cascaded font size is threaded down
+/// the walk), so a real, correctly-scoped `rem` (relative to the ROOT
+/// element's font-size, not the current element's) can't be resolved here
+/// without restructuring that walk. A `<N>rem` token therefore falls
+/// through to `_ => None` below exactly like any other unrecognized unit,
+/// and the WHOLE declaration it appears in is dropped (this function's own
+/// caller convention: an unparseable value simply fails to apply, module
+/// docs). This is real, observable scope -- e.g. every `rem`-based
+/// `margin`/`padding`/`font-size`/... declaration in `fixtures/
+/// httpforever.html` silently falls back to its CSS initial value today.
+///
+/// [`token_to_gap_length`] right below is a SEPARATE, narrowly-scoped
+/// carve-out of this rule for `gap` alone (an `em`≈`rem` approximation,
+/// not real root-relative `rem`) -- see that function's own doc comment
+/// for why `gap` specifically can afford the approximation and every other
+/// property here still can't.
 fn token_to_raw_length(t: &Token) -> Option<RawLength> {
     match t {
         Token::Dimension(v, unit) => match unit.as_str() {
@@ -1009,6 +1036,41 @@ fn token_to_raw_length(t: &Token) -> Option<RawLength> {
         Token::Number(v) if *v == 0.0 => Some(RawLength::Px(0.0)), // unitless 0 is a valid length
         _ => None,
     }
+}
+
+/// `gap`-only length parsing (packet/t3-inline-spacing): [`token_to_raw_
+/// length`] plus ONE scoped extra case -- a `rem` dimension token maps to
+/// `RawLength::Em`. This is a deliberate approximation, NOT real `rem`
+/// support: it resolves against the CURRENT element's font-size (an `em`),
+/// not the root element's, so it's only correct when the two coincide (no
+/// `html { font-size: ... }` override -- true of every fixture in this
+/// repo today, `fixtures/httpforever.html` included). Real root-relative
+/// `rem` needs `cascade::resolve` to thread a second, root-pinned font
+/// size down its walk (see [`token_to_raw_length`]'s own doc comment) --
+/// out of scope for a spacing packet.
+///
+/// Scoped to `gap` alone, not folded into `token_to_raw_length` itself:
+/// every OTHER `rem`-based declaration on a real page (margin, padding,
+/// font-size, ...) stays exactly as unparseable as before this packet --
+/// widening this to the general parser would reflow the WHOLE page against
+/// an approximation, a much bigger and unrelated blast radius than "make a
+/// flex row's gap advance by roughly the right amount." A gap only ever
+/// needs a plausible-magnitude advance to keep two elements from visually
+/// fusing (and this packet's zero-advance synthesis rule already covers
+/// gap magnitudes it still gets wrong) -- correctness bar low enough that
+/// the em/rem conflation is an acceptable, narrowly-scoped approximation
+/// here specifically.
+fn token_to_gap_length(t: &Token) -> Option<RawLength> {
+    // `tokenizer::tokenize` already lowercases every unit string (see its
+    // own doc comment), so a plain `==` matches the same way every other
+    // unit arm in `token_to_raw_length` does -- no case-insensitive
+    // comparison needed here either.
+    if let Token::Dimension(v, unit) = t {
+        if unit == "rem" {
+            return Some(RawLength::Em(*v));
+        }
+    }
+    token_to_raw_length(t)
 }
 
 /// `border-width` (unlike margin/padding/width/height) has no percentage
@@ -1598,15 +1660,60 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             _ => false,
         },
-        "gap" => match tokens.first().and_then(token_to_raw_length) {
-            // Percent gap needs a containing-block size this layer doesn't
-            // have; out of scope for v0 (unlike width/margin/padding, gap
-            // has no percent-carrying computed representation to defer to).
-            Some(RawLength::Percent(_)) | None => false,
-            Some(l) => {
-                d.gap = Some(l);
-                true
-            }
+        // `gap: <row-gap>` or `gap: <row-gap> <column-gap>` (packet/
+        // t3-inline-spacing, one half of the D3 fix). Same one-or-two-value
+        // shape as `border-spacing` right above. Before this packet, this
+        // arm read only `tokens.first()`, silently dropping a declared
+        // column-gap -- for the common `flex-direction: row` case (CSS's
+        // own default) the horizontal advance BETWEEN adjacent flex items
+        // is governed by column-gap, not row-gap, so a two-value px/pt/em
+        // declaration like `gap: 2px 20px` used to silently render with
+        // only 2px of item-to-item spacing. See `layout::block::
+        // apply_flex`, which now reads `column_gap` (falling back to `gap`
+        // when unset) for the taffy width axis.
+        //
+        // NOTE on `fixtures/httpforever.html`'s own `.footer__projects {
+        // gap: .35rem 1.1rem; }`: this arm parses through [`token_to_gap_
+        // length`], not the general [`token_to_raw_length`] -- see that
+        // helper's own doc comment for why `gap` alone gets a scoped `rem`
+        // ≈ `em` approximation (real root-relative `rem` needs `cascade::
+        // resolve` to thread a second, root-pinned font size down its
+        // walk, out of scope here) rather than every other rem-based
+        // property on the page also being reflowed. So `.35rem 1.1rem`
+        // DOES parse today (row-gap ≈ 5.6px, column-gap ≈ 17.6px at this
+        // fixture's 16px root font-size) -- this arm's fix alone already
+        // moves that fixture's footer links apart. The OTHER half of the
+        // D3 fix (`backend::tty::synthesize_gap_start_col` / `backend::
+        // raster::synthesize_gap_rect`) is what guarantees distinct
+        // adjacent flex items never visually fuse EVEN when a gap can't be
+        // resolved at all (e.g. a `calc()`/`clamp()`-wrapped gap, or any
+        // other value shape this parser doesn't understand) -- a second,
+        // independent safety net, not the only thing standing between this
+        // fixture and a jammed footer.
+        "gap" => match tokens.len() {
+            1 => match tokens.first().and_then(token_to_gap_length) {
+                // Percent gap needs a containing-block size this layer
+                // doesn't have; out of scope for v0 (unlike width/margin/
+                // padding, gap has no percent-carrying computed
+                // representation to defer to).
+                Some(RawLength::Percent(_)) | None => false,
+                Some(l) => {
+                    d.gap = Some(l);
+                    d.column_gap = None;
+                    true
+                }
+            },
+            2 => match (tokens.first().and_then(token_to_gap_length), tokens.get(1).and_then(token_to_gap_length)) {
+                (Some(row), Some(col))
+                    if !matches!(row, RawLength::Percent(_)) && !matches!(col, RawLength::Percent(_)) =>
+                {
+                    d.gap = Some(row);
+                    d.column_gap = Some(col);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
         },
         _ => false,
     }
@@ -1729,6 +1836,39 @@ mod tests {
             assert!(!apply_property("border-spacing", &toks(bad), &mut d), "expected {bad:?} to be rejected");
             assert_eq!(d.border_spacing_x, None);
             assert_eq!(d.border_spacing_y, None);
+        }
+    }
+
+    // ---- packet/t3-inline-spacing: `gap` shorthand (D3 fix) ----
+
+    #[test]
+    fn gap_one_value_sets_row_gap_only_leaving_column_gap_unset() {
+        let mut d = Declarations::default();
+        assert!(apply_property("gap", &toks("20px"), &mut d));
+        assert_eq!(d.gap, Some(RawLength::Px(20.0)));
+        assert_eq!(d.column_gap, None, "single-value gap must not set a distinct column-gap");
+    }
+
+    #[test]
+    fn gap_two_values_set_row_then_column_distinctly() {
+        // The exact shape of `fixtures/httpforever.html`'s
+        // `.footer__projects { gap: .35rem 1.1rem; }` -- row-gap .35rem,
+        // column-gap 1.1rem, and (before this packet) the column-gap value
+        // that actually governs the row-direction footer's item-to-item
+        // spacing was the one silently dropped.
+        let mut d = Declarations::default();
+        assert!(apply_property("gap", &toks(".35rem 1.1rem"), &mut d));
+        assert_eq!(d.gap, Some(RawLength::Em(0.35)));
+        assert_eq!(d.column_gap, Some(RawLength::Em(1.1)));
+    }
+
+    #[test]
+    fn gap_rejects_percent_and_garbage_and_too_many_values() {
+        for bad in ["10%", "not-a-length", "4px 10%", "10% 4px", "4px 2px 1px", ""] {
+            let mut d = Declarations::default();
+            assert!(!apply_property("gap", &toks(bad), &mut d), "expected {bad:?} to be rejected");
+            assert_eq!(d.gap, None);
+            assert_eq!(d.column_gap, None);
         }
     }
 

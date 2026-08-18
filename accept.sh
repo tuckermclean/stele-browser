@@ -756,6 +756,61 @@ else
   fi
 
   # ---------------------------------------------------------------------
+  # A3x/A3y -- packet t3-inline-spacing's own goldens (fixtures/
+  # inline-spacing.html, the D3 fix), three flex rows plus two inline-run
+  # shapes:
+  #   1. a real, correctly two-value-parsed px `gap` (must NOT get any
+  #      synthesized extra space -- the real 20px column-gap is already
+  #      enough);
+  #   2. `gap: .35rem 1.1rem`, the EXACT shape of fixtures/httpforever.
+  #      html's `.footer__projects` -- resolved via `gap`'s own scoped
+  #      `rem` ≈ `em` approximation (`value::token_to_gap_length`), so this
+  #      is also a real, non-synthesized gap;
+  #   3. no `gap` declared at all (CSS initial value 0) -- separated ONLY
+  #      by the zero-advance synthesis rule, the independent safety net
+  #      that still applies when a gap can't be resolved at all;
+  #   4. an intra-word inline split (`<b>bo</b>ld`, must stay "bold");
+  #   5. adjacent inline elements with no source whitespace
+  #      (`a<span>b</span>c`, must stay "abc").
+  # A3x is the tty dump (same discipline as A3/A3b/.../A3v); A3y is the PNG
+  # dump (same byte-equality rationale as A3e/A3f/.../A3w).
+  # ---------------------------------------------------------------------
+  GOLDEN_TTY_INLINE_SPACING="goldens/inline-spacing.tty.txt"
+  GOLDEN_PNG_INLINE_SPACING="goldens/inline-spacing.png"
+  FIXTURE_INLINE_SPACING="fixtures/inline-spacing.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3x: host binary still not found at $HOST_BIN"
+  elif ! out_inline_spacing="$("$HOST_BIN" --headless --dump-text "$FIXTURE_INLINE_SPACING" 2>/tmp/stele_a3x.err)"; then
+    bad "A3x: stele --headless --dump-text crashed on $FIXTURE_INLINE_SPACING"
+    sed 's/^/    /' /tmp/stele_a3x.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_inline_spacing" > "$GOLDEN_TTY_INLINE_SPACING"
+    pass "A3x: blessed inline-spacing tty golden -> $GOLDEN_TTY_INLINE_SPACING (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_INLINE_SPACING" <(printf '%s\n' "$out_inline_spacing") >/tmp/stele_a3x.diff 2>&1; then
+    pass "A3x: tty dump of $FIXTURE_INLINE_SPACING matches golden"
+  else
+    bad "A3x: tty dump of $FIXTURE_INLINE_SPACING differs from $GOLDEN_TTY_INLINE_SPACING"
+    sed 's/^/    /' /tmp/stele_a3x.diff
+  fi
+
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3y: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_INLINE_SPACING" /tmp/stele_a3y.png 2>/tmp/stele_a3y.err; then
+    bad "A3y: stele --headless --dump-png crashed on $FIXTURE_INLINE_SPACING"
+    sed 's/^/    /' /tmp/stele_a3y.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3y.png "$GOLDEN_PNG_INLINE_SPACING"
+    pass "A3y: blessed inline-spacing PNG golden -> $GOLDEN_PNG_INLINE_SPACING (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_INLINE_SPACING" ]; then
+    bad "A3y: no golden at $GOLDEN_PNG_INLINE_SPACING to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_INLINE_SPACING" /tmp/stele_a3y.png; then
+    pass "A3y: PNG dump of $FIXTURE_INLINE_SPACING matches golden"
+  else
+    bad "A3y: PNG dump of $FIXTURE_INLINE_SPACING differs from $GOLDEN_PNG_INLINE_SPACING"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_INLINE_SPACING") actual=$(wc -c < /tmp/stele_a3y.png)"
+  fi
+
+  # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline
   # markup, lists, blockquote, pre, hr, br, a table with colspan/rowspan, a
