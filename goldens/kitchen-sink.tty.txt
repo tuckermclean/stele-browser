@@ -5,17 +5,13 @@
 
 Text & Inline Markup
 
-
 A paragraph with bold, italic, emphasis, and strong text, plus a link. Entities:
 © 2026 Stele Project - all rights reserved (© numeric copy too).
 
-
 Lists
-
 
      * First unordered item
      * Second unordered item, inline-styled bold
-
 
      1. First ordered item
      2. Second ordered item
@@ -32,29 +28,25 @@ Lists
 Line one of a paragraph.
 Line two, after an explicit break.
 
-
-
 Table
 
-┌───────┌────┌───────────┐
-└Item───└Qty─└Notes──────┘
-┌Widget─┌4───┌Blue───────┐
-│       ┌────┌───────────┐
-└───────└2───└Red────────┘
-┌Gadget──────┌Backorder──┐
-└────────────└───────────┘
 
+┌Item───┌Qty─┌Notes──────┐
+┌───────┌────┌───────────┐
+│Widget └4───└Blue───────┘
+│       ┌2───┌Red────────┐
+┌────────────┌───────────┐
+│Gadget      │Backorder  │
+└────────────└───────────┘
 Form
+
 
 
 Name: [Ada]
 
-
 [x] Subscribe
 
-
 Color: [ Green v]
-
 
 [ Send ]
 
@@ -62,15 +54,12 @@ Color: [ Green v]
 Images
 
 
-
    a plain inline image.
-
 
       A floated image with wrapping text alongside it: enough words here to run
       several lines next to the floated square before the paragraph text clears
       the bottom of the image and returns to the full paragraph width for its
 final few words.
-
 
 Flexbox
 
@@ -79,8 +68,8 @@ Flexbox
    This region grows (flex-grow: 1) to fill remaining space.     Fixed 120px
 
 
-
 Disclosure & Noscript
+
 
 > Collapsed section (click to expand)
 v Expanded section (already open)

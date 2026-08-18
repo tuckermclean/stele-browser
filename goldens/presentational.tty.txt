@@ -4,5 +4,4 @@
 
  Paragraph on a pale-yellow background.
 
-
                                                         Right-aligned red text.
