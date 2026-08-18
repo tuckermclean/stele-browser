@@ -37,18 +37,11 @@ use stele::fetch::file::FileFetcher;
 use stele::fetch::{Fetch, Request, Url};
 use stele::images;
 use stele::layout::box_tree::build_box_tree;
-use stele::layout::{self, BoxContent, LayoutNode, Size};
+use stele::layout::{self, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
 use stele::style::cascade;
 use stele::surface::{Color, MemSurface};
 
 const VIEWPORT_WIDTH: u32 = 800;
-
-/// The UA stylesheet's `body { margin: 8px; }` (`src/style/ua.rs`) adds this
-/// much to a bare `<body><img></body>` document's total content height (8px
-/// top + 8px bottom) on top of the `<img>`'s own intrinsic height -- the
-/// page-height assertions below account for it explicitly so they pin the
-/// exact expected height rather than a loose inequality.
-const BODY_MARGIN_V: u32 = 16;
 
 /// A fresh, never-repo-tree scratch directory per test (PID + a per-call
 /// discriminator to avoid collisions between tests in the same process).
@@ -75,11 +68,14 @@ fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
     node.children.iter().find_map(find_img)
 }
 
-/// Render `url`'s document through the real pipeline, returning both the
-/// box tree (to inspect the `<img>`'s intrinsic size directly) and the
-/// final painted PNG bytes (to confirm real pixels, not just a
+/// Render `url`'s document through the real pipeline, returning the box
+/// tree (to inspect the `<img>`'s intrinsic size directly), the laid-out
+/// fragments (to inspect the `<img>`'s own painted rect directly, decoupled
+/// from the UA stylesheet's `body { margin: 8px; }` and any surrounding
+/// inline line-box metrics that inflate the TOTAL page height), and the
+/// final painted PNG bytes (to confirm real pixels landed, not just a
 /// correctly-sized-but-unpainted box).
-fn render(url: &Url) -> (LayoutNode, Vec<u8>) {
+fn render(url: &Url) -> (LayoutNode, Vec<Fragment>, Vec<u8>) {
     let html = FileFetcher::new().fetch(&Request::get(url.clone())).expect("doc should fetch").body;
     let html = String::from_utf8_lossy(&html);
     let dom_tree = dom::parser::parse(&html);
@@ -98,7 +94,19 @@ fn render(url: &Url) -> (LayoutNode, Vec<u8>) {
     let height = if content_bottom > 0.0 { content_bottom.ceil() as u32 } else { 1 };
     let mut surface = MemSurface::new(VIEWPORT_WIDTH, height, Color::WHITE);
     raster::paint(&mut surface, &fragments, &HashMap::new(), Color::WHITE);
-    (root, raster::encode_png(&surface))
+    let png = raster::encode_png(&surface);
+    (root, fragments, png)
+}
+
+/// The sole `Image` fragment's own rect -- the box's real painted geometry,
+/// with none of the `body { margin: 8px; }` / inline-line-box confounds a
+/// total-page-height assertion would carry.
+fn image_fragment_rect(fragments: &[Fragment]) -> stele::layout::Rect {
+    fragments
+        .iter()
+        .find(|f| matches!(f.kind, FragmentKind::Image { .. }))
+        .expect("an Image fragment should have been emitted")
+        .rect
 }
 
 fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
@@ -125,7 +133,7 @@ fn relative_img_src_with_no_size_attrs_decodes_and_paints_at_an_arbitrary_direct
     .expect("write doc");
 
     let url = doc_url(&dir, "doc.html");
-    let (root, png_bytes) = render(&url);
+    let (root, fragments, png_bytes) = render(&url);
 
     let img = find_img(&root).expect("img box present");
     match img.content {
@@ -137,12 +145,19 @@ fn relative_img_src_with_no_size_attrs_decodes_and_paints_at_an_arbitrary_direct
         _ => panic!("expected a Replaced box"),
     }
 
+    // The box's own painted rect, decoupled from the UA stylesheet's
+    // `body { margin: 8px; }` and any inline line-box height contribution
+    // to the TOTAL page height (`<img>` is always inline-ish in this engine
+    // -- `layout::block::is_inline_ish`'s doc comment -- but `inline::
+    // layout_runs` still emits the image's own fragment at exactly its
+    // (clamped) intrinsic size; only the surrounding LINE's height, not the
+    // image's own rect, is ever inflated by font-metric line-height).
+    let rect = image_fragment_rect(&fragments);
+    assert_eq!((rect.size.w, rect.size.h), (5.0, 5.0), "the image fragment's own rect should be exactly the decoded image's intrinsic size");
+
     let (w, h, px) = decode_png(&png_bytes);
-    assert_eq!(
-        (w, h),
-        (VIEWPORT_WIDTH, 5 + BODY_MARGIN_V),
-        "the page height should reflect the decoded image (plus the UA body margin), not collapse to just the margin"
-    );
+    assert_eq!(w, VIEWPORT_WIDTH);
+    assert!(h >= 5, "the page height should reflect the decoded image, not collapse to just the UA body margin (got {h})");
     assert!(has_red_pixel(&px), "the decoded red image should actually be painted, not rendered blank");
 }
 
@@ -158,7 +173,7 @@ fn absolute_file_url_img_src_with_no_size_attrs_decodes_and_paints() {
     .expect("write doc");
 
     let url = doc_url(&dir, "doc.html");
-    let (root, png_bytes) = render(&url);
+    let (root, fragments, png_bytes) = render(&url);
 
     let img = find_img(&root).expect("img box present");
     match img.content {
@@ -170,8 +185,12 @@ fn absolute_file_url_img_src_with_no_size_attrs_decodes_and_paints() {
         _ => panic!("expected a Replaced box"),
     }
 
+    let rect = image_fragment_rect(&fragments);
+    assert_eq!((rect.size.w, rect.size.h), (6.0, 4.0), "the image fragment's own rect should be exactly the decoded image's intrinsic size");
+
     let (w, h, px) = decode_png(&png_bytes);
-    assert_eq!((w, h), (VIEWPORT_WIDTH, 4 + BODY_MARGIN_V));
+    assert_eq!(w, VIEWPORT_WIDTH);
+    assert!(h >= 4, "the page height should reflect the decoded image, not collapse to just the UA body margin (got {h})");
     assert!(has_red_pixel(&px), "the decoded red image should actually be painted, not rendered blank");
 }
 
@@ -190,7 +209,7 @@ fn relative_img_src_with_explicit_size_attrs_still_uses_the_attributes() {
     .expect("write doc");
 
     let url = doc_url(&dir, "doc.html");
-    let (root, png_bytes) = render(&url);
+    let (root, _fragments, png_bytes) = render(&url);
 
     let img = find_img(&root).expect("img box present");
     match img.content {
@@ -221,7 +240,7 @@ fn relative_img_src_in_a_nested_subdirectory_decodes_and_paints() {
     .expect("write doc");
 
     let url = doc_url(&dir, "doc.html");
-    let (root, png_bytes) = render(&url);
+    let (root, _fragments, png_bytes) = render(&url);
 
     let img = find_img(&root).expect("img box present");
     match img.content {
