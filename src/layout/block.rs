@@ -1246,6 +1246,15 @@ fn map_display(d: Display) -> TDisplay {
         Display::TableRow => TDisplay::Block,
         Display::TableCell => TDisplay::Block,
         Display::TableRowGroup => TDisplay::Block,
+        // packet/display-list-item: a `display: list-item` box is ordinary
+        // block flow for layout purposes -- CSS only special-cases it for
+        // marker generation (`layout::box_tree::build_list_container_node`
+        // owns that entirely; this function is never consulted for it).
+        // Mapping it to the SAME `TDisplay::Block` taffy maps `Display::
+        // Block` to means an `<li>` (now `list-item` by default, `style/
+        // ua.rs`) occupies the exact same position/size a `display: block`
+        // `<li>` always has -- no layout shift for any existing list.
+        Display::ListItem => TDisplay::Block,
     }
 }
 
@@ -1524,6 +1533,31 @@ mod tests {
             content: BoxContent::Replaced { intrinsic: Size { w: 10.0, h: 10.0 }, image: None },
             children: Vec::new(),
             interactive: None,
+        }
+    }
+
+    #[test]
+    fn list_item_display_lays_out_identically_to_block() {
+        // packet/display-list-item: `Display::ListItem` must be
+        // layout-equivalent to `Display::Block` -- `map_display` maps both
+        // to the SAME `TDisplay::Block` (see its own doc comment), and
+        // marker emission is entirely `layout::box_tree`'s concern (never
+        // consulted here). Swapping one `<li>`'s `display` between the two
+        // values, with otherwise-identical content, must not move or resize
+        // ANY fragment -- a real list's items must not shift position now
+        // that the UA default changed from `Block` to `ListItem`.
+        fn tree_with(li_display: Display) -> LayoutNode {
+            let li_style = ComputedStyle { display: li_display, ..ComputedStyle::default() };
+            let li = container(li_style, vec![text_node("item")]);
+            container(block_style(), vec![li])
+        }
+        let font = crate::text::BitmapFont::vga_8x16();
+        let viewport = Size { w: 400.0, h: 300.0 };
+        let block_fragments = layout_tree(&tree_with(Display::Block), viewport, &font);
+        let list_item_fragments = layout_tree(&tree_with(Display::ListItem), viewport, &font);
+        assert_eq!(block_fragments.len(), list_item_fragments.len(), "same shape must produce the same fragment count");
+        for (b, l) in block_fragments.iter().zip(list_item_fragments.iter()) {
+            assert_eq!(b.rect, l.rect, "Display::ListItem must lay out at the exact position/size Display::Block would");
         }
     }
 
