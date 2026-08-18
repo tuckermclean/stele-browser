@@ -404,6 +404,7 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                     match name.to_ascii_lowercase().as_str() {
                         "link" => cur.pseudo.push(Pseudo::Link),
                         "visited" => cur.pseudo.push(Pseudo::Visited),
+                        "root" => cur.pseudo.push(Pseudo::Root),
                         _ => supported = false,
                     }
                     cur_has_content = true;
@@ -447,15 +448,32 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Delim('[') => {
-                supported = false;
                 *pos += 1;
-                while *pos < len && tokens[*pos] != Token::Delim(']') {
-                    *pos += 1;
+                if let Some((attr_name, attr_value, next)) = parse_attr_selector(tokens, *pos) {
+                    // The curated exact-match attribute-selector form
+                    // (packet T1a) — see `Compound::attrs`'s own doc comment
+                    // in `selector.rs` for the full rationale/scope.
+                    if pending_descendant {
+                        flush!();
+                        pending_descendant = false;
+                    }
+                    cur.attrs.push((attr_name, attr_value));
+                    cur_has_content = true;
+                    *pos = next;
+                } else {
+                    // Every other attribute-selector shape stays out of
+                    // scope (unchanged pre-T1a behavior): parsed defensively
+                    // but marked unsupported so the selector simply never
+                    // matches (charter C2).
+                    supported = false;
+                    while *pos < len && tokens[*pos] != Token::Delim(']') {
+                        *pos += 1;
+                    }
+                    if *pos < len {
+                        *pos += 1;
+                    }
+                    cur_has_content = true;
                 }
-                if *pos < len {
-                    *pos += 1;
-                }
-                cur_has_content = true;
             }
             _ => {
                 supported = false;
@@ -469,6 +487,49 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
         compounds,
         supported: supported && has_compounds,
     }
+}
+
+/// Parse `[name="value"]` / `[name=value]` starting at `tokens[start]` (just
+/// past the already-consumed `[`) — the ONLY attribute-selector shape this
+/// curated dialect recognizes (packet T1a — just enough for attribute-scoped
+/// custom-property overrides like `html[data-theme="dark"]`, this packet's
+/// own theming-setup test). Returns the lowercased attribute name (HTML
+/// attribute NAMES are case-insensitive, matching `AttrMap::get`'s own
+/// case-insensitive lookup), the value verbatim (quoted or bare — HTML
+/// attribute VALUES are case-sensitive, no `i`-flag support), and the index
+/// just past the matching `]`; `None` for anything else (presence-only
+/// `[name]`, `~=`/`^=`/`$=`/`*=` operators, a missing `=`/value/`]`, ...) —
+/// the caller then falls back to the pre-existing "parse defensively, mark
+/// unsupported" path. Total: only ever reads forward from `start`, tolerates
+/// running off the end of `tokens` without panicking.
+fn parse_attr_selector(tokens: &[Token], start: usize) -> Option<(String, String, usize)> {
+    let len = tokens.len();
+    let skip_ws_at = |mut i: usize| -> usize {
+        while i < len && tokens[i] == Token::Whitespace {
+            i += 1;
+        }
+        i
+    };
+    let mut i = skip_ws_at(start);
+    let name = match tokens.get(i) {
+        Some(Token::Ident(s)) => s.to_ascii_lowercase(),
+        _ => return None,
+    };
+    i = skip_ws_at(i + 1);
+    if tokens.get(i) != Some(&Token::Delim('=')) {
+        return None;
+    }
+    i = skip_ws_at(i + 1);
+    let value = match tokens.get(i) {
+        Some(Token::Str(s)) => s.clone(),
+        Some(Token::Ident(s)) => s.clone(),
+        _ => return None,
+    };
+    i = skip_ws_at(i + 1);
+    if tokens.get(i) != Some(&Token::Delim(']')) {
+        return None;
+    }
+    Some((name, value, i + 1))
 }
 
 /// Parse a `{ ... }` declaration block; `*pos` starts just past the `{` and
@@ -493,7 +554,15 @@ fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Styles
                 *pos += 1;
             }
             Token::Ident(name) => {
-                let name = name.to_ascii_lowercase();
+                // Custom-property names (`--name`, packet T1a) are
+                // CASE-SENSITIVE — unlike every ordinary CSS property name,
+                // which this parser has always folded to lowercase (real
+                // CSS property names are ASCII-case-insensitive; custom
+                // property names deliberately are NOT, per spec). Check the
+                // RAW (pre-lowercase) token text for the `--` prefix before
+                // deciding whether to lowercase at all.
+                let is_custom = name.starts_with("--");
+                let name = if is_custom { name.clone() } else { name.to_ascii_lowercase() };
                 *pos += 1;
                 skip_ws(tokens, pos);
                 if *pos < len && tokens[*pos] == Token::Colon {
@@ -512,7 +581,28 @@ fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Styles
                 if *pos < len && tokens[*pos] == Token::Semicolon {
                     *pos += 1;
                 }
-                if !value::apply_property(&name, &value_tokens, &mut decls) {
+                if is_custom {
+                    // A custom-property declaration (packet T1a): stored
+                    // raw (never eagerly parsed/applied — see
+                    // `Declarations::custom`'s own doc comment) and never
+                    // counted against `ignored_declarations`, matching how
+                    // every RECOGNIZED declaration (custom or not) is
+                    // treated — only genuinely unparseable/unknown input
+                    // counts against that stat.
+                    decls.custom.push((name.into_boxed_str(), value_tokens));
+                } else if value_tokens.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var"))) {
+                    // An ordinary property whose value contains `var()`
+                    // ANYWHERE (including nested inside another function,
+                    // e.g. `rgb(var(--r), 0, 0)` — the token stream is
+                    // flat, so this `any` check finds it regardless of
+                    // nesting) can't be resolved yet: defer it to cascade
+                    // time (packet T1a) instead of calling `apply_property`
+                    // now. Not counted against `ignored_declarations` either
+                    // — whether it ultimately applies is decided later by
+                    // `cascade::resolve`, exactly like any other
+                    // successfully-parsed declaration.
+                    decls.deferred.push((name.into_boxed_str(), value_tokens));
+                } else if !value::apply_property(&name, &value_tokens, &mut decls) {
                     sheet.ignored_declarations += 1;
                 }
             }
