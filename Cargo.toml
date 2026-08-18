@@ -28,17 +28,23 @@ png = "0.17"
 # UnixStream fd at once, which a single blocking stdin read can't do.
 rustix = { version = "1.1.4", default-features = false, features = ["termios", "std", "event"] }
 # Trimmed to what block.rs/inline.rs actually use (charter §158: block flow
-# = degenerate column flex + flexbox; no CSS grid, no taffy-side floats —
-# floats are bespoke inline work, M4; no CSS calc() in the dialect). Default
-# features also pull `grid` (and smallvec transitively via `grid`),
-# `float_layout`, `calc`, and `detailed_layout_info` — all dead weight here;
+# = degenerate column flex + flexbox; no CSS grid; no CSS calc() in the
+# dialect). Default features also pull `grid` (and smallvec transitively via
+# `grid`), `calc`, and `detailed_layout_info` — all dead weight here;
 # dropping them shrinks the binary (A2 <= 2.0 MB) and the vendoring/audit
 # surface.
+#
+# SPIKE (spike/taffy-float-layout): `float_layout` re-enabled here to
+# measure whether taffy's own block-level float placement is viable (size +
+# fidelity) as an alternative to a bespoke block-float pass. See
+# fixtures/evidence/css1-float-5526c.diagnosis.md. Do NOT merge this spike
+# to main without re-evaluating the A2 binary-size budget.
 taffy = { version = "0.13", default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",
     "block_layout",
+    "float_layout",
     "content_size",
 ] }
 

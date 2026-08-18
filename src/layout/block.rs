@@ -44,13 +44,17 @@ use taffy::prelude::{
     LengthPercentageAuto as TLengthPercentageAuto, NodeId as TNodeId, Rect as TRect, Size as TSize, Style as TStyle,
     TaffyTree,
 };
+// `float_layout`'s `Float`/`Clear` aren't re-exported from `taffy::prelude`
+// (only flexbox/grid additions are) — pull them from the crate root.
+// SPIKE (spike/taffy-float-layout).
+use taffy::{Clear as TClear, Float as TFloat};
 
 use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, Display, FlexDirection, FlexWrap,
+    AlignItems, AlignSelf, BorderCollapse, Clear, BorderSide, BorderStyle, Display, FlexDirection, FlexWrap, Float,
     JustifyContent, LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
@@ -1140,6 +1144,13 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
 
 /// The box-model + display-independent parts of a taffy `Style` shared by
 /// every node kind: size, margin, padding, border.
+///
+/// SPIKE (spike/taffy-float-layout): also maps `cs.float`/`cs.clear` onto
+/// taffy's `Style.float`/`Style.clear` (gated behind the `float_layout`
+/// cargo feature re-enabled in Cargo.toml for this spike) so taffy's own
+/// block algorithm — not the bespoke inline-only float mechanism in
+/// `layout/inline.rs` — places block-level floats. See
+/// `fixtures/evidence/css1-float-5526c.diagnosis.md`.
 fn base_style(cs: &ComputedStyle) -> TStyle {
     TStyle {
         size: TSize { width: map_dimension(cs.width), height: map_dimension(cs.height) },
@@ -1161,7 +1172,30 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
             top: TLengthPercentage::length(finite_nonneg(cs.border.top.width)),
             bottom: TLengthPercentage::length(finite_nonneg(cs.border.bottom.width)),
         },
+        float: map_float(cs.float),
+        clear: map_clear(cs.clear),
         ..Default::default()
+    }
+}
+
+/// Maps Stele's `Float` (`src/style/computed.rs`) onto taffy's `Float`
+/// (`float_layout` feature). SPIKE (spike/taffy-float-layout).
+fn map_float(float: Float) -> TFloat {
+    match float {
+        Float::None => TFloat::None,
+        Float::Left => TFloat::Left,
+        Float::Right => TFloat::Right,
+    }
+}
+
+/// Maps Stele's `Clear` (`src/style/computed.rs`) onto taffy's `Clear`
+/// (`float_layout` feature). SPIKE (spike/taffy-float-layout).
+fn map_clear(clear: Clear) -> TClear {
+    match clear {
+        Clear::None => TClear::None,
+        Clear::Left => TClear::Left,
+        Clear::Right => TClear::Right,
+        Clear::Both => TClear::Both,
     }
 }
 
