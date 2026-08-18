@@ -2706,6 +2706,45 @@ mod tests {
     }
 
     #[test]
+    fn li_with_non_block_display_gets_no_marker() {
+        // packet/layout-float-recon: marker synthesis previously keyed off
+        // the `<li>` TAG alone (`is_li`), never `ComputedStyle.display` --
+        // so an `<li>` whose author CSS overrides `display` away from block
+        // (`inline`, `flex`, table-ish, ...) still got a bullet, even though
+        // CSS only puts a marker on a list-item box. Contract, direction 1:
+        // an ORDINARY `<li>` (default UA `display: block`, `src/style/
+        // ua.rs`'s `li { display: block; }`) still keeps its marker.
+        let d = dom::parser::parse(r#"<ul><li>a</li><li style="display: inline;">b</li></ul>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("* a"), "an ordinary <li> (default display: block) must still get its marker, got: {text:?}");
+        // Contract, direction 2: an <li> whose OWN computed display is no
+        // longer block-ish must lose the marker, while its own content
+        // still renders (no marker, not no box).
+        assert!(!text.contains("* b"), "an <li> with display overridden away from block must not get a marker, got: {text:?}");
+        assert!(text.contains('b'), "the display-overridden <li>'s own content must still render, got: {text:?}");
+    }
+
+    #[test]
+    fn ol_item_with_non_block_display_does_not_consume_an_ordinal() {
+        // Companion to `li_with_non_block_display_gets_no_marker`: a
+        // non-block-display <li> is no longer a counted list item at all
+        // (real CSS: only a list-item box advances the list's counter), so
+        // the ordinal sequence must skip straight over it rather than
+        // leaving a gap or double-counting.
+        let d = dom::parser::parse(r#"<ol><li>a</li><li style="display: inline;">skip</li><li>c</li></ol>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("1. a"), "got: {text:?}");
+        assert!(!text.contains(". skip"), "a non-block-display <li> must not receive an ordinal marker, got: {text:?}");
+        assert!(text.contains("2. c"), "the ordinal must not be consumed by the non-block-display <li>, got: {text:?}");
+    }
+
+    #[test]
     fn empty_list_does_not_panic() {
         let d = dom::parser::parse("<ul></ul><ol></ol>");
         let styles = cascade::cascade(&d, &[]);
