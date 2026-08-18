@@ -823,16 +823,36 @@ fn parse_nonneg(raw: Option<&str>) -> Option<f32> {
 // choice: no marker, not a panic, not some invented default numbering with
 // no list to count against).
 //
+// packet/layout-float-recon: being the `<li>` TAG is necessary but no
+// longer SUFFICIENT -- `build_list_container_node` also requires the built
+// node's own `ComputedStyle.display == Display::Block` before treating it
+// as a list item. Real CSS only puts a marker on a `display: list-item`
+// box; this curated engine has no such value (the paragraph above), so
+// `Display::Block` (also the UA sheet's own default for `<li>`, `style/
+// ua.rs`'s `li { display: block; }`) is the closest available stand-in. An
+// `<li>` whose author CSS overrides `display` to something else (`inline`,
+// `flex`, a table-ish value, ...) is no longer list-item-shaped and gets
+// neither a marker nor a consumed ordinal, while its own content still
+// renders normally. This can NOT distinguish "author CSS re-asserted
+// `display: block` on purpose" (e.g. the W3C CSS1 float test's `li{display:
+// block; /* i.e., suppress marker */ ...}`, `fixtures/css1-float-5526c.
+// html`) from an entirely ordinary `<li>` with no CSS at all -- both
+// resolve to the identical `Display::Block`, and `ComputedStyle` carries no
+// provenance to tell them apart. See `fixtures/evidence/
+// css1-float-5526c.diagnosis.md` for why that narrower case is out of
+// scope for this fix.
+//
 // Ordinal counting is per-list: each call to `build_list_container_node`
 // (one per `<ul>`/`<ol>` box built) keeps its own local counter, so a
 // `<ul>`/`<ol>` nested inside an `<li>` naturally restarts at 1 -- there is
 // no global/shared counter across sibling or ancestor lists. Only `<li>`
-// children that actually produce a box count towards the ordinal (a
-// `display: none` `<li>` -- dropped like any other display:none subtree --
-// does NOT consume a number, so the visible sequence in a tty dump never
-// has a gap); a non-`<li>` child of a `<ul>`/`<ol>` (invalid HTML, but this
-// dialect stays total rather than rejecting it) is still built as ordinary
-// content, just without a marker and without advancing the counter.
+// children that actually produce a box AND are still list-item-shaped (the
+// `Display::Block` check above) count towards the ordinal (a `display:
+// none` `<li>` -- dropped like any other display:none subtree -- does NOT
+// consume a number, so the visible sequence in a tty dump never has a gap);
+// a non-`<li>` child of a `<ul>`/`<ol>` (invalid HTML, but this dialect
+// stays total rather than rejecting it) is still built as ordinary content,
+// just without a marker and without advancing the counter.
 //
 // Marker glyph choice, per `ComputedStyle::list_style_type` (the value is
 // already inherited by cascade -- `cascade.rs`'s `inherited!(list_style_type)`
@@ -904,10 +924,29 @@ fn build_list_container_node<'a>(
     let mut ordinal = list_start(el);
     let mut children = Vec::with_capacity(el.children.len());
     for &child in &el.children {
-        let is_item = matches!(dom.node(child), Node::Element(e) if is_li(e));
+        let tag_is_li = matches!(dom.node(child), Node::Element(e) if is_li(e));
         let Some(mut node) = build_node(dom, styles, images, child, depth + 1, form_action) else {
             continue; // display:none (or any other total-absence case): no box, no number consumed.
         };
+        // A marker (and the ordinal it would consume) is only for a box
+        // that's still acting as a list item -- real CSS restricts markers
+        // to `display: list-item`; this curated engine has no such value
+        // (module doc section above), so `display: block` is the closest
+        // available stand-in (it's also the UA sheet's own default for
+        // `<li>`, `style/ua.rs`'s `li { display: block; }`). An `<li>`
+        // whose author CSS overrides `display` to anything else (`inline`,
+        // `flex`, a table-ish value, ...) is no longer list-item-shaped, so
+        // it gets neither a marker nor a consumed ordinal -- it still
+        // renders as ordinary content via the `children.push(node)` below,
+        // just without either. Note this can NOT detect the inverse case
+        // (author CSS that explicitly re-asserts `display: block`, e.g. the
+        // W3C CSS1 float test's `li{display:block; /* i.e., suppress
+        // marker */ ...}`) -- that resolves to the exact same `Display::
+        // Block` as every ordinary `<li>`'s UA default, and `ComputedStyle`
+        // carries no provenance to tell them apart. See `fixtures/evidence/
+        // css1-float-5526c.diagnosis.md`'s "Safe fixes landed this packet"
+        // section for why that case is out of scope here.
+        let is_item = tag_is_li && node.style.display == Display::Block;
         if is_item {
             if let Some(marker) = marker_text(node.style.list_style_type, ordinal) {
                 node.children.insert(0, marker_node(&marker, &node.style));
@@ -2703,6 +2742,45 @@ mod tests {
         let mut text = String::new();
         collect_all_text(&root, &mut text);
         assert_eq!(text.trim(), "stray", "an <li> outside any list must render with no synthesized marker");
+    }
+
+    #[test]
+    fn li_with_non_block_display_gets_no_marker() {
+        // packet/layout-float-recon: marker synthesis previously keyed off
+        // the `<li>` TAG alone (`is_li`), never `ComputedStyle.display` --
+        // so an `<li>` whose author CSS overrides `display` away from block
+        // (`inline`, `flex`, table-ish, ...) still got a bullet, even though
+        // CSS only puts a marker on a list-item box. Contract, direction 1:
+        // an ORDINARY `<li>` (default UA `display: block`, `src/style/
+        // ua.rs`'s `li { display: block; }`) still keeps its marker.
+        let d = dom::parser::parse(r#"<ul><li>a</li><li style="display: inline;">b</li></ul>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("* a"), "an ordinary <li> (default display: block) must still get its marker, got: {text:?}");
+        // Contract, direction 2: an <li> whose OWN computed display is no
+        // longer block-ish must lose the marker, while its own content
+        // still renders (no marker, not no box).
+        assert!(!text.contains("* b"), "an <li> with display overridden away from block must not get a marker, got: {text:?}");
+        assert!(text.contains('b'), "the display-overridden <li>'s own content must still render, got: {text:?}");
+    }
+
+    #[test]
+    fn ol_item_with_non_block_display_does_not_consume_an_ordinal() {
+        // Companion to `li_with_non_block_display_gets_no_marker`: a
+        // non-block-display <li> is no longer a counted list item at all
+        // (real CSS: only a list-item box advances the list's counter), so
+        // the ordinal sequence must skip straight over it rather than
+        // leaving a gap or double-counting.
+        let d = dom::parser::parse(r#"<ol><li>a</li><li style="display: inline;">skip</li><li>c</li></ol>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(text.contains("1. a"), "got: {text:?}");
+        assert!(!text.contains(". skip"), "a non-block-display <li> must not receive an ordinal marker, got: {text:?}");
+        assert!(text.contains("2. c"), "the ordinal must not be consumed by the non-block-display <li>, got: {text:?}");
     }
 
     #[test]
