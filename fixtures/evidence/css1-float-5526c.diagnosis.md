@@ -257,3 +257,56 @@ first golden.
 - `fixtures/css1-float-5526c.html` stays UNBLESSED until Stage 4, verified
   by pixel-diffing the rendered PNG against `css1-float-5526c.reference.gif`
   programmatically before any golden is committed.
+
+## Follow-up (packet/acid1-coherence): the real remaining bug was `font`, not floats
+
+Stages 0-4 above all landed (`packet/block-floats` #67, `spike/taffy-
+float-layout` #65): taffy's own `float_layout` is wired in
+(`Cargo.toml`'s `taffy` feature list; `layout::block::base_style` maps
+`ComputedStyle.float`/`.clear` onto it via `map_float`/`map_clear`), and
+`goldens/css1-float-5526c.png` already exists and — visually — already
+shows the reference's Mondrian-grid *shape*: a red `dt` column on the
+left, two rows of three alternating yellow/black cards on the right,
+correct text content and card colors (`li#bar`/`li#baz`'s ID-selector
+background overrides both resolve correctly). The float engine itself
+works.
+
+What's still off is **proportion**, not placement: a pixel-measurement
+pass (`python3`/PIL, comparing `goldens/css1-float-5526c.png` against
+this file's own reference GIF) found the rendered `dt` column running
+~22% narrower than its declared `10.638%` should produce, and `#bar`'s
+`41.17%`-wide card running short by almost exactly the same ratio — two
+independent percentage-based widths, both shrunk by roughly the same
+factor. Isolating the cause with small hand-written fixtures (not
+committed — see `apply_font_shorthand`'s own doc comment in
+`src/style/value.rs` for the summary) traced it to a single root cause
+upstream of any float/percentage math at all:
+
+**`html { font: 10px/1 Verdana, sans-serif }` — the `font` SHORTHAND —
+was not recognized by `style::value::apply_property` at all.** Every
+`font-*` LONGHAND (`font-family`, `font-size`, `font-weight`,
+`font-style`) had its own match arm; the shorthand itself did not, so it
+fell to the catch-all `_ => false` and was silently dropped as an ignored
+declaration (charter C2's "ignore what you don't understand" treaty,
+applied here to a property this engine was never taught to understand in
+the first place). The practical effect: `<html>`'s font-size never left
+the UA default of 16px, so **every `em` length in the entire document**
+— including this fixture's own `dt{width:10.638%}`/`dd{width:34em}`/
+`#bar{width:41.17%}`, all of which resolve against an `em`-sized
+ancestor width — computed 1.6x (16px/10px) too large against the
+`--dump-png` pipeline's fixed 800px viewport (`src/main.rs`'s
+`DEFAULT_PNG_WIDTH`). That inflation, combined with the fixed viewport,
+is what produced the specific non-uniform-looking shortfalls the pixel
+measurements found (some boxes hit viewport-width limits that only bite
+at the wrong 16px/em scale; a purely percentage-relative measurement
+inside one box isn't affected the same way a box whose ancestor's
+declared `Nem` width interacts with a fixed-px viewport is).
+
+Fixed by adding a real (if curated, matching this file's `border`/
+`background` shorthand-parsing precedent) `apply_font_shorthand` — see
+its doc comment in `src/style/value.rs` for the exact grammar subset
+covered (`[style] [weight] size[/line-height] family`) and what's
+deliberately left out (`font-variant`, CSS2.1 system-font keywords —
+nothing in this repo uses either). No other fixture in the repo uses the
+`font` shorthand (`grep -rn 'font:' fixtures/*.html` — only this one), so
+this fix is scoped: it cannot change any other golden's render.
