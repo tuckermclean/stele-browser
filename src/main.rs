@@ -783,6 +783,10 @@ fn run_x11(source: &str) {
     };
     let bpp = format.bits_per_pixel as u32;
     let scanline_pad = format.scanline_pad as u32;
+    eprintln!(
+        "stele: --x11: connected — root_depth={} root_visual=0x{:x} bpp={} scanline_pad={} max_request_len={}",
+        depth, conn.setup.root_visual, bpp, scanline_pad, conn.setup.maximum_request_length
+    );
 
     let mut width = DEFAULT_X11_WIDTH;
     let mut height = DEFAULT_X11_HEIGHT;

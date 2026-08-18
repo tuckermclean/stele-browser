@@ -587,6 +587,33 @@ const EVENT_CODE_CONFIGURE_NOTIFY: u8 = 22;
 /// bytes (never a panic/OOB read) — an unrecognized event CODE still
 /// parses, as [`XEvent::Other`], since every core event is exactly 32
 /// bytes regardless of type.
+/// Decode a 32-byte X ERROR packet (first byte 0) into a human-readable line.
+/// These are how a server reports a rejected request (BadWindow, BadMatch,
+/// BadValue, ...) — the client used to swallow them silently, so a request the
+/// server refused (e.g. CreateWindow/PutImage) produced a black window with no
+/// clue why. Printed to stderr by [`read_reply`]/[`XConnection::next_event`].
+pub fn describe_x_error(buf: &[u8]) -> String {
+    if buf.len() < 11 {
+        return "X error (truncated packet)".to_string();
+    }
+    let code = buf[1];
+    let seq = u16::from_le_bytes([buf[2], buf[3]]);
+    let bad = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let minor = u16::from_le_bytes([buf[8], buf[9]]);
+    let major = buf[10];
+    let code_name = match code {
+        1 => "BadRequest", 2 => "BadValue", 3 => "BadWindow", 4 => "BadPixmap", 5 => "BadAtom",
+        6 => "BadCursor", 7 => "BadFont", 8 => "BadMatch", 9 => "BadDrawable", 10 => "BadAccess",
+        11 => "BadAlloc", 12 => "BadColor", 13 => "BadGC", 14 => "BadIDChoice", 15 => "BadName",
+        16 => "BadLength", 17 => "BadImplementation", _ => "Bad?",
+    };
+    let req_name = match major {
+        1 => "CreateWindow", 8 => "MapWindow", 42 => "SetInputFocus", 55 => "CreateGC",
+        72 => "PutImage", 101 => "GetKeyboardMapping", _ => "other",
+    };
+    format!("{code_name}({code}) on {req_name}(major={major},minor={minor}) seq={seq} bad=0x{bad:08x}")
+}
+
 pub fn parse_event(buf: &[u8]) -> Option<XEvent> {
     if buf.len() < 32 {
         return None;
@@ -682,7 +709,12 @@ fn read_reply(stream: &mut impl Read, pending: &mut VecDeque<XEvent>) -> Result<
                 full.extend_from_slice(&body);
                 return Ok(full);
             }
-            0 => continue, // error packet (32 bytes, no body) — skip while awaiting a reply
+            0 => {
+                // Error packet (32 bytes, no body). Surface it — a swallowed
+                // error here is a rejected request and a blank window.
+                eprintln!("stele: --x11: X {}", describe_x_error(&hdr));
+                continue;
+            }
             _ => {
                 if let Some(ev) = parse_event(&hdr) {
                     pending.push_back(ev);
@@ -816,7 +848,10 @@ impl XConnection {
                     let mut body = vec![0u8; words * 4];
                     self.stream.read_exact(&mut body).map_err(|e| format!("drain X reply body: {e}"))?;
                 }
-                0 => return Ok(XEvent::Other), // error packet: 32 bytes, no body
+                0 => {
+                    eprintln!("stele: --x11: X {}", describe_x_error(&buf));
+                    return Ok(XEvent::Other); // error packet: 32 bytes, no body
+                }
                 _ => return Ok(parse_event(&buf).unwrap_or(XEvent::Other)),
             }
         }
@@ -1121,6 +1156,19 @@ mod tests {
             encode_set_input_focus(0x0140_0001),
             vec![42, 2, 3, 0, 0x01, 0x00, 0x40, 0x01, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn describe_x_error_decodes_a_badmatch_on_createwindow() {
+        let mut e = [0u8; 32];
+        e[0] = 0; // error
+        e[1] = 8; // BadMatch
+        e[2..4].copy_from_slice(&1u16.to_le_bytes()); // seq
+        e[4..8].copy_from_slice(&0x0040_0001u32.to_le_bytes()); // bad value
+        e[10] = 1; // major opcode = CreateWindow
+        let s = describe_x_error(&e);
+        assert!(s.contains("BadMatch"), "{s}");
+        assert!(s.contains("CreateWindow"), "{s}");
     }
 
     #[test]
