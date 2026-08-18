@@ -124,6 +124,15 @@ struct Args {
     /// already-blessed golden — see `stamp_color_scheme`'s own doc comment
     /// for the full golden-churn rationale.
     color_scheme_given: bool,
+    /// `--audit-contrast <path-or-url>` (packet T1c): a defense-in-depth
+    /// GATE, not a render — lays `source` out through the same pipeline
+    /// `--dump-png` uses and checks EVERY text run's already-`backend::
+    /// raster::paint`-repaired foreground color against `style::contrast::
+    /// CONTRAST_MIN`, printing one line per violation and exiting nonzero
+    /// if any are found (`main`'s own dispatch, below). See [`audit_
+    /// contrast`]'s own doc comment for why a correct implementation
+    /// always reports zero.
+    audit_contrast: Option<String>,
 }
 
 impl Default for Args {
@@ -140,6 +149,7 @@ impl Default for Args {
             source: None,
             color_scheme: style::ColorScheme::Light,
             color_scheme_given: false,
+            audit_contrast: None,
         }
     }
 }
@@ -202,6 +212,13 @@ fn parse_args(argv: &[String]) -> Args {
                 // A trailing `--color-scheme` with no value leaves both
                 // fields at their defaults, same "missing value is a no-op,
                 // never a panic" totality `--dump-text`/`--cols` already have.
+            }
+            "--audit-contrast" => {
+                i += 1;
+                if let Some(v) = argv.get(i) {
+                    out.audit_contrast = Some(v.clone());
+                }
+                // Same "trailing flag, no value" totality as --dump-text.
             }
             other => {
                 // packet/shell-keyboard: the first bare token (doesn't start
@@ -582,7 +599,7 @@ fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
     let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments, &bg_images);
+    raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
     raster::encode_png(&surface)
 }
 
@@ -602,6 +619,82 @@ fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
 fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool) -> Result<(), String> {
     let bytes = dump_png_opts(source, no_bg_images);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
+}
+
+/// `--audit-contrast <path-or-url>` (packet T1c): lay `source` out through
+/// the same fetch->parse->cascade->box-tree->layout pipeline `--dump-png`
+/// uses (`DEFAULT_PNG_WIDTH`, `Light` color scheme — matches accept.sh's
+/// own audited fixtures), then for EVERY `Text` fragment check whether the
+/// REPAIRED foreground color (`style::contrast::repair_fg`, the SAME
+/// function `backend::raster::paint` now wires into every real render)
+/// clears `style::contrast::CONTRAST_MIN` against its own `backend::
+/// raster::effective_background`.
+///
+/// This is a DEFENSE-IN-DEPTH GATE, not the repair itself: a correct
+/// `repair_fg`/`effective_background` pair makes this always return an
+/// empty `Vec` (`repair_fg`'s own doc comment proves at least one of
+/// black/white always clears `CONTRAST_MIN` against ANY background), so a
+/// nonempty result signals a REGRESSION in one of those two functions, not
+/// a legitimately-unrepairable page.
+///
+/// Unlike `dump_png`/`dump_text` (always total, degrading to a blank
+/// render on any failure), a fetch failure here is a clean `Err` — there
+/// is no pixel-sensible "audit succeeded" fallback for a page that never
+/// loaded, the same posture `render_fb_surface_opts` already takes. An
+/// empty/`display:none` document or a `<frameset>` (no single `layout::
+/// layout` call to drive — same carve-out as `dump_png`/`dump_text`'s own
+/// frames scope) both resolve to `Ok(vec![])` (nothing to audit, not a
+/// failure).
+///
+/// NOTE (scope, future packet): this audits fragments at their RAW,
+/// pre-quantization computed colors — it does NOT re-check contrast after
+/// `backend::fb::convert_to_fb_bytes`'s palette quantization (the
+/// `--render-fb` framebuffer path), which could in principle nudge a
+/// borderline-compliant color across the threshold on very low-color-depth
+/// hardware. Auditing post-quantization is a reasonable follow-up, not
+/// this packet's job (brief scope).
+fn audit_contrast(source: &str) -> Result<Vec<String>, String> {
+    let url = resolve_url(source);
+    let response = fetch_response(&url)?;
+    let html = String::from_utf8_lossy(&response.body);
+    let dom_tree = dom::parser::parse(&html);
+
+    if frames::find_frameset(&dom_tree).is_some() {
+        return Ok(Vec::new());
+    }
+
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, style::ColorScheme::Light);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
+    let images = stele::images::collect_images(&dom_tree, &response.final_url);
+    let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
+        return Ok(Vec::new());
+    };
+
+    let viewport = Size { w: DEFAULT_PNG_WIDTH as f32, h: HEADLESS_VIEWPORT_HEIGHT };
+    let fragments = layout::layout(&root, viewport);
+
+    let mut violations = Vec::new();
+    for (i, fragment) in fragments.iter().enumerate() {
+        let layout::FragmentKind::Text { text, style: text_style, .. } = &fragment.kind else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let effective_bg = raster::effective_background(&fragments, i, Color::WHITE);
+        let repaired = style::contrast::repair_fg(text_style.color, effective_bg);
+        let ratio = style::contrast::contrast_ratio(repaired, effective_bg);
+        if ratio < style::contrast::CONTRAST_MIN {
+            let snippet: String = text.chars().take(60).collect();
+            violations.push(format!(
+                "contrast violation: {ratio:.2}:1 (< {min:.1}:1) at ({x:.0},{y:.0}) text={snippet:?}",
+                min = style::contrast::CONTRAST_MIN,
+                x = fragment.rect.origin.x,
+                y = fragment.rect.origin.y,
+            ));
+        }
+    }
+    Ok(violations)
 }
 
 /// Drive the fetch->parse->cascade->(image pre-pass)->box_tree->layout->paint
@@ -673,7 +766,7 @@ fn render_fb_surface_opts(source: &str, width: u32, no_bg_images: bool) -> Resul
     let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments, &bg_images);
+    raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
     Ok(surface)
 }
 
@@ -790,7 +883,7 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
     let bg_images = stele::bg_images::collect_bg_images(&styles, &response.final_url);
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments, &bg_images);
+    raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
     Ok((surface, fragments))
 }
 
@@ -1690,7 +1783,26 @@ fn main() {
             }
             return;
         }
-        eprintln!("stele: --headless requires --dump-text <path-or-url>, --dump-png <path-or-url> <out.png>, or --render-fb <path-or-url>");
+        if let Some(source) = args.audit_contrast {
+            match audit_contrast(&source) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("stele: --audit-contrast: 0 violations");
+                }
+                Ok(violations) => {
+                    for line in &violations {
+                        println!("{line}");
+                    }
+                    eprintln!("stele: --audit-contrast: {} violation(s)", violations.len());
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("stele: --audit-contrast failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        eprintln!("stele: --headless requires --dump-text <path-or-url>, --dump-png <path-or-url> <out.png>, --render-fb <path-or-url>, or --audit-contrast <path-or-url>");
         return;
     }
 

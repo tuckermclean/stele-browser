@@ -73,7 +73,7 @@ fn render_bg_image_fixture(no_bg_images: bool) -> Vec<u8> {
     let bg_images = if no_bg_images { HashMap::new() } else { bg_images::collect_bg_images(&styles, &url) };
 
     let mut surface = MemSurface::new(VIEWPORT_WIDTH, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments, &bg_images);
+    raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
     raster::encode_png(&surface)
 }
 

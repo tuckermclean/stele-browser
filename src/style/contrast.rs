@@ -16,6 +16,84 @@
 
 use crate::surface::Color;
 
+/// The contrast-repair floor. Real WCAG 2.x defines TWO normal-text floors
+/// -- AA (4.5:1) and the stricter AAA (7:1) -- but neither is what this
+/// packet enforces: `CONTRAST_MIN` is a deliberately LOOSER "is this even
+/// readable at all" backstop (close to WCAG's own "graphical objects and
+/// UI components" 3:1 floor, matching the brief's own "WCAG-ish" framing),
+/// picked because this is a defense-of-last-resort repair over pages this
+/// engine can't fully honor (a dropped gradient, an unhandled `var()`
+/// chain, ...), not a full accessibility auditor -- demanding full AA
+/// compliance would repair (and thus visibly recolor) far more author-
+/// intended text than this packet's actual bug (fully invisible text)
+/// requires fixing. A future packet can raise this if a stricter floor is
+/// ever wanted.
+pub const CONTRAST_MIN: f32 = 3.0;
+
+/// One sRGB 8-bit channel -> its WCAG-linearized `[0, 1]` contribution, per
+/// the WCAG 2.x relative luminance formula.
+fn linearize_channel(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// WCAG 2.x relative luminance of `color`, ignoring alpha -- `repair_fg`/
+/// `contrast_ratio` are only ever asked about the OPAQUE colors two boxes
+/// paint over each other with (`backend::raster::effective_background`
+/// only ever returns a `background_color` whose `a != 0`, or the surface's
+/// own always-opaque canvas fill). `L = 0.2126 R + 0.7152 G + 0.0722 B`
+/// over the linearized channels.
+pub fn relative_luminance(color: Color) -> f32 {
+    0.2126 * linearize_channel(color.r) + 0.7152 * linearize_channel(color.g) + 0.0722 * linearize_channel(color.b)
+}
+
+/// WCAG 2.x contrast ratio between two colors: `(L_lighter + 0.05) /
+/// (L_darker + 0.05)`, always `>= 1.0` regardless of argument order (the
+/// brighter color is picked out by comparing luminance, not by which
+/// argument came first) -- black vs. white is the canonical 21:1 maximum.
+pub fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The RUN-level rung of the contrast covenant (packet T1c; the BOX-level
+/// rung is `style::value`'s gradient -> representative-solid fallback,
+/// which repairs what actually gets PAINTED as a background before this
+/// function ever sees it -- see that module's own doc comment): if `fg`
+/// already clears `CONTRAST_MIN` against `effective_bg`, return it
+/// unchanged (the overwhelmingly common case -- every existing black-on-
+/// white fixture takes this path, byte-for-byte unchanged renders).
+/// Otherwise return whichever of `Color::BLACK`/`Color::WHITE` reads
+/// better against `effective_bg` -- never a third color, so this can't
+/// introduce some new, potentially-also-illegible hue.
+///
+/// This never fails to repair down to something legible: for ANY
+/// `effective_bg`, at least one of black/white clears `CONTRAST_MIN` --
+/// the worst case is a background whose luminance sits at black's and
+/// white's crossover point (`contrast_ratio(BLACK, bg) == contrast_ratio
+/// (WHITE, bg)`), which still clears roughly 4.6:1, comfortably above this
+/// module's 3.0 floor (`repair_always_clears_the_floor_across_a_spread_
+/// of_gray_backgrounds` sweeps this by hand). So a REPAIRED color that
+/// still fails the floor is a bug in this function or in `backend::
+/// raster::effective_background`'s own resolution, never a legitimately
+/// unrepairable input -- `main.rs`'s `--audit-contrast` is exactly that
+/// regression gate, checking this invariant against real rendered pages.
+pub fn repair_fg(fg: Color, effective_bg: Color) -> Color {
+    if contrast_ratio(fg, effective_bg) >= CONTRAST_MIN {
+        return fg;
+    }
+    if contrast_ratio(Color::BLACK, effective_bg) >= contrast_ratio(Color::WHITE, effective_bg) {
+        Color::BLACK
+    } else {
+        Color::WHITE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

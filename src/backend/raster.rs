@@ -17,7 +17,16 @@
 //!   + baseline` — the same "top of line box + offset" contract
 //!   `backend::tty`'s own module docs describe for this field, just consumed
 //!   here as real pixels rather than a text-mode row) and hands it to
-//!   `Surface::draw_text`.
+//!   `Surface::draw_text`. Packet T1c: the run's INK color is not always
+//!   `style.color` verbatim — [`effective_background`] resolves what this
+//!   text visually sits over (the nearest containing opaque `Box`'s
+//!   `background_color`, or `canvas` if none), and `style::contrast::
+//!   repair_fg` repairs `style.color` against it when the pair would
+//!   otherwise be illegible (e.g. white text over a background this
+//!   engine couldn't fully honor — a dropped gradient, an unhandled
+//!   `var()` chain). Every existing black-on-white fixture already clears
+//!   the repair floor, so this is a no-op for them (`repair_fg` returns
+//!   `fg` unchanged whenever it already reads).
 //! - `FragmentKind::Image { image }`: `blit`s `image` into the fragment's
 //!   own rect (images packet, M4): `layout::block::emit` only produces this
 //!   fragment kind for a `Replaced` box whose `image` field is `Some` (a
@@ -42,8 +51,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::img::RgbaImage;
-use crate::layout::{Fragment, FragmentKind, Rect as LayoutRect};
+use crate::layout::{Fragment, FragmentKind, Point, Rect as LayoutRect};
 use crate::style::computed::{BorderSide, BorderStyle, ComputedStyle};
+use crate::style::contrast::repair_fg;
 use crate::surface::{Color, MemSurface, Rect as PixelRect, Surface, TextRun};
 
 /// Paint-ordered `fragments` onto `surface`, painter's-algorithm style
@@ -58,16 +68,97 @@ use crate::surface::{Color, MemSurface, Rect as PixelRect, Surface, TextRun};
 /// empty map to render with background-images fully suppressed (the
 /// `--no-bg-images` kill switch, wired in `main.rs`) — every `Box` fragment
 /// still paints its `background_color`, just never a background image.
-pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &HashMap<String, Rc<RgbaImage>>) {
-    for fragment in fragments {
+///
+/// `canvas` (packet T1c) is the surface's own fill color — [`effective_
+/// background`]'s fallback when a `Text` fragment has no containing opaque
+/// `Box` beneath it. Threaded in explicitly rather than hardcoded: `Surface`
+/// has no pixel-read method (module docs, `surface::mod`), so this function
+/// has no other way to learn it, and hardcoding `Color::WHITE` here would
+/// silently go stale the day a caller ever paints onto a non-white canvas.
+/// Every caller today passes `Color::WHITE` — the same fill color it hands
+/// `MemSurface::new` — so this changes no existing render.
+pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &HashMap<String, Rc<RgbaImage>>, canvas: Color) {
+    for (i, fragment) in fragments.iter().enumerate() {
         match &fragment.kind {
             FragmentKind::Box { style } => paint_box(surface, &fragment.rect, style, bg_images),
-            FragmentKind::Text { text, baseline, style } => paint_text(surface, &fragment.rect, text, *baseline, style),
+            FragmentKind::Text { text, baseline, style } => {
+                let effective_bg = effective_background(fragments, i, canvas);
+                let ink = repair_fg(style.color, effective_bg);
+                paint_text(surface, &fragment.rect, text, *baseline, style, ink);
+            }
             FragmentKind::Image { image } => {
                 surface.blit(to_pixel_rect(&fragment.rect), image);
             }
         }
     }
+}
+
+/// Resolve the CSS `background-color` a `Text` fragment at `fragments
+/// [text_index]` visually sits over (packet T1c) — PURELY analytically over
+/// the paint-ordered fragment list itself, never by sampling real pixels
+/// (`Surface` has no pixel-read method, module docs) and never by looking
+/// at a background IMAGE's actual content (see the caveat below).
+///
+/// Scans every fragment BEFORE `text_index` (`fragments[..text_index]`,
+/// i.e. everything already painted UNDER this text by painter's-algorithm
+/// order — see `paint`'s own doc comment), NEAREST first (reverse order):
+/// the first `Box` fragment whose pixel rect geometrically CONTAINS the
+/// text fragment's own origin point AND whose `background_color.a != 0`
+/// wins. `canvas` is the fallback when no such box is found.
+///
+/// ## Caveats (deliberate simplifications, not bugs)
+///
+/// - This is geometric containment over a FLAT fragment list, not real DOM
+///   ancestry — an approximation the brief calls out explicitly. In valid
+///   painter's-algorithm output this is equivalent to ancestry (a box only
+///   ever geometrically contains its own descendants' content), but it
+///   means a fragment stream that violated that invariant could fool this
+///   function; scanning only `fragments[..text_index]` at least guarantees
+///   a box painted AFTER this text (which could never legitimately be its
+///   background) is never picked.
+/// - A box with ONLY `background-image` set (no `background-color` of its
+///   own) is treated as having NO background here: `ComputedStyle::
+///   background_color` defaults to `Color::TRANSPARENT` when a stylesheet
+///   sets only the image half of the `background` shorthand (`style::
+///   value::apply_property`'s `"background-image"`/`"background"` arms
+///   never touch `background_color`), and this function has no way to
+///   reason about a background IMAGE's actual pixel content — the decoded
+///   bytes live in `paint`'s separate `bg_images` map, not in `Fragment`/
+///   `ComputedStyle` at all. A text run painted over an image-only
+///   background therefore resolves its effective background to whatever
+///   sits BEHIND that box (or the canvas) — which can, in principle,
+///   disagree with the image's real average color (`fixtures/bg-image.html`
+///   is exactly this case: a white-on-tiled-image text run gets repaired
+///   against the white page canvas, not the tile). Documented, deliberate
+///   scope limit — a future packet could sample a representative color
+///   from the decoded image the same way this packet's gradient fallback
+///   picks a representative stop (`style::value::parse_gradient_first_
+///   color_stop`).
+pub fn effective_background(fragments: &[Fragment], text_index: usize, canvas: Color) -> Color {
+    let Some(text_fragment) = fragments.get(text_index) else {
+        return canvas;
+    };
+    let origin = text_fragment.rect.origin;
+    for frag in fragments[..text_index].iter().rev() {
+        if let FragmentKind::Box { style } = &frag.kind {
+            if style.background_color.a != 0 && rect_contains_point(&frag.rect, origin) {
+                return style.background_color;
+            }
+        }
+    }
+    canvas
+}
+
+/// Whether `p` falls within `rect`'s half-open `[x, x+w) x [y, y+h)` span.
+/// Total: a non-finite rect (document/layout-controlled, same hostile-input
+/// posture as [`to_pixel_rect`]) simply never contains anything, rather
+/// than risking a NaN comparison's always-`false`-but-easy-to-misreason-
+/// about behavior leaking through unexamined.
+fn rect_contains_point(rect: &LayoutRect, p: Point) -> bool {
+    if !rect.origin.x.is_finite() || !rect.origin.y.is_finite() || !rect.size.w.is_finite() || !rect.size.h.is_finite() {
+        return false;
+    }
+    p.x >= rect.origin.x && p.x < rect.origin.x + rect.size.w && p.y >= rect.origin.y && p.y < rect.origin.y + rect.size.h
 }
 
 fn paint_box(surface: &mut dyn Surface, rect: &LayoutRect, style: &ComputedStyle, bg_images: &HashMap<String, Rc<RgbaImage>>) {
@@ -190,7 +281,12 @@ fn border_px(side: &BorderSide) -> Option<(u32, Color)> {
     Some((w, side.color))
 }
 
-fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline: f32, style: &ComputedStyle) {
+/// `ink` (packet T1c) is `style.color` as REPAIRED by `paint`'s own
+/// `repair_fg` call — a separate parameter (rather than reading `style.
+/// color` directly here) because computing it needs the whole fragment
+/// slice (`effective_background`), which this single-fragment helper has
+/// no access to and shouldn't need to.
+fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline: f32, style: &ComputedStyle, ink: Color) {
     if text.is_empty() {
         return;
     }
@@ -198,7 +294,7 @@ fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline
     let top_y = finite_or(rect.origin.y, 0.0);
     let bl = finite_or(baseline, 0.0);
     let baseline_px = to_i32(top_y + bl);
-    let run = TextRun { text, x, baseline: baseline_px, size_px: style.font_size, color: style.color };
+    let run = TextRun { text, x, baseline: baseline_px, size_px: style.font_size, color: ink };
     surface.draw_text(&run);
 }
 
@@ -309,7 +405,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = box_style(Color::rgb(10, 20, 30), BorderSide::default());
         let fragments = vec![Fragment { rect: rect(2.0, 2.0, 4.0, 4.0), kind: FragmentKind::Box { style }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 3, 3), Color::rgb(10, 20, 30));
         assert_eq!(px(&s, 0, 0), Color::WHITE, "outside the box stays background");
     }
@@ -319,7 +415,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = box_style(Color::TRANSPARENT, BorderSide::default());
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 5, 5), Color::WHITE);
     }
 
@@ -329,7 +425,7 @@ mod tests {
         let border = BorderSide { width: 2.0, style: BorderStyle::Solid, color: Color::rgb(255, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
         let fragments = vec![Fragment { rect: rect(2.0, 2.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         // top edge
         assert_eq!(px(&s, 4, 2), Color::rgb(255, 0, 0));
         // left edge
@@ -348,7 +444,7 @@ mod tests {
         let border = BorderSide { width: 3.0, style: BorderStyle::None, color: Color::rgb(255, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
 
@@ -373,7 +469,7 @@ mod tests {
         // hr's own box: full width, zero content height (matches `height: 0`
         // in the UA sheet -- border adds its own 1px on top of that).
         let fragments = vec![Fragment { rect: rect(0.0, 1.0, 10.0, 0.0), kind: FragmentKind::Box { style }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         for x in 0..10 {
             assert_eq!(px(&s, x, 1), gray, "row 1 (the box's own y) should be the gray rule line at col {x}");
         }
@@ -392,7 +488,7 @@ mod tests {
         let border = BorderSide { width: 3.0, style: BorderStyle::Solid, color: Color::rgba(255, 0, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
 
@@ -416,7 +512,7 @@ mod tests {
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [10, 200, 30, 255])));
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None }];
 
-        paint(&mut s, &fragments, &bg_images);
+        paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
         // Every pixel inside the 6x6 box should be the tile color (a 2x2
         // tile repeated evenly across 6x6 divides exactly).
@@ -442,7 +538,7 @@ mod tests {
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [1, 2, 3, 255])));
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 5.0, 5.0), kind: FragmentKind::Box { style }, interactive: None }];
 
-        paint(&mut s, &fragments, &bg_images);
+        paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
         for y in 0..5 {
             for x in 0..5 {
@@ -460,7 +556,7 @@ mod tests {
         let style = ComputedStyle { background_color: Color::rgb(5, 5, 5), background_image: Some("missing.png".into()), ..ComputedStyle::default() };
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
 
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
 
         assert_eq!(px(&s, 5, 5), Color::rgb(5, 5, 5));
     }
@@ -473,7 +569,7 @@ mod tests {
         bg_images.insert("unrelated.png".to_string(), Rc::new(solid_rgba_image(2, 2, [255, 0, 0, 255])));
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None }];
 
-        paint(&mut s, &fragments, &bg_images);
+        paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
         assert_eq!(px(&s, 5, 5), Color::rgb(1, 2, 3), "no background_image on this style, so no bg-image map lookup should apply");
     }
@@ -491,10 +587,10 @@ mod tests {
         let mut with_image = MemSurface::new(10, 10, Color::WHITE);
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [10, 200, 30, 255])));
-        paint(&mut with_image, &fragments, &bg_images);
+        paint(&mut with_image, &fragments, &bg_images, Color::WHITE);
 
         let mut without_image = MemSurface::new(10, 10, Color::WHITE);
-        paint(&mut without_image, &fragments, &HashMap::new()); // --no-bg-images
+        paint(&mut without_image, &fragments, &HashMap::new(), Color::WHITE); // --no-bg-images
 
         assert_ne!(with_image.bytes(), without_image.bytes());
         assert_eq!(px(&without_image, 3, 3), Color::WHITE, "--no-bg-images: box shows only its (here, default transparent) background_color");
@@ -516,7 +612,7 @@ mod tests {
             Fragment { rect: rect(4.0, 0.0, 8.0, 16.0), kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style }, interactive: None },
         ];
 
-        paint(&mut s, &fragments, &bg_images);
+        paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
         assert!(count_black > 0, "text ink must still be visible painted over the bg image");
@@ -532,7 +628,7 @@ mod tests {
             Fragment { rect: rect(0.0, 0.0, 5.0, 5.0), kind: FragmentKind::Box { style: box_style_with_bg_image("empty.png") }, interactive: None },
             Fragment { rect: rect(0.0, 0.0, 0.0, 0.0), kind: FragmentKind::Box { style: box_style_with_bg_image("zero-box.png") }, interactive: None },
         ];
-        paint(&mut s, &fragments, &bg_images); // must not panic
+        paint(&mut s, &fragments, &bg_images, Color::WHITE); // must not panic
         assert_eq!(px(&s, 2, 2), Color::WHITE);
     }
 
@@ -547,7 +643,7 @@ mod tests {
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [4, 5, 6, 255])));
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 500_000.0, 500_000.0), kind: FragmentKind::Box { style }, interactive: None }];
 
-        paint(&mut s, &fragments, &bg_images); // must return promptly, not hang
+        paint(&mut s, &fragments, &bg_images, Color::WHITE); // must return promptly, not hang
 
         assert_eq!(px(&s, 4, 4), Color::rgb(4, 5, 6));
     }
@@ -562,7 +658,7 @@ mod tests {
         let fragments: Vec<Fragment> = (0..200)
             .map(|i| Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style_with_bg_image(&format!("tile-{i}.png")) }, interactive: None })
             .collect();
-        paint(&mut s, &fragments, &bg_images); // must not panic
+        paint(&mut s, &fragments, &bg_images, Color::WHITE); // must not panic
     }
 
     // ------------------------------------------------------------ paint: Text
@@ -576,7 +672,7 @@ mod tests {
             kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style },
             interactive: None,
         }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
         assert!(count_black > 0, "expected some glyph ink to be painted");
     }
@@ -591,7 +687,7 @@ mod tests {
                 kind: FragmentKind::Text { text: String::new(), baseline: 8.0, style },
                 interactive: None,
             }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         for i in (0..s.bytes().len()).step_by(4) {
             assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
         }
@@ -605,7 +701,7 @@ mod tests {
         let mut image = RgbaImage::new(2, 2);
         image.pixels = [255u8, 0, 0, 255].repeat(4); // solid opaque red, 2x2
         let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image }, interactive: None }];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 0, 0), Color::rgb(255, 0, 0));
         assert_eq!(px(&s, 3, 3), Color::rgb(255, 0, 0));
         assert_eq!(px(&s, 5, 5), Color::WHITE, "outside the image's rect stays background");
@@ -626,7 +722,7 @@ mod tests {
                 kind: FragmentKind::Image { image: RgbaImage::new(2, 2) },
                 interactive: None,
             }];
-        paint(&mut s, &fragments, &HashMap::new()); // must not panic
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE); // must not panic
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
 
@@ -641,7 +737,7 @@ mod tests {
             Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: first }, interactive: None },
             Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: second }, interactive: None },
         ];
-        paint(&mut s, &fragments, &HashMap::new());
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 5, 5), Color::rgb(0, 255, 0));
     }
 
@@ -670,14 +766,14 @@ mod tests {
                 },
                 Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Image { image: RgbaImage::new(1, 1) }, interactive: None },
             ];
-            paint(&mut s, &fragments, &HashMap::new()); // must not panic
+            paint(&mut s, &fragments, &HashMap::new(), Color::WHITE); // must not panic
         }
     }
 
     #[test]
     fn empty_fragment_list_paints_nothing() {
         let mut s = MemSurface::new(4, 4, Color::WHITE);
-        paint(&mut s, &[], &HashMap::new());
+        paint(&mut s, &[], &HashMap::new(), Color::WHITE);
         for i in (0..s.bytes().len()).step_by(4) {
             assert_eq!(&s.bytes()[i..i + 4], &[255, 255, 255, 255]);
         }
