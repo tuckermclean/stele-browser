@@ -8,7 +8,8 @@ use std::rc::Rc;
 use stele::img::RgbaImage;
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
 use stele::style::computed::{
-    BorderSide, BorderStyle, Dimension, Edges, FlexDirection, Float, LengthPercentage, LengthPercentageAuto,
+    BorderSide, BorderStyle, Dimension, Display, Edges, FlexDirection, Float, GridRepetitionCount,
+    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto,
 };
 use stele::style::ComputedStyle;
 
@@ -35,6 +36,33 @@ fn flex_item_style(width: Option<f32>, flex_grow: f32) -> ComputedStyle {
     }
     style.flex_grow = flex_grow;
     style
+}
+
+/// packet/css-grid: a `display: grid` style with the given
+/// `grid-template-columns` and (single-value) `gap`, everything else at CSS
+/// initial values -- mirrors `flex_row_style`'s own shape.
+fn grid_style(grid_template_columns: Vec<GridTemplateComponent>, gap: f32) -> ComputedStyle {
+    ComputedStyle { display: Display::Grid, grid_template_columns, gap, ..ComputedStyle::default() }
+}
+
+/// Wrap `inner` in a plain `display: block` ancestor, exactly like every
+/// real document's grid content sits inside `<body>` (block, UA default).
+/// This matters for grid specifically (not just cosmetically): taffy's own
+/// auto-repeat column-count math (`repeat(auto-fill, ...)`/`repeat(auto-
+/// fit, ...)`) requires the grid container to have a DEFINITE known width
+/// at layout time -- true automatically for an ordinary in-flow block
+/// child (taffy's block algorithm stretch-sizes an auto-width child to the
+/// container's own content width before laying it out), but NOT
+/// automatically true for a grid container sitting at the very tree root
+/// (taffy's `compute_root_layout` only special-cases `Display::Block`/
+/// `FlowRoot` roots to derive a definite width from the available viewport
+/// space -- a bare `Display::Grid` root gets no such treatment and would
+/// see an INDEFINITE width, degrading `repeat(auto-fill/auto-fit, ...)` to
+/// a single repetition regardless of viewport width). Every grid test
+/// below goes through this wrapper so it measures the real, production
+/// code path rather than tripping over that root-only edge case.
+fn page(inner: LayoutNode) -> LayoutNode {
+    container(block_style(), vec![inner])
 }
 
 fn text_node(s: &str) -> LayoutNode {
@@ -657,4 +685,159 @@ fn block_level_list_inside_an_inline_wrapper_is_not_folded_into_one_inline_leaf(
         text_ys[0], text_ys[1],
         "Alpha and Beta must render on separate lines (block-level li), not run together in one inline run"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CSS Grid (packet/css-grid): `display: grid` + `grid-template-columns`/
+// `grid-template-rows`, wired straight onto taffy's own `grid` cargo
+// feature -- see `layout::block::apply_grid`'s doc comment for the mapping,
+// and `Cargo.toml`'s own packet/css-grid comment for the feature-enable
+// rationale. Deferred (documented, not covered by any test here):
+// `grid-template-areas`, `grid-column`/`grid-row` explicit placement,
+// `grid-auto-flow`, `grid-auto-columns`/`rows`, named lines, subgrid.
+// ---------------------------------------------------------------------------
+
+fn fr_track(f: f32) -> GridTemplateComponent {
+    GridTemplateComponent::Single(GridTrack::Bare(GridTrackSize::Fr(f)))
+}
+
+#[test]
+fn grid_three_equal_fr_columns_places_items_side_by_side() {
+    let cols = vec![fr_track(1.0), fr_track(1.0), fr_track(1.0)];
+    let grid = container(
+        grid_style(cols, 0.0),
+        vec![leaf_container(block_style()), leaf_container(block_style()), leaf_container(block_style())],
+    );
+    let fragments = layout(&page(grid), Size { w: 900.0, h: 200.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 5, "page + grid container + 3 items");
+
+    let (item1, item2, item3) = (boxes[2], boxes[3], boxes[4]);
+    assert_eq!(item1.rect.origin.y, item2.rect.origin.y, "all 3 items must share the same row");
+    assert_eq!(item2.rect.origin.y, item3.rect.origin.y);
+    assert_eq!(item1.rect.origin.x, 0.0);
+    assert_eq!(item1.rect.size.w, 300.0);
+    assert_eq!(item2.rect.origin.x, 300.0, "second column starts right after the first (no gap declared)");
+    assert_eq!(item2.rect.size.w, 300.0);
+    assert_eq!(item3.rect.origin.x, 600.0);
+    assert_eq!(item3.rect.size.w, 300.0);
+}
+
+#[test]
+fn grid_repeat_3_1fr_is_equivalent_to_three_bare_1fr_tracks() {
+    // Same fixture as `grid_three_equal_fr_columns_places_items_side_by_side`
+    // above, `grid-template-columns: repeat(3, 1fr)` instead of `1fr 1fr
+    // 1fr` spelled out -- must produce the EXACT same geometry.
+    let cols = vec![GridTemplateComponent::Repeat(GridRepetitionCount::Count(3), vec![GridTrack::Bare(GridTrackSize::Fr(1.0))])];
+    let grid = container(
+        grid_style(cols, 0.0),
+        vec![leaf_container(block_style()), leaf_container(block_style()), leaf_container(block_style())],
+    );
+    let fragments = layout(&page(grid), Size { w: 900.0, h: 200.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 5, "page + grid container + 3 items");
+
+    let (item1, item2, item3) = (boxes[2], boxes[3], boxes[4]);
+    assert_eq!(item1.rect.origin.y, item2.rect.origin.y);
+    assert_eq!(item2.rect.origin.y, item3.rect.origin.y);
+    assert_eq!((item1.rect.origin.x, item1.rect.size.w), (0.0, 300.0));
+    assert_eq!((item2.rect.origin.x, item2.rect.size.w), (300.0, 300.0));
+    assert_eq!((item3.rect.origin.x, item3.rect.size.w), (600.0, 300.0));
+}
+
+/// `repeat(auto-fill, minmax(200px, 1fr))` at an 800px container width, with
+/// NO gap, must produce EXACTLY 4 columns -- hand-verified against taffy's
+/// own `compute_explicit_grid_size_in_axis` auto-repeat formula (`taffy-
+/// 0.13.0/src/compute/grid/explicit_grid.rs`): a single repetition uses
+/// `track_definite_value` = the track's min (200, since its max is `1fr`,
+/// not itself definite) = 200px; with zero gap, `floor((800 - 200) / 200)
+/// + 1 = floor(3.0) + 1 = 4`. This is the spike's (spike/taffy-grid, PR
+/// #69) own reported miscount (2 columns instead of 4) — reproduced here
+/// as a passing test now that the grid container has a definite width to
+/// auto-repeat against (see `page`'s own doc comment for why that matters).
+#[test]
+fn grid_auto_fill_minmax_computes_the_correct_column_count_at_800px() {
+    let cols = vec![GridTemplateComponent::Repeat(
+        GridRepetitionCount::AutoFill,
+        vec![GridTrack::MinMax(GridTrackSize::Length(200.0), GridTrackSize::Fr(1.0))],
+    )];
+    let grid = container(
+        grid_style(cols, 0.0),
+        vec![
+            leaf_container(block_style()),
+            leaf_container(block_style()),
+            leaf_container(block_style()),
+            leaf_container(block_style()),
+        ],
+    );
+    let fragments = layout(&page(grid), Size { w: 800.0, h: 200.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 6, "page + grid container + 4 items");
+
+    let items = &boxes[2..6];
+    let row1_y = items[0].rect.origin.y;
+    for it in items {
+        assert_eq!(it.rect.origin.y, row1_y, "all 4 items must land in row 1, not wrap to a second row");
+    }
+    let mut xs: Vec<f32> = items.iter().map(|f| f.rect.origin.x).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(
+        xs,
+        vec![0.0, 200.0, 400.0, 600.0],
+        "repeat(auto-fill, minmax(200px,1fr)) at 800px must produce exactly 4 columns at these x-bands, not 2"
+    );
+}
+
+#[test]
+fn grid_gap_produces_expected_inter_item_spacing() {
+    let cols = vec![
+        GridTemplateComponent::Single(GridTrack::Bare(GridTrackSize::Length(100.0))),
+        GridTemplateComponent::Single(GridTrack::Bare(GridTrackSize::Length(100.0))),
+    ];
+    let grid = container(grid_style(cols, 20.0), vec![leaf_container(block_style()), leaf_container(block_style())]);
+    let fragments = layout(&page(grid), Size { w: 500.0, h: 200.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 4, "page + grid container + 2 items");
+
+    let (item1, item2) = (boxes[2], boxes[3]);
+    assert_eq!(item1.rect.origin.x, 0.0);
+    assert_eq!(item1.rect.size.w, 100.0);
+    assert_eq!(item2.rect.origin.x, 100.0 + 20.0, "second item must be offset by the declared 20px gap");
+    assert_eq!(item2.rect.size.w, 100.0);
+}
+
+/// Priority-1 regression guard: a document that never declares `display:
+/// grid` anywhere must lay out to the EXACT SAME rects after packet/
+/// css-grid as before it -- enabling taffy's `grid` cargo feature and
+/// adding `Display::Grid`/`apply_grid` must be purely additive. Combines
+/// block margin collapsing (D6, packet/t6-margin-collapse) with a nested
+/// flex row (two independent non-grid layout paths) in one tree; if either
+/// path is undisturbed by this packet, the numbers below are exact.
+#[test]
+fn non_grid_block_and_flex_layout_is_unchanged_by_grid_support() {
+    let mut top = block_style();
+    top.margin.bottom = LengthPercentageAuto::Px(10.0);
+    let mut bottom = block_style();
+    bottom.margin.top = LengthPercentageAuto::Px(20.0);
+    let flex_row = container(
+        flex_row_style(8.0),
+        vec![leaf_container(flex_item_style(Some(50.0), 0.0)), leaf_container(flex_item_style(Some(50.0), 0.0))],
+    );
+    let root = container(block_style(), vec![leaf_container(top), leaf_container(bottom), flex_row]);
+    let fragments = layout(&root, Size { w: 400.0, h: 300.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 6, "root + top + bottom + flex row + 2 flex items");
+
+    // D6 margin collapse: max(10, 20) = 20, not summed to 30.
+    let top_box = boxes[1];
+    let bottom_box = boxes[2];
+    assert_eq!(top_box.rect.origin.y, 0.0);
+    assert_eq!(bottom_box.rect.origin.y, 20.0, "adjoining margins must still collapse to max(10,20)=20, not sum to 30");
+
+    // Nested flex row: two 50px-wide items 8px apart, side by side, same row.
+    let flex_item1 = boxes[4];
+    let flex_item2 = boxes[5];
+    assert_eq!(flex_item1.rect.origin.x, 0.0);
+    assert_eq!(flex_item2.rect.origin.x, 50.0 + 8.0);
+    assert_eq!(flex_item1.rect.origin.y, flex_item2.rect.origin.y);
 }

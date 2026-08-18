@@ -7,11 +7,15 @@ use std::sync::OnceLock;
 
 use crate::dom::{Dom, Node, NodeId};
 use crate::style::computed::{
-    BorderSide, BorderStyle, Dimension, Edges, LengthPercentage, LengthPercentageAuto, LineHeight,
+    BorderSide, BorderStyle, Dimension, Edges, GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize,
+    LengthPercentage, LengthPercentageAuto, LineHeight,
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
-use crate::style::value::{self, presentational_hints, BorderRaw, Declarations, Env, RawLength, RawLengthAuto, RawLineHeight};
+use crate::style::value::{
+    self, presentational_hints, BorderRaw, Declarations, Env, RawGridRepetitionCount, RawGridTemplateComponent,
+    RawGridTrack, RawGridTrackSize, RawLength, RawLengthAuto, RawLineHeight,
+};
 use crate::style::{parser, ComputedStyle, Stylesheet};
 use crate::surface::Color;
 
@@ -321,6 +325,12 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         // `None` anyway) is the correct un-set result, mirroring `d.gap`'s
         // own `Option` shape one line up.
         column_gap: d.column_gap.map(|l| raw_to_px(l, font_size)),
+
+        // packet/css-grid: non-inherited ("own") resolution, same treatment
+        // `flex_direction`/etc. above already get -- real CSS `grid-
+        // template-columns`/`rows` aren't inherited either.
+        grid_template_columns: resolve_grid_template(&d.grid_template_columns, font_size),
+        grid_template_rows: resolve_grid_template(&d.grid_template_rows, font_size),
     }
 }
 
@@ -348,6 +358,60 @@ fn raw_to_px(raw: RawLength, font_size: f32) -> f32 {
         RawLength::Pt(v) => pt_to_px(v),
         RawLength::Em(v) => v * font_size,
         RawLength::Percent(_) => 0.0, // callers needing percent use the *_lp/_dimension helpers
+    }
+}
+
+/// packet/css-grid: resolve a raw `grid-template-columns`/`rows` value
+/// (`None` if the declaration was never set) into `ComputedStyle`'s own
+/// `Vec<GridTemplateComponent>` -- `None` resolves to an empty `Vec`,
+/// matching `ComputedStyle::default()`'s own "no explicit template" value
+/// (this field's own doc comment, `style/computed.rs`).
+fn resolve_grid_template(raw: &Option<Vec<RawGridTemplateComponent>>, font_size: f32) -> Vec<GridTemplateComponent> {
+    match raw {
+        None => Vec::new(),
+        Some(components) => components.iter().map(|c| resolve_grid_component(c, font_size)).collect(),
+    }
+}
+
+fn resolve_grid_component(c: &RawGridTemplateComponent, font_size: f32) -> GridTemplateComponent {
+    match c {
+        RawGridTemplateComponent::Single(track) => GridTemplateComponent::Single(resolve_grid_track(track, font_size)),
+        RawGridTemplateComponent::Repeat(count, tracks) => GridTemplateComponent::Repeat(
+            resolve_grid_repetition(*count),
+            tracks.iter().map(|t| resolve_grid_track(t, font_size)).collect(),
+        ),
+    }
+}
+
+fn resolve_grid_repetition(count: RawGridRepetitionCount) -> GridRepetitionCount {
+    match count {
+        RawGridRepetitionCount::Count(n) => GridRepetitionCount::Count(n),
+        RawGridRepetitionCount::AutoFill => GridRepetitionCount::AutoFill,
+        RawGridRepetitionCount::AutoFit => GridRepetitionCount::AutoFit,
+    }
+}
+
+fn resolve_grid_track(track: &RawGridTrack, font_size: f32) -> GridTrack {
+    match track {
+        RawGridTrack::Bare(size) => GridTrack::Bare(resolve_grid_track_size(*size, font_size)),
+        RawGridTrack::MinMax(min, max) => {
+            GridTrack::MinMax(resolve_grid_track_size(*min, font_size), resolve_grid_track_size(*max, font_size))
+        }
+    }
+}
+
+/// `RawGridTrackSize::Length(RawLength::Percent(_))` deliberately does NOT
+/// go through `raw_to_px` -- that helper collapses a percent to `0.0`
+/// (correct for its OTHER callers, which resolve percent separately via
+/// `resolve_lp`/`resolve_dimension`), but a grid track's own percent has no
+/// such separate path -- it must survive as `GridTrackSize::Percent` all
+/// the way to taffy, which resolves it against the grid container's own
+/// size during layout (`layout::block::map_grid_track`).
+fn resolve_grid_track_size(size: RawGridTrackSize, font_size: f32) -> GridTrackSize {
+    match size {
+        RawGridTrackSize::Fr(f) => GridTrackSize::Fr(f),
+        RawGridTrackSize::Length(RawLength::Percent(p)) => GridTrackSize::Percent(p),
+        RawGridTrackSize::Length(l) => GridTrackSize::Length(raw_to_px(l, font_size)),
     }
 }
 
@@ -472,6 +536,32 @@ mod tests {
         }
         assert_eq!(styles[find(&d, "th")].display, Display::TableCell);
         assert_eq!(styles[find(&d, "td")].display, Display::TableCell);
+    }
+
+    #[test]
+    fn author_display_grid_and_grid_template_cascade_onto_computed_style() {
+        // packet/css-grid: `grid-template-columns`/`rows` aren't inherited
+        // (own doc comment on `resolve`'s struct literal) -- the child
+        // `<div>` here has no author rule of its own, so it must see the
+        // DEFAULT empty template, not its grid-container parent's.
+        let d = dom::parser::parse("<div class=\"g\"><div>item</div></div>");
+        let sheet = parser::parse(
+            ".g { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }",
+        );
+        let styles = cascade(&d, &[sheet]);
+        let grid_id = find(&d, "div"); // first <div> in document order is `.g`
+        assert_eq!(styles[grid_id].display, Display::Grid);
+        assert_eq!(
+            styles[grid_id].grid_template_columns,
+            vec![GridTemplateComponent::Repeat(
+                GridRepetitionCount::AutoFill,
+                vec![GridTrack::MinMax(GridTrackSize::Length(200.0), GridTrackSize::Fr(1.0))]
+            )]
+        );
+        assert_eq!(styles[grid_id].gap, 10.0);
+
+        let child_id = find_all(&d, "div")[1];
+        assert_eq!(styles[child_id].grid_template_columns, Vec::new(), "grid-template-columns must not inherit");
     }
 
     #[test]

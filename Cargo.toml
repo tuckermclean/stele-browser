@@ -28,11 +28,10 @@ png = "0.17"
 # UnixStream fd at once, which a single blocking stdin read can't do.
 rustix = { version = "1.1.4", default-features = false, features = ["termios", "std", "event"] }
 # Trimmed to what block.rs/inline.rs actually use (charter §158: block flow
-# = degenerate column flex + flexbox; no CSS grid; no CSS calc() in the
-# dialect). Default features also pull `grid` (and smallvec transitively via
-# `grid`), `calc`, and `detailed_layout_info` — all dead weight here;
-# dropping them shrinks the binary (A2 <= 2.0 MB) and the vendoring/audit
-# surface.
+# = degenerate column flex + flexbox, PLUS real CSS Grid as of packet/
+# css-grid below). Default features also pull `calc` and
+# `detailed_layout_info` — dead weight here; dropping them shrinks the
+# binary (A2 <= 2.0 MB) and the vendoring/audit surface.
 #
 # packet/block-floats: `float_layout` re-enabled -- proven viable by the
 # spike (spike/taffy-float-layout, PR #65) at +16KB binary cost (well within
@@ -45,6 +44,30 @@ rustix = { version = "1.1.4", default-features = false, features = ["termios", "
 # float`/`.clear` via `map_float`/`map_clear`; the bespoke inline-image float
 # mechanism (`layout::inline`) is untouched and keeps handling its own
 # narrower case unaffected by this feature.
+#
+# packet/css-grid: `grid` re-enabled -- proven viable (size + fidelity) by
+# the measurement spike (spike/taffy-grid, PR #69), which also surfaced two
+# problems this packet fixes: (a) `display: grid` support legitimately
+# changes rendering for any EXISTING page that already declares `display:
+# grid` (fixtures/httpforever.html does, in 3 places -- see this packet's PR
+# description for the full root-cause note); it does NOT leak into
+# block/flex layout for content that never used grid. (b) `repeat(auto-fill,
+# minmax())` needs the grid container to have a definite width at layout
+# time to compute the right column count (taffy's own auto-repeat algorithm,
+# `compute_explicit_grid_size_in_axis`, falls back to a single repetition
+# otherwise) -- true automatically for any grid container that is an
+# ordinary in-flow child of a block box (taffy's block algorithm already
+# stretch-sizes an auto-width child to the container's content width before
+# laying it out), which is every real page (`<body>` is always block).
+# Pulls in `smallvec` transitively (taffy's own `Cargo.toml`).
+# `layout::block::apply_grid` wires `ComputedStyle.grid_template_columns`/
+# `.rows` onto taffy's `Style.grid_template_columns`/`.grid_template_rows`;
+# `map_display` maps `Display::Grid` onto taffy's own `Display::Grid`,
+# handing off to taffy's own CSS Grid algorithm entirely (not reimplemented
+# here). This feature is purely additive: it only changes layout for a
+# `display: grid` container -- see `layout::block::apply_grid`'s own doc
+# comment for why calling it unconditionally (mirroring `apply_flex`) is
+# still a no-op for every other display type.
 taffy = { version = "0.13", default-features = false, features = [
     "std",
     "taffy_tree",
@@ -52,6 +75,7 @@ taffy = { version = "0.13", default-features = false, features = [
     "block_layout",
     "float_layout",
     "content_size",
+    "grid",
 ] }
 
 # Charter C4: the rock does not unwind. Size-first for the 486 budget (A2 ≤ 2.0 MB).

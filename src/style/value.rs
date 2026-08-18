@@ -31,6 +31,43 @@ pub(crate) enum RawLengthAuto {
     Auto,
 }
 
+/// packet/css-grid: a raw grid-track size — a bare `<length>`/`<percentage>`
+/// (via [`RawLength`], resolved to px by `cascade::resolve` exactly like
+/// `width`/`gap`) or a `<flex>` (`fr`) value, which has no `em` component and
+/// so needs no cascade resolution at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RawGridTrackSize {
+    Length(RawLength),
+    Fr(f32),
+}
+
+/// packet/css-grid: a raw grid track — either a bare size or an explicit
+/// `minmax(<min>, <max>)`. Mirrors `computed::GridTrack`; see that type's
+/// doc comment for why `Bare` and `MinMax` are kept distinct rather than
+/// folding `Bare` into `MinMax(size, size)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RawGridTrack {
+    Bare(RawGridTrackSize),
+    MinMax(RawGridTrackSize, RawGridTrackSize),
+}
+
+/// packet/css-grid: `repeat()`'s raw first argument. Mirrors
+/// `computed::GridRepetitionCount`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RawGridRepetitionCount {
+    Count(u16),
+    AutoFill,
+    AutoFit,
+}
+
+/// packet/css-grid: one raw component of a `grid-template-columns`/
+/// `grid-template-rows` value. Mirrors `computed::GridTemplateComponent`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RawGridTemplateComponent {
+    Single(RawGridTrack),
+    Repeat(RawGridRepetitionCount, Vec<RawGridTrack>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RawLineHeight {
     Normal,
@@ -161,6 +198,14 @@ pub(crate) struct Declarations {
     /// own field rather than overwriting `gap`.
     pub column_gap: Option<RawLength>,
 
+    /// packet/css-grid. `None` means "no `grid-template-columns` declared"
+    /// (not "declared empty" -- CSS has no way to declare an
+    /// explicitly-empty template); `cascade::resolve` falls back to
+    /// `ComputedStyle::default`'s empty `Vec` the same way every other
+    /// `Option`-shaped field here does.
+    pub grid_template_columns: Option<Vec<RawGridTemplateComponent>>,
+    pub grid_template_rows: Option<Vec<RawGridTemplateComponent>>,
+
     /// Custom-property (`--name: <tokens>;`) declarations captured by this
     /// block (packet T1a — CSS custom properties + `var()`). Stored as RAW
     /// tokens, never eagerly resolved: a custom property's value may itself
@@ -242,6 +287,14 @@ impl Declarations {
         // semantics, just spelled with an explicit `.clone()`.
         if other.background_image.is_some() {
             self.background_image = other.background_image.clone();
+        }
+        // packet/css-grid: `grid_template_columns`/`rows` are `Vec`-shaped
+        // (not `Copy`), same reason as `background_image` right above.
+        if other.grid_template_columns.is_some() {
+            self.grid_template_columns = other.grid_template_columns.clone();
+        }
+        if other.grid_template_rows.is_some() {
+            self.grid_template_rows = other.grid_template_rows.clone();
         }
         // Custom properties and var()-bearing deferred declarations both
         // cascade with the same last-write-wins-by-name semantics as every
@@ -1402,6 +1455,12 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
                 d.display = Some(Display::Flex);
                 true
             }
+            // packet/css-grid: see `Display::Grid`'s own doc comment
+            // (`style/computed.rs`) for the full contract.
+            Some("grid") => {
+                d.display = Some(Display::Grid);
+                true
+            }
             Some("table") => {
                 d.display = Some(Display::Table);
                 true
@@ -1722,8 +1781,137 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             },
             _ => false,
         },
+        // packet/css-grid: a track list of `<length>`/`<percentage>`/
+        // `<flex>` (`fr`) values and/or `repeat(<count>, <track>+)` (with
+        // `minmax(<min>, <max>)` inside either position) -- see
+        // [`parse_grid_template`]'s own doc comment for the exact grammar
+        // subset this covers. Real CSS invalidates the WHOLE declaration on
+        // any unparseable component (same rule `apply_edges_shorthand`
+        // already follows for margin/padding/border shorthands) — never a
+        // partial/best-effort template.
+        "grid-template-columns" => match parse_grid_template(tokens) {
+            Some(v) => {
+                d.grid_template_columns = Some(v);
+                true
+            }
+            None => false,
+        },
+        "grid-template-rows" => match parse_grid_template(tokens) {
+            Some(v) => {
+                d.grid_template_rows = Some(v);
+                true
+            }
+            None => false,
+        },
         _ => false,
     }
+}
+
+/// packet/css-grid: convert one track-size token into a
+/// [`RawGridTrackSize`] -- a bare `<flex>` (`fr`) dimension, or anything
+/// [`token_to_raw_length`] already understands (`<length>`/`<percentage>`).
+/// Negative `fr` values are invalid (CSS Grid §7.2.3) and rejected here
+/// (falls through to `token_to_raw_length`, which doesn't understand a
+/// `"fr"` unit either, so the whole token is correctly unparseable rather
+/// than silently clamped).
+fn token_to_grid_track_size(t: &Token) -> Option<RawGridTrackSize> {
+    if let Token::Dimension(v, unit) = t {
+        // `tokenizer::tokenize` already lowercases every unit string, so a
+        // plain `==` is enough (same reasoning `token_to_gap_length`'s own
+        // doc comment gives for its `"rem"` check).
+        if unit == "fr" && *v >= 0.0 {
+            return Some(RawGridTrackSize::Fr(*v));
+        }
+    }
+    token_to_raw_length(t).map(RawGridTrackSize::Length)
+}
+
+/// packet/css-grid: parse one grid track starting at `tokens[i]` -- either
+/// `minmax(<min>, <max>)` or a bare track size -- returning the parsed
+/// [`RawGridTrack`] and the index just past it. `None` on any malformed
+/// shape (missing comma/paren, unparseable size, `tokens` too short),
+/// matching this module's total/never-panics contract.
+fn parse_grid_track(tokens: &[Token], i: usize) -> Option<(RawGridTrack, usize)> {
+    match tokens.get(i)? {
+        Token::Function(name) if name.eq_ignore_ascii_case("minmax") => {
+            let min = token_to_grid_track_size(tokens.get(i + 1)?)?;
+            if tokens.get(i + 2)? != &Token::Comma {
+                return None;
+            }
+            let max = token_to_grid_track_size(tokens.get(i + 3)?)?;
+            if tokens.get(i + 4)? != &Token::RParen {
+                return None;
+            }
+            Some((RawGridTrack::MinMax(min, max), i + 5))
+        }
+        t => token_to_grid_track_size(t).map(|size| (RawGridTrack::Bare(size), i + 1)),
+    }
+}
+
+/// packet/css-grid: parse `repeat(<count>, <track>+)` starting right AFTER
+/// the already-consumed `repeat(` function token (i.e. `tokens[i]` is the
+/// count argument) -- `<count>` is `auto-fill`, `auto-fit`, or a positive
+/// integer (CSS Grid §7.2.3.1); the track list is one or more tracks (a
+/// nested `repeat()` is real CSS's own restriction too, so [`parse_grid_
+/// track`] not accepting one here is correct, not a limitation). Returns
+/// the parsed component and the index just past the closing `)`.
+fn parse_grid_repeat(tokens: &[Token], i: usize) -> Option<(RawGridTemplateComponent, usize)> {
+    let count = match tokens.get(i)? {
+        Token::Ident(s) if s.eq_ignore_ascii_case("auto-fill") => RawGridRepetitionCount::AutoFill,
+        Token::Ident(s) if s.eq_ignore_ascii_case("auto-fit") => RawGridRepetitionCount::AutoFit,
+        Token::Number(n) if *n >= 1.0 && n.fract() == 0.0 => RawGridRepetitionCount::Count(*n as u16),
+        _ => return None,
+    };
+    if tokens.get(i + 1)? != &Token::Comma {
+        return None;
+    }
+    let mut idx = i + 2;
+    let mut tracks = Vec::new();
+    loop {
+        if tokens.get(idx)? == &Token::RParen {
+            break;
+        }
+        let (track, next_i) = parse_grid_track(tokens, idx)?;
+        tracks.push(track);
+        idx = next_i;
+    }
+    idx += 1; // consume the closing `)`
+    if tracks.is_empty() {
+        return None;
+    }
+    Some((RawGridTemplateComponent::Repeat(count, tracks), idx))
+}
+
+/// packet/css-grid: `grid-template-columns`/`grid-template-rows`. Supports
+/// a track list mixing bare tracks and `repeat(<count>, <track>+)`
+/// (`minmax()` valid in either position) -- e.g. `1fr 1fr 1fr`, `200px
+/// 1fr`, `repeat(auto-fill, minmax(200px, 1fr))`, `200px repeat(2, 1fr)`.
+/// NOT covered (real CSS grid features this packet leaves unparsed --
+/// documented as deferred in the PR description): named lines
+/// (`[line-name]`), the `subgrid`/`masonry` keywords, and `grid-template-
+/// areas`' string-literal row syntax. `None` (declaration doesn't apply) on
+/// empty input or any unparseable component -- never a partial template.
+fn parse_grid_template(tokens: &[Token]) -> Option<Vec<RawGridTemplateComponent>> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Function(name) if name.eq_ignore_ascii_case("repeat") => {
+                let (component, next_i) = parse_grid_repeat(tokens, i + 1)?;
+                out.push(component);
+                i = next_i;
+            }
+            _ => {
+                let (track, next_i) = parse_grid_track(tokens, i)?;
+                out.push(RawGridTemplateComponent::Single(track));
+                i = next_i;
+            }
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -2497,5 +2685,149 @@ mod tests {
         let mut d = Declarations::default();
         assert!(!apply_property("background", &toks("not-a-gradient(oops"), &mut d));
         assert!(d.background_color.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // packet/css-grid
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn display_grid_parses() {
+        let mut d = Declarations::default();
+        assert!(apply_property("display", &toks("grid"), &mut d));
+        assert_eq!(d.display, Some(Display::Grid));
+    }
+
+    #[test]
+    fn grid_template_columns_parses_a_bare_track_list() {
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("1fr 1fr 1fr"), &mut d));
+        let fr = |f: f32| RawGridTemplateComponent::Single(RawGridTrack::Bare(RawGridTrackSize::Fr(f)));
+        assert_eq!(d.grid_template_columns, Some(vec![fr(1.0), fr(1.0), fr(1.0)]));
+    }
+
+    #[test]
+    fn grid_template_columns_parses_mixed_length_and_fr_tracks() {
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("200px 1fr"), &mut d));
+        assert_eq!(
+            d.grid_template_columns,
+            Some(vec![
+                RawGridTemplateComponent::Single(RawGridTrack::Bare(RawGridTrackSize::Length(RawLength::Px(200.0)))),
+                RawGridTemplateComponent::Single(RawGridTrack::Bare(RawGridTrackSize::Fr(1.0))),
+            ])
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_parses_repeat_with_a_plain_count() {
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("repeat(3, 1fr)"), &mut d));
+        assert_eq!(
+            d.grid_template_columns,
+            Some(vec![RawGridTemplateComponent::Repeat(
+                RawGridRepetitionCount::Count(3),
+                vec![RawGridTrack::Bare(RawGridTrackSize::Fr(1.0))]
+            )])
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_parses_repeat_auto_fill_with_minmax() {
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("repeat(auto-fill, minmax(200px, 1fr))"), &mut d));
+        assert_eq!(
+            d.grid_template_columns,
+            Some(vec![RawGridTemplateComponent::Repeat(
+                RawGridRepetitionCount::AutoFill,
+                vec![RawGridTrack::MinMax(
+                    RawGridTrackSize::Length(RawLength::Px(200.0)),
+                    RawGridTrackSize::Fr(1.0)
+                )]
+            )])
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_parses_repeat_auto_fit() {
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("repeat(auto-fit, minmax(10px, 1fr))"), &mut d));
+        let Some(vec) = d.grid_template_columns else { panic!("expected Some") };
+        assert_eq!(
+            vec,
+            vec![RawGridTemplateComponent::Repeat(
+                RawGridRepetitionCount::AutoFit,
+                vec![RawGridTrack::MinMax(RawGridTrackSize::Length(RawLength::Px(10.0)), RawGridTrackSize::Fr(1.0))]
+            )]
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_mixes_a_leading_bare_track_with_a_repeat() {
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("200px repeat(2, 1fr)"), &mut d));
+        assert_eq!(
+            d.grid_template_columns,
+            Some(vec![
+                RawGridTemplateComponent::Single(RawGridTrack::Bare(RawGridTrackSize::Length(RawLength::Px(200.0)))),
+                RawGridTemplateComponent::Repeat(
+                    RawGridRepetitionCount::Count(2),
+                    vec![RawGridTrack::Bare(RawGridTrackSize::Fr(1.0))]
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn grid_template_rows_parses_independently_of_columns() {
+        // `grid-template-rows` goes through the exact same [`parse_grid_
+        // template`] as `grid-template-columns` but lands in its own
+        // `Declarations` field -- setting one must never touch the other.
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-rows", &toks("100px minmax(0, 1fr)"), &mut d));
+        assert_eq!(
+            d.grid_template_rows,
+            Some(vec![
+                RawGridTemplateComponent::Single(RawGridTrack::Bare(RawGridTrackSize::Length(RawLength::Px(100.0)))),
+                RawGridTemplateComponent::Single(RawGridTrack::MinMax(
+                    RawGridTrackSize::Length(RawLength::Px(0.0)),
+                    RawGridTrackSize::Fr(1.0)
+                )),
+            ])
+        );
+        assert_eq!(d.grid_template_columns, None, "setting rows must not touch columns");
+    }
+
+    #[test]
+    fn grid_template_columns_rejects_an_unparseable_component_entirely() {
+        // Real CSS invalidates the WHOLE declaration on one bad component
+        // -- not a partial/best-effort template (see `parse_grid_template`'s
+        // doc comment). `auto` is a real CSS Grid track keyword this
+        // packet's parser deliberately does not implement.
+        let mut d = Declarations::default();
+        assert!(!apply_property("grid-template-columns", &toks("1fr auto"), &mut d));
+        assert_eq!(d.grid_template_columns, None);
+    }
+
+    #[test]
+    fn grid_template_columns_empty_value_does_not_apply() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("grid-template-columns", &[], &mut d));
+        assert_eq!(d.grid_template_columns, None);
+    }
+
+    #[test]
+    fn grid_template_columns_rejects_malformed_minmax() {
+        let mut d = Declarations::default();
+        // Missing the comma between minmax's two arguments.
+        assert!(!apply_property("grid-template-columns", &toks("minmax(200px 1fr)"), &mut d));
+        assert_eq!(d.grid_template_columns, None);
+    }
+
+    #[test]
+    fn negative_fr_is_rejected() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("grid-template-columns", &toks("-1fr"), &mut d));
+        assert_eq!(d.grid_template_columns, None);
     }
 }
