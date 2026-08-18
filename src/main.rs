@@ -1496,6 +1496,129 @@ mod tests {
         assert_eq!(a.cols, DEFAULT_COLS);
     }
 
+    // ---- T1b: --color-scheme CLI parsing --------------------------------
+
+    #[test]
+    fn parse_args_reads_color_scheme_dark() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html", "--color-scheme", "dark"]));
+        assert_eq!(a.color_scheme, style::ColorScheme::Dark);
+        assert!(a.color_scheme_given);
+    }
+
+    #[test]
+    fn parse_args_reads_color_scheme_light() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html", "--color-scheme", "light"]));
+        assert_eq!(a.color_scheme, style::ColorScheme::Light);
+        assert!(a.color_scheme_given);
+    }
+
+    #[test]
+    fn parse_args_color_scheme_auto_resolves_to_light() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html", "--color-scheme", "auto"]));
+        assert_eq!(a.color_scheme, style::ColorScheme::Light);
+        assert!(a.color_scheme_given);
+    }
+
+    #[test]
+    fn parse_args_color_scheme_defaults_to_light_and_not_given_when_absent() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html"]));
+        assert_eq!(a.color_scheme, style::ColorScheme::Light);
+        assert!(!a.color_scheme_given, "the default must be distinguishable from an explicit --color-scheme light");
+    }
+
+    #[test]
+    fn parse_args_color_scheme_bad_value_falls_back_to_light_not_a_panic() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html", "--color-scheme", "nonsense"]));
+        assert_eq!(a.color_scheme, style::ColorScheme::Light);
+        assert!(a.color_scheme_given, "the flag WAS given on the command line, even though its value was garbage");
+    }
+
+    #[test]
+    fn parse_args_color_scheme_trailing_flag_with_missing_value_does_not_panic() {
+        let a = parse_args(&args(&["--headless", "--dump-text", "x.html", "--color-scheme"]));
+        assert_eq!(a.color_scheme, style::ColorScheme::Light);
+        assert!(!a.color_scheme_given);
+    }
+
+    // ---- T1b: pre-cascade data-theme/data-mode root stamp -----------------
+
+    #[test]
+    fn stamp_color_scheme_sets_data_theme_and_data_mode_on_the_root_element() {
+        let mut dom_tree = dom::parser::parse("<html><body><p>t</p></body></html>");
+        stamp_color_scheme(&mut dom_tree, style::ColorScheme::Dark);
+        let root = dom_tree.root();
+        let el = dom_tree.node(root).element().expect("root is an element");
+        assert_eq!(el.attrs.get("data-theme"), Some("dark"));
+        assert_eq!(el.attrs.get("data-mode"), Some("dark"));
+    }
+
+    #[test]
+    fn stamp_color_scheme_is_total_on_the_trivial_default_dom() {
+        let mut dom_tree = dom::Dom::new(); // just the seeded <html> root, no children
+        stamp_color_scheme(&mut dom_tree, style::ColorScheme::Light);
+        let el = dom_tree.node(dom_tree.root()).element().unwrap();
+        assert_eq!(el.attrs.get("data-theme"), Some("light"));
+    }
+
+    #[test]
+    fn stamped_color_scheme_attribute_makes_an_attribute_selector_match_end_to_end() {
+        let mut dom_tree = dom::parser::parse("<html><body><p>t</p></body></html>");
+        stamp_color_scheme(&mut dom_tree, style::ColorScheme::Dark);
+        let sheet = stele::style::parser::parse(r#"html[data-theme="dark"] p { color: red; }"#);
+        let styles = cascade::cascade(&dom_tree, std::slice::from_ref(&sheet));
+
+        fn find_p(d: &dom::Dom, id: dom::NodeId) -> Option<dom::NodeId> {
+            let el = d.node(id).element()?;
+            if el.name.as_str() == "p" {
+                return Some(id);
+            }
+            for &c in &el.children {
+                if let Some(f) = find_p(d, c) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        let p = find_p(&dom_tree, dom_tree.root()).expect("p present");
+        assert_eq!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    // ---- T1b: --color-scheme end-to-end via --dump-text --------------------
+
+    #[test]
+    fn color_scheme_default_does_not_stamp_and_matches_the_pre_t1b_golden_path() {
+        // Golden-churn safety: the DEFAULT (no --color-scheme given) render
+        // path must be byte-identical to calling the pre-T1b `dump_text`
+        // wrapper -- see `Args::color_scheme_given`'s doc comment for why
+        // stamping is flag-gated rather than unconditional.
+        let via_opts = dump_text_opts("fixtures/basic.html", 80, style::ColorScheme::Light, false);
+        let golden = include_str!("../goldens/basic.tty.txt");
+        assert_eq!(via_opts, golden.trim_end_matches('\n'));
+    }
+
+    #[test]
+    fn color_scheme_dark_flag_toggles_visible_text_via_stamped_attribute_and_media_query() {
+        let light = dump_text_opts("fixtures/color-scheme.html", 80, style::ColorScheme::Light, false);
+        assert!(light.contains("LIGHT MODE TEXT"));
+        assert!(!light.contains("DARK MODE TEXT"));
+        assert!(!light.contains("MEDIA DARK TEXT"));
+
+        let dark = dump_text_opts("fixtures/color-scheme.html", 80, style::ColorScheme::Dark, true);
+        assert!(!dark.contains("LIGHT MODE TEXT"), "the [data-theme=dark]-gated light-mode text should be hidden");
+        assert!(dark.contains("DARK MODE TEXT"), "attribute-selector-gated content should show under --color-scheme dark");
+        assert!(dark.contains("MEDIA DARK TEXT"), "prefers-color-scheme-media-gated content should show under --color-scheme dark");
+    }
+
+    #[test]
+    fn color_scheme_dark_without_stamping_only_affects_media_queries_not_attribute_selectors() {
+        // `stamp = false` proves the two mechanisms (media evaluation vs
+        // attribute stamp) are independently wired, not accidentally coupled.
+        let dark_no_stamp = dump_text_opts("fixtures/color-scheme.html", 80, style::ColorScheme::Dark, false);
+        assert!(dark_no_stamp.contains("LIGHT MODE TEXT"), "without stamping, the [data-theme=dark] rule never applies");
+        assert!(!dark_no_stamp.contains("DARK MODE TEXT"));
+        assert!(dark_no_stamp.contains("MEDIA DARK TEXT"), "prefers-color-scheme is scheme-driven independent of stamping");
+    }
+
     #[test]
     fn resolve_url_passes_through_http_and_file_schemes() {
         assert_eq!(resolve_url("http://example.com/x").as_str(), "http://example.com/x");

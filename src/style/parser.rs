@@ -862,6 +862,70 @@ mod tests {
         }
     }
 
+    // ---- T1b: attribute selectors ([attr], [attr=value]) ---------------------
+    // (packet t1b-color-scheme: `html[data-theme="dark"]` -- the no-JS theme
+    // hook `main.rs` stamps pre-cascade -- needs to actually parse AND match,
+    // unlike the pre-T1b "always unsupported" treatment `a[href='x']` above
+    // still (correctly) exercises for an ELEMENT mismatch, not an attribute
+    // one.)
+
+    #[test]
+    fn attribute_equals_selector_matches_the_stamped_root_html_element() {
+        let dom = crate::dom::parser::parse(r#"<html data-theme="dark"><body><p>t</p></body></html>"#);
+        let sheet = parse(r#"html[data-theme="dark"] p { color: red; }"#);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_eq!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn attribute_equals_selector_does_not_match_a_different_value() {
+        let dom = crate::dom::parser::parse(r#"<html data-theme="light"><body><p>t</p></body></html>"#);
+        let sheet = parse(r#"html[data-theme="dark"] p { color: red; }"#);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_ne!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn attribute_presence_selector_matches_regardless_of_value() {
+        let dom = crate::dom::parser::parse(r#"<p data-x="anything">t</p>"#);
+        let sheet = parse("p[data-x] { color: red; }");
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_eq!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn attribute_presence_selector_does_not_match_when_absent() {
+        let dom = crate::dom::parser::parse("<p>t</p>");
+        let sheet = parse("p[data-x] { color: red; }");
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_ne!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn attribute_selector_with_an_unsupported_operator_fails_closed() {
+        // `~=` (and `^=`/`$=`/`*=`/`|=`) are outside the curated subset --
+        // must never match, same C2 fail-closed treatment as the rest of
+        // this module's unsupported selector constructs.
+        let dom = crate::dom::parser::parse(r#"<p class="x">t</p>"#);
+        let sheet = parse(r#"p[class~="x"] { color: red; }"#);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_ne!(styles[p].color, Color::rgb(255, 0, 0), "~= is out of the curated subset and must fail closed");
+    }
+
+    #[test]
+    fn unterminated_attribute_selector_does_not_panic() {
+        // Totality sweep target: a malformed/unterminated `[` must recover
+        // (skip to EOF), never panic or hang.
+        for css in ["p[ { color: red; }", "p[data-x", "p[data-x=", "p[data-x=\"unterminated"] {
+            let _ = parse(css);
+        }
+    }
+
     #[test]
     fn does_not_panic_on_malformed_css_sweep() {
         let inputs = [

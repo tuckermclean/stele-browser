@@ -265,4 +265,37 @@ mod tests {
         assert_eq!(info.classes, vec!["bar".to_string(), "baz".to_string()]);
         assert!(info.has_href);
     }
+
+    // ---- T1b: attribute selectors ([attr], [attr=value]) ---------------------
+    // (packet t1b-color-scheme: `html[data-theme="dark"]` needs to actually
+    // match once `main.rs` stamps that attribute pre-cascade -- see
+    // `Compound.attrs`/`AttrSelector`/`AttrMatch` below.)
+
+    fn info_with_attr(name: &str, attr_name: &str, attr_value: &str) -> ElementInfo {
+        let mut attrs = AttrMap::new();
+        attrs.set(attr_name, attr_value);
+        ElementInfo::from_element(&ElementName::new(name), &attrs)
+    }
+
+    #[test]
+    fn attr_present_selector_matches_when_the_attribute_exists() {
+        let c = Compound {
+            attrs: vec![AttrSelector { name: "data-theme".into(), match_: AttrMatch::Present }],
+            ..Compound::default()
+        };
+        assert!(c.matches(&info_with_attr("html", "data-theme", "dark")));
+        assert!(!c.matches(&info("html", None, &[], false)));
+    }
+
+    #[test]
+    fn attr_equals_selector_matches_only_the_exact_value() {
+        let c = Compound {
+            element: Some("html".into()),
+            attrs: vec![AttrSelector { name: "data-theme".into(), match_: AttrMatch::Equals("dark".into()) }],
+            ..Compound::default()
+        };
+        assert!(c.matches(&info_with_attr("html", "data-theme", "dark")));
+        assert!(!c.matches(&info_with_attr("html", "data-theme", "light")));
+        assert!(!c.matches(&info("html", None, &[], false)));
+    }
 }

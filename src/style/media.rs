@@ -458,6 +458,78 @@ mod tests {
         assert!(q.matches(1_000_000.0));
     }
 
+    // ---- T1b: prefers-color-scheme / ColorScheme --------------------------
+    // (packet t1b-color-scheme: httpforever.com-style no-JS pages toggle dark
+    // mode purely via a `data-theme` attribute a theme-toggle script sets,
+    // with NO `@media (prefers-color-scheme)` fallback -- `--color-scheme`
+    // gives Stele a way to pick a scheme anyway. This block covers the
+    // standards-correct primitive: the media feature itself.)
+
+    #[test]
+    fn prefers_color_scheme_dark_matches_only_under_dark_scheme() {
+        let q = query("(prefers-color-scheme: dark)");
+        assert!(q.matches(320.0, ColorScheme::Dark));
+        assert!(!q.matches(320.0, ColorScheme::Light));
+    }
+
+    #[test]
+    fn prefers_color_scheme_light_matches_only_under_light_scheme() {
+        let q = query("(prefers-color-scheme: light)");
+        assert!(q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Dark));
+    }
+
+    #[test]
+    fn color_scheme_parse_auto_resolves_to_light() {
+        // No OS/JS signal exists in this renderer -- `auto` resolving to
+        // `Light` is the documented, honest default (see `ColorScheme::parse`'s
+        // own doc comment).
+        assert_eq!(ColorScheme::parse("auto"), ColorScheme::Light);
+        assert_eq!(ColorScheme::parse("AUTO"), ColorScheme::Light);
+    }
+
+    #[test]
+    fn color_scheme_parse_dark_and_light_case_insensitively() {
+        assert_eq!(ColorScheme::parse("dark"), ColorScheme::Dark);
+        assert_eq!(ColorScheme::parse("Dark"), ColorScheme::Dark);
+        assert_eq!(ColorScheme::parse("DARK"), ColorScheme::Dark);
+        assert_eq!(ColorScheme::parse("light"), ColorScheme::Light);
+        assert_eq!(ColorScheme::parse("Light"), ColorScheme::Light);
+    }
+
+    #[test]
+    fn color_scheme_parse_garbage_falls_back_to_light_not_a_panic() {
+        for v in ["", "!!!garbage!!!", "darkness", " dark ", "\0\0\0"] {
+            let _ = ColorScheme::parse(v); // must not panic
+        }
+        assert_eq!(ColorScheme::parse("nonsense"), ColorScheme::Light);
+        assert_eq!(ColorScheme::parse(""), ColorScheme::Light);
+    }
+
+    #[test]
+    fn prefers_color_scheme_unknown_value_fails_closed() {
+        let q = query("(prefers-color-scheme: turquoise)");
+        assert!(!q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Dark));
+    }
+
+    #[test]
+    fn prefers_color_scheme_combines_with_width_via_and() {
+        let q = query("(min-width: 800px) and (prefers-color-scheme: dark)");
+        assert!(q.matches(1024.0, ColorScheme::Dark));
+        assert!(!q.matches(1024.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Dark));
+    }
+
+    #[test]
+    fn prefers_color_scheme_malformed_value_does_not_panic() {
+        for cond in ["(prefers-color-scheme:)", "(prefers-color-scheme: )", "(prefers-color-scheme: 800px)", "(prefers-color-scheme"] {
+            let q = query(cond);
+            assert!(!q.matches(320.0, ColorScheme::Light), "for {cond:?}");
+            assert!(!q.matches(320.0, ColorScheme::Dark), "for {cond:?}");
+        }
+    }
+
     // ---- flatten_media ----------------------------------------------------
 
     use crate::style::parser::parse;
@@ -485,6 +557,15 @@ mod tests {
         let flat = flatten_media(&sheet, 320.0);
         assert_eq!(flat.media_at_rules, sheet.media_at_rules);
         assert_eq!(flat.ignored_at_rules, sheet.ignored_at_rules);
+    }
+
+    #[test]
+    fn flatten_media_respects_color_scheme() {
+        let sheet = parse("@media (prefers-color-scheme: dark) { p { color: red } } p { color: blue }");
+        let dark = flatten_media(&sheet, 320.0, ColorScheme::Dark);
+        assert_eq!(dark.rules.len(), 2, "the dark-gated block should be included under a dark scheme");
+        let light = flatten_media(&sheet, 320.0, ColorScheme::Light);
+        assert_eq!(light.rules.len(), 1, "the dark-gated block should be excluded under a light scheme");
     }
 
     #[test]

@@ -212,4 +212,59 @@ mod tests {
         assert_eq!(a.get("missing"), None);
         assert_eq!(a.len(), 1);
     }
+
+    // ---- T1b: AttrMap::set_overwrite / Dom::set_attribute --------------------
+    // (packet t1b-color-scheme: the `--color-scheme` pre-cascade `data-theme`/
+    // `data-mode` root stamp needs an OVERWRITE-semantics attribute setter,
+    // unlike `AttrMap::set`'s parse-time first-value-wins rule.)
+
+    #[test]
+    fn set_overwrite_replaces_an_existing_value_case_insensitively() {
+        let mut a = AttrMap::new();
+        a.set("data-theme", "light");
+        a.set_overwrite("DATA-THEME", "dark");
+        assert_eq!(a.get("data-theme"), Some("dark"));
+        assert_eq!(a.len(), 1, "overwrite must not add a duplicate pair");
+    }
+
+    #[test]
+    fn set_overwrite_inserts_when_the_attribute_is_absent() {
+        let mut a = AttrMap::new();
+        a.set_overwrite("data-mode", "dark");
+        assert_eq!(a.get("data-mode"), Some("dark"));
+        assert_eq!(a.len(), 1);
+    }
+
+    #[test]
+    fn dom_set_attribute_overwrites_the_root_elements_attribute() {
+        let mut dom = Dom::new();
+        let root = dom.root();
+        dom.set_attribute(root, "data-theme", "dark");
+        dom.set_attribute(root, "data-theme", "light");
+        let el = dom.node(root).element().expect("root is an element");
+        assert_eq!(el.attrs.get("data-theme"), Some("light"));
+    }
+
+    #[test]
+    fn dom_set_attribute_sets_a_fresh_attribute_when_absent() {
+        let mut dom = Dom::new();
+        let root = dom.root();
+        dom.set_attribute(root, "data-mode", "dark");
+        let el = dom.node(root).element().expect("root is an element");
+        assert_eq!(el.attrs.get("data-mode"), Some("dark"));
+    }
+
+    #[test]
+    fn dom_set_attribute_is_a_total_noop_on_an_out_of_range_id() {
+        let mut dom = Dom::new();
+        dom.set_attribute(9999, "data-theme", "dark"); // must not panic
+    }
+
+    #[test]
+    fn dom_set_attribute_is_a_noop_on_a_text_node() {
+        let mut dom = Dom::new();
+        let text = dom.new_text("hi".to_string());
+        dom.set_attribute(text, "data-theme", "dark"); // must not panic
+        assert_eq!(dom.node(text).text(), Some("hi"));
+    }
 }
