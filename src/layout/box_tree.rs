@@ -1029,18 +1029,18 @@ fn alpha_ordinal(n: i64, upper: bool) -> String {
 //     type=button>`, and `<button>` (any/no `type`): `[ <label> ]` --
 //     spaced brackets, distinct from the tight text-field brackets so a
 //     document with both a text field and a submit button doesn't read as
-//     visually identical. Label priority: `value` attribute, else (for
-//     `<button>` only, which can hold markup) its child text, else a
-//     default ("Submit" for submit/image/`<button>`, "Reset" for reset,
-//     "Button" for the `button` input type).
-//
-//     KNOWN BUG (T4/D4, red commit): this priority order invents a word the
-//     author never wrote whenever a control has neither `value` nor child
-//     text -- e.g. an icon-only `<button type=button aria-label="Theme">`
-//     (httpforever's theme/colour switcher) renders `[ Submit ]`, a
-//     fabricated label for a control that isn't even a submit button. The
-//     tests below encode the honest replacement contract; the fix lands in
-//     the paired green commit.
+//     visually identical. Label resolution (T4 button-honesty amendment --
+//     see `resolve_bracket_label`'s own doc comment for the full rationale;
+//     this replaced an earlier "value, else child text, else always-
+//     'Submit'" rule that invented a word for controls the author never
+//     labeled, e.g. an icon-only `<button type=button aria-label="Theme">`):
+//     first non-empty of (1) the element's own text content, (2) its
+//     `value` attribute, (3) its `aria-label` attribute, (4) its `title`
+//     attribute, (5) the literal "Submit" -- ONLY for a genuine submit
+//     control (`type=submit|image`, or a `<button>` whose effective type is
+//     `submit`) sitting inside an enclosing `<form>`, matching real
+//     browsers' own UA default for that one case -- else (6) empty (`[ ]`),
+//     never an invented word.
 //   - `<input type=hidden>`: no box, no text at all -- hidden really means
 //     invisible, even in a text-mode dump.
 //   - `<textarea>`: its own text content verbatim if short and single-line;
@@ -1102,7 +1102,7 @@ fn is_form_control(el: &Element) -> bool {
 /// which gives every child its own node instead of folding it), so its own
 /// `Box` fragment carries the marker as well either way.
 fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle, form_action: Option<&str>) -> Option<LayoutNode> {
-    let label = control_label(dom, el)?;
+    let label = control_label(dom, el, form_action)?;
     let interactive = Interactive::FormControl {
         kind: control_kind(el).into_boxed_str(),
         name: el.attrs.get("name").map(|s| s.to_string().into_boxed_str()),
@@ -1140,17 +1140,23 @@ fn control_kind(el: &Element) -> String {
     }
 }
 
-fn control_label(dom: &Dom, el: &Element) -> Option<String> {
+fn control_label(dom: &Dom, el: &Element, form_action: Option<&str>) -> Option<String> {
     match el.name.as_str() {
-        "input" => input_label(el),
-        "button" => Some(bracket_spaced(&button_label(dom, el))),
+        "input" => input_label(el, form_action),
+        "button" => Some(bracket_spaced(&button_label(dom, el, form_action))),
         "textarea" => Some(textarea_label(dom, el)),
         "select" => Some(select_label(dom, el)),
         _ => None,
     }
 }
 
-fn input_label(el: &Element) -> Option<String> {
+/// `<input>` is a void element -- it can never carry child text -- so this
+/// takes no `dom` reference at all (unlike `button_label`, which needs the
+/// tree to walk a `<button>`'s children). Rung (1) of `resolve_bracket_label`
+/// (`own_text`) is passed as `""` for every `<input>` variant below,
+/// meaning rungs (2)-(6) (`value`, `aria-label`, `title`, the submit
+/// default, empty) are the only ones ever in play here.
+fn input_label(el: &Element, form_action: Option<&str>) -> Option<String> {
     let ty = el.attrs.get("type").unwrap_or("text").to_ascii_lowercase();
     Some(match ty.as_str() {
         "hidden" => return None,
@@ -1168,9 +1174,13 @@ fn input_label(el: &Element) -> Option<String> {
                 "( )".to_string()
             }
         }
-        "submit" | "image" => bracket_spaced(&attr_or(el, "value", "Submit")),
-        "reset" => bracket_spaced(&attr_or(el, "value", "Reset")),
-        "button" => bracket_spaced(&attr_or(el, "value", "Button")),
+        // `submit`/`image` are the only `<input>` types that count as a
+        // genuine submit control for `resolve_bracket_label`'s rung (5)
+        // ("Submit") default -- an `<input type=image>` submits the form
+        // exactly like a `type=submit` one, just with a graphical face.
+        "submit" | "image" => bracket_spaced(&resolve_bracket_label(el, "", form_action.is_some())),
+        "reset" => bracket_spaced(&resolve_bracket_label(el, "", false)),
+        "button" => bracket_spaced(&resolve_bracket_label(el, "", false)),
         "password" => bracket_tight(&password_mask(el)),
         // text/search/email/url/tel/number, and any unrecognized/future
         // type, all render as a plain text field.
@@ -1182,14 +1192,61 @@ fn bracket_tight(s: &str) -> String {
     format!("[{s}]")
 }
 
+/// `[ <label> ]`, spaced brackets -- see the module's "Placeholder
+/// convention" doc section. An empty label collapses to the bare `[ ]`
+/// (single space, matching the unchecked-checkbox convention) rather than
+/// `[  ]` (two spaces around nothing) -- this is `resolve_bracket_label`'s
+/// rung (6) landing here, an honest empty control, never invented text.
 fn bracket_spaced(s: &str) -> String {
-    format!("[ {s} ]")
+    if s.is_empty() {
+        "[ ]".to_string()
+    } else {
+        format!("[ {s} ]")
+    }
 }
 
-fn attr_or(el: &Element, name: &str, default: &str) -> String {
-    match el.attrs.get(name) {
-        Some(v) if !v.is_empty() => v.to_string(),
-        _ => default.to_string(),
+/// Author-honest label resolution for every bracket-spaced control
+/// (`<button>`, `<input type=submit|image|reset|button>`) -- the T4
+/// button-honesty amendment. Stele must never invent a word the author
+/// didn't write (D4: httpforever's icon-only `<button type=button
+/// aria-label="Theme">` was rendering as `[ Submit ]`, a fabricated label
+/// for a control that isn't even a submit button). Rungs, in order --
+/// first non-empty wins:
+///   1. `own_text` -- the element's own text content (empty for a void
+///      `<input>`, which can never have children; only `<button>` ever
+///      supplies a non-empty value here),
+///   2. the `value` attribute,
+///   3. the `aria-label` attribute -- author-provided, exactly what an
+///      icon-only button carries in the wild,
+///   4. the `title` attribute,
+///   5. ONLY when `is_submit_default` is true -- the literal "Submit",
+///      matching every real browser's own UA default for an actual submit
+///      control (`type=submit|image`, or a `<button>` whose effective type
+///      is `submit`) with no author-supplied label. Callers gate this on
+///      the control also sitting inside an enclosing `<form>`
+///      (`form_action.is_some()`) -- a submit-typed control with no form to
+///      submit is, semantically, no more a "Submit" button than a bare
+///      `type=button` one, so inventing that word for it would be exactly
+///      the D4 bug in a different costume,
+///   6. otherwise empty -- `bracket_spaced`'s own empty-string branch turns
+///      this into the bare `[ ]`, never a fabricated word.
+fn resolve_bracket_label(el: &Element, own_text: &str, is_submit_default: bool) -> String {
+    let trimmed_text = own_text.trim();
+    if !trimmed_text.is_empty() {
+        return trimmed_text.to_string();
+    }
+    for attr in ["value", "aria-label", "title"] {
+        if let Some(v) = el.attrs.get(attr) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    if is_submit_default {
+        "Submit".to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -1224,24 +1281,21 @@ fn password_mask(el: &Element) -> String {
     }
 }
 
-/// `<button>`'s label: an explicit `value` attribute wins if present
-/// (mirroring `<input type=submit>`'s own value-attribute-first rule so the
-/// two stay consistent), else the button's own child text (it's the one
-/// form control that can hold markup/text content), else "Submit" -- HTML's
-/// own default `type` for a `<button>` with no `type` attribute at all.
-fn button_label(dom: &Dom, el: &Element) -> String {
-    if let Some(v) = el.attrs.get("value") {
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
+/// `<button>`'s label: see `resolve_bracket_label`'s doc comment for the
+/// full rung order (own text, then `value`, then `aria-label`, then
+/// `title`, then -- only for a submit-typed button inside a `<form>` --
+/// the literal "Submit"). `<button>` is the one form control that can hold
+/// markup/text content, so it's also the one control kind whose rung (1)
+/// (`own_text`, via `dom_util::collect_text`) is ever non-empty; every
+/// `<input>` variant is a void element and always passes `""` for that
+/// rung instead (see `input_label`). A `<button>`'s effective type --
+/// `control_kind`'s own default ("submit" absent a `type` attribute,
+/// matching HTML's own default) -- decides whether rung (5) is even in
+/// play.
+fn button_label(dom: &Dom, el: &Element, form_action: Option<&str>) -> String {
     let text = dom_util::collect_text(dom, el);
-    let trimmed = text.trim();
-    if !trimmed.is_empty() {
-        trimmed.to_string()
-    } else {
-        "Submit".to_string()
-    }
+    let is_submit_default = control_kind(el) == "submit" && form_action.is_some();
+    resolve_bracket_label(el, &text, is_submit_default)
 }
 
 /// See the module-level "Placeholder convention" doc comment above for the
