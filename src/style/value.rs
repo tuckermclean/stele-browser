@@ -1243,6 +1243,96 @@ fn parse_border_raw(tokens: &[Token]) -> Option<BorderRaw> {
     Some(b)
 }
 
+/// `font` shorthand (CSS2.1 §15.3): `[ <font-style> || <font-weight> ]?
+/// <font-size> [ / <line-height> ]? <font-family>`. Curated like `border`/
+/// `background` above: extracts font-size (this shorthand's mandatory
+/// component, and the whole reason this function exists — see this
+/// function's caller-site comment in `apply_property` for the bug this
+/// closes), plus font-family/line-height/font-style/font-weight wherever
+/// present. `font-variant` and the CSS2.1 system-font keywords (`caption`/
+/// `icon`/`menu`/`message-box`/`small-caption`/`status-bar`) are NOT
+/// recognized — no fixture in this repo uses them, and (unlike `border`'s
+/// "any bad token invalidates everything" rule) an unrecognized token here
+/// before the size is found is just skipped, not fatal: font-family lists
+/// routinely carry punctuation/keywords this loop doesn't special-case, and
+/// being lenient about the leading style/weight/variant slot matches
+/// `background`'s "apply what we understood" precedent instead of
+/// `border`'s stricter one.
+///
+/// A missing font-size fails the WHOLE shorthand (`None`) — real CSS
+/// invalidates `font: bold sans-serif` outright rather than half-applying
+/// it, since font-size has no default to fall back to within the
+/// shorthand's own grammar.
+fn apply_font_shorthand(tokens: &[Token], d: &mut Declarations) -> bool {
+    let mut size: Option<RawLength> = None;
+    let mut weight: Option<FontWeight> = None;
+    let mut style: Option<FontStyle> = None;
+    let mut line_height: Option<RawLineHeight> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if let Token::Ident(s) = t {
+            match s.to_ascii_lowercase().as_str() {
+                "italic" | "oblique" => {
+                    style = Some(FontStyle::Italic);
+                    i += 1;
+                    continue;
+                }
+                "bold" | "bolder" => {
+                    weight = Some(FontWeight::Bold);
+                    i += 1;
+                    continue;
+                }
+                "lighter" => {
+                    weight = Some(FontWeight::Normal);
+                    i += 1;
+                    continue;
+                }
+                _ => {} // font-variant/"normal"/system-font keyword/garbage: skip, see doc comment
+            }
+        } else if let Token::Number(n) = t {
+            // A bare number before the size is a numeric font-weight
+            // (100-900) — `token_to_raw_length` never parses a nonzero
+            // `Number` token (only Dimension/Percentage/unitless-0), so
+            // this is unambiguous with the size search below.
+            weight = Some(if *n >= 600.0 { FontWeight::Bold } else { FontWeight::Normal });
+            i += 1;
+            continue;
+        } else if let Some(l) = token_to_raw_length(t) {
+            size = Some(l);
+            i += 1;
+            if i < tokens.len() && tokens[i] == Token::Delim('/') {
+                i += 1;
+                if let Some(lh_tok) = tokens.get(i) {
+                    line_height = match lh_tok {
+                        Token::Ident(s) if s.eq_ignore_ascii_case("normal") => Some(RawLineHeight::Normal),
+                        Token::Number(n) => Some(RawLineHeight::Number(*n)),
+                        other => token_to_raw_length(other).map(RawLineHeight::Length),
+                    };
+                    i += 1;
+                }
+            }
+            break; // everything after size[/line-height] is the font-family list
+        }
+        i += 1;
+    }
+    let Some(size) = size else { return false }; // font-size is mandatory
+    d.font_size = Some(size);
+    if let Some(w) = weight {
+        d.font_weight = Some(w);
+    }
+    if let Some(s) = style {
+        d.font_style = Some(s);
+    }
+    if let Some(lh) = line_height {
+        d.line_height = Some(lh);
+    }
+    if let Some(f) = classify_font_family(&tokens[i..]) {
+        d.font_family = Some(f);
+    }
+    true
+}
+
 /// Apply one already-lowercased property `name` with its (whitespace-
 /// filtered) value tokens onto `d`. Returns whether it was recognized *and*
 /// parsed successfully — the caller counts `false` against
@@ -1287,6 +1377,11 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             let image = parse_background_image_component(tokens).map(|u| d.background_image = Some(u.into_boxed_str())).is_some();
             color || image
         }
+        // `font` shorthand (packet/acid1-coherence): see `apply_font_
+        // shorthand`'s own doc comment above for the grammar it covers and
+        // the bug this closes (`html { font: 10px/1 ... }` used to parse as
+        // nothing at all, leaving font-size at the UA default).
+        "font" => apply_font_shorthand(tokens, d),
         "font-family" => classify_font_family(tokens).map(|f| d.font_family = Some(f)).is_some(),
         "font-size" => tokens.first().and_then(token_to_raw_length).map(|l| d.font_size = Some(l)).is_some(),
         "font-weight" => match tokens.first() {
@@ -2202,6 +2297,68 @@ mod tests {
         assert!(!apply_property("background", &toks("bogus"), &mut d));
         assert_eq!(d.background_color, None);
         assert_eq!(d.background_image, None);
+    }
+
+    // ------------------------------------------------- font shorthand (D-acid1)
+    //
+    // packet/acid1-coherence: `html { font: 10px/1 Verdana, sans-serif }`
+    // (fixtures/css1-float-5526c.html) used to be silently DROPPED whole —
+    // `apply_property` had longhands for `font-family`/`font-size`/`font-
+    // weight`/`font-style` but no `"font"` arm at all, so it fell to the
+    // catch-all `_ => false` and counted as an ignored declaration. The
+    // practical effect: `html`'s font-size never left the UA default
+    // (16px), so EVERY `em` length in the whole document (including this
+    // fixture's own `width: 10.638%`/`41.17%`, which resolve against an
+    // `em`-sized ancestor) computed 1.6x too large against an 800px fixed
+    // viewport — see fixtures/evidence/css1-float-5526c.diagnosis.md's
+    // follow-up note for the pixel-measurement trail that found this.
+
+    #[test]
+    fn font_shorthand_extracts_size_and_family() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("10px/1 Verdana, sans-serif"), &mut d));
+        assert_eq!(d.font_size, Some(RawLength::Px(10.0)));
+        assert_eq!(d.line_height, Some(RawLineHeight::Number(1.0)));
+        assert_eq!(d.font_family, Some(FontFamily::SansSerif));
+    }
+
+    #[test]
+    fn font_shorthand_size_without_line_height_or_family() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("1em"), &mut d));
+        assert_eq!(d.font_size, Some(RawLength::Em(1.0)));
+        assert_eq!(d.line_height, None);
+        assert_eq!(d.font_family, None);
+    }
+
+    #[test]
+    fn font_shorthand_extracts_leading_style_and_weight() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("italic bold 12px sans-serif"), &mut d));
+        assert_eq!(d.font_style, Some(FontStyle::Italic));
+        assert_eq!(d.font_weight, Some(FontWeight::Bold));
+        assert_eq!(d.font_size, Some(RawLength::Px(12.0)));
+        assert_eq!(d.font_family, Some(FontFamily::SansSerif));
+    }
+
+    #[test]
+    fn font_shorthand_percent_line_height() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("12px/150% serif"), &mut d));
+        assert_eq!(d.line_height, Some(RawLineHeight::Length(RawLength::Percent(150.0))));
+    }
+
+    #[test]
+    fn font_shorthand_without_a_size_is_not_applied() {
+        // Real CSS: font-size is mandatory in the `font` shorthand — a
+        // value with none invalidates the whole declaration (same
+        // total-parse-failure rule `parse_border_raw` documents for
+        // `border`, just triggered by a missing mandatory component instead
+        // of a bad token).
+        let mut d = Declarations::default();
+        assert!(!apply_property("font", &toks("bold sans-serif"), &mut d));
+        assert_eq!(d.font_size, None);
+        assert_eq!(d.font_family, None);
     }
 
     // ------------------------------------------- background-image (bg-image)
