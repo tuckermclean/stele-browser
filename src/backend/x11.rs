@@ -361,6 +361,11 @@ pub fn encode_map_window(window: u32) -> Vec<u8> {
 /// with NO window manager, so a freshly-mapped window never receives keyboard
 /// focus on its own — without this, KeyPress events (including `q`/Escape)
 /// never reach us and the only way out is a reboot. 12 bytes; length = 3.
+///
+/// IMPORTANT — caller must not send this immediately after `MapWindow`: the
+/// window isn't viewable yet at that point and a real server replies
+/// `BadMatch`. `main.rs`'s `run_x11` instead sends it on the FIRST `Expose`
+/// event, which only arrives once the window is actually viewable.
 pub fn encode_set_input_focus(window: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
     out.push(42); // opcode: SetInputFocus
@@ -437,22 +442,22 @@ pub fn encode_put_image(drawable: u32, gc: u32, width: u16, height: u16, dst_x: 
 /// server's advertised `maximum-request-length` (from [`SetupInfo`]).
 ///
 /// `dst_y_base` offsets every band's `dst-y` in the drawable — band `N`
-/// lands at drawable row `dst_y_base + <row offset within image_data>`, not
-/// row `0`. This lets a caller blit a cropped strip (e.g. a scroll's
-/// newly-revealed rows) at an arbitrary window row instead of always at the
-/// top; pass `0` to reproduce the original top-of-drawable behavior.
+/// (rows `[N*rows_per_band, ...)` of `image_data`) lands at drawable row
+/// `dst_y_base + N*rows_per_band`, not row `0`. This lets a caller blit a
+/// cropped strip (e.g. a scroll's newly-revealed rows) at an arbitrary
+/// window row instead of always at the top; pass `0` to reproduce the
+/// original top-of-drawable behavior.
 ///
 /// Total: `row_stride == 0` or `total_height == 0` produces no requests
 /// (nothing to send) rather than dividing by zero or looping forever; a
 /// `max_request_length_words` too small to fit even ONE row's header+data
 /// still makes forward progress (`rows_per_band` is floored at `1`) rather
-/// than looping without ever advancing `row`.
-///
-/// TODO(packet/x11-perf): `dst_y_base` is currently IGNORED — every band
-/// still lands at row `0` + its own offset, same as before this parameter
-/// existed. Failing tests: `put_image_requests_dst_y_base_offsets_every_band`.
+/// than looping without ever advancing `row`; `dst_y_base` is combined with
+/// the running row offset via `saturating_add` so an (unrealistic)
+/// caller-supplied offset near `i16::MAX` can't wrap into a bogus negative
+/// `dst-y`.
 #[allow(clippy::too_many_arguments)]
-pub fn put_image_requests(drawable: u32, gc: u32, width: u16, total_height: u16, depth: u8, image_data: &[u8], row_stride: usize, max_request_length_words: u32, _dst_y_base: i16) -> Vec<Vec<u8>> {
+pub fn put_image_requests(drawable: u32, gc: u32, width: u16, total_height: u16, depth: u8, image_data: &[u8], row_stride: usize, max_request_length_words: u32, dst_y_base: i16) -> Vec<Vec<u8>> {
     if row_stride == 0 || total_height == 0 {
         return Vec::new();
     }
@@ -469,7 +474,8 @@ pub fn put_image_requests(drawable: u32, gc: u32, width: u16, total_height: u16,
         let start = (row * row_stride).min(image_data.len());
         let end = ((row + band_rows) * row_stride).min(image_data.len());
         let band_data = &image_data[start..end];
-        out.push(encode_put_image(drawable, gc, width, band_rows as u16, 0, row as i16, depth, band_data));
+        let dst_y = dst_y_base.saturating_add(row.min(i16::MAX as usize) as i16);
+        out.push(encode_put_image(drawable, gc, width, band_rows as u16, 0, dst_y, depth, band_data));
         row += band_rows;
     }
     out
@@ -484,14 +490,28 @@ const OP_COPY_AREA: u8 = 62;
 /// Encode a `CopyArea` request (opcode 62): server-side copy of a
 /// `width x height` rectangle from `(src_x, src_y)` on `src_drawable` to
 /// `(dst_x, dst_y)` on `dst_drawable`, using `gc`. Fixed-size, 28 bytes
-/// (request length 7 words).
+/// (request length 7 words) — unlike `PutImage` this never carries a
+/// caller-supplied data payload, so there is no banding/pad concern here.
 ///
-/// TODO(packet/x11-perf): not yet implemented. Failing tests:
-/// `encode_copy_area_produces_exact_bytes`,
-/// `encode_copy_area_negative_coordinates_round_trip`.
+/// This is the server-side scroll primitive: retained window content that's
+/// simply moving up or down a few rows never needs to cross the wire again
+/// — only the newly-exposed strip does (see `main.rs`'s `scroll_blit`).
 #[allow(clippy::too_many_arguments)]
-pub fn encode_copy_area(_src_drawable: u32, _dst_drawable: u32, _gc: u32, _src_x: i16, _src_y: i16, _dst_x: i16, _dst_y: i16, _width: u16, _height: u16) -> Vec<u8> {
-    todo!("encode_copy_area: packet/x11-perf CopyArea encoder not yet implemented")
+pub fn encode_copy_area(src_drawable: u32, dst_drawable: u32, gc: u32, src_x: i16, src_y: i16, dst_x: i16, dst_y: i16, width: u16, height: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(28);
+    out.push(OP_COPY_AREA);
+    out.push(0); // unused
+    out.extend_from_slice(&7u16.to_le_bytes()); // request length: 28 bytes / 4
+    out.extend_from_slice(&src_drawable.to_le_bytes());
+    out.extend_from_slice(&dst_drawable.to_le_bytes());
+    out.extend_from_slice(&gc.to_le_bytes());
+    out.extend_from_slice(&src_x.to_le_bytes());
+    out.extend_from_slice(&src_y.to_le_bytes());
+    out.extend_from_slice(&dst_x.to_le_bytes());
+    out.extend_from_slice(&dst_y.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out
 }
 
 // =========================================================================
@@ -639,7 +659,7 @@ pub fn describe_x_error(buf: &[u8]) -> String {
     };
     let req_name = match major {
         1 => "CreateWindow", 8 => "MapWindow", 42 => "SetInputFocus", 55 => "CreateGC",
-        72 => "PutImage", 101 => "GetKeyboardMapping", _ => "other",
+        62 => "CopyArea", 72 => "PutImage", 101 => "GetKeyboardMapping", _ => "other",
     };
     format!("{code_name}({code}) on {req_name}(major={major},minor={minor}) seq={seq} bad=0x{bad:08x}")
 }
@@ -823,6 +843,9 @@ impl XConnection {
 
     /// Give keyboard focus to `window` — required under a WM-less server
     /// (Xfbdev) so KeyPress events (q/Escape/scroll keys) actually arrive.
+    /// Must only be called once `window` is viewable (e.g. after the first
+    /// `Expose`) — calling it right after `MapWindow` gets `BadMatch` from a
+    /// real server, since the window isn't viewable yet at that point.
     pub fn set_input_focus(&mut self, window: u32) -> Result<(), String> {
         self.send(&encode_set_input_focus(window))
     }
