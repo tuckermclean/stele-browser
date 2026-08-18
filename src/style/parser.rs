@@ -1,10 +1,13 @@
 //! CSS parsing (P2, Wave 1). Full syntax is parsed; unknown declarations are
 //! counted and dropped (the IGNORE-UNKNOWN treaty, charter C2). Selectors in
 //! scope: element, `.class`, `#id`, descendant, grouping, `a:link`/`:visited`
-//! (brief §4).
+//! (brief §4), plus (packet t1b-color-scheme) the two simplest attribute
+//! selectors `[attr]`/`[attr=value]` — see `style::selector::AttrMatch`'s
+//! doc comment for exactly which attribute-selector operators are and
+//! aren't in scope.
 
 use crate::style::media::MediaQuery;
-use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
+use crate::style::selector::{AttrMatch, AttrSelector, Compound, ElementInfo, Pseudo, Selector};
 use crate::style::tokenizer::{tokenize, Token};
 use crate::style::value::{self, Declarations};
 
@@ -447,15 +450,71 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Delim('[') => {
-                supported = false;
-                *pos += 1;
-                while *pos < len && tokens[*pos] != Token::Delim(']') {
-                    *pos += 1;
+                // Packet t1b-color-scheme: `[attr]` (presence) and
+                // `[attr=value]`/`[attr="value"]` (exact match) are parsed
+                // into a real `AttrSelector`; every other attribute-selector
+                // shape (`~=`, `^=`, `$=`, `*=`, `|=`, an `i` flag, a
+                // missing/malformed name or value, an unterminated `[`)
+                // falls through to the same "mark unsupported, skip to the
+                // matching `]` (or EOF)" recovery this arm always used —
+                // charter C2's fail-closed treatment, now scoped to just the
+                // UNSUPPORTED attribute-selector shapes instead of all of them.
+                if pending_descendant {
+                    flush!();
+                    pending_descendant = false;
                 }
-                if *pos < len {
+                *pos += 1; // consume '['
+                skip_ws(tokens, pos);
+                let name = if let Some(Token::Ident(n)) = tokens.get(*pos) {
+                    let n = n.to_ascii_lowercase();
                     *pos += 1;
+                    Some(n)
+                } else {
+                    None
+                };
+                skip_ws(tokens, pos);
+
+                let mut attr_ok = name.is_some();
+                let mut attr_match = AttrMatch::Present;
+                if attr_ok {
+                    match tokens.get(*pos) {
+                        Some(Token::Delim(']')) => {
+                            // `[attr]` — presence only, attr_match stays Present.
+                        }
+                        Some(Token::Delim('=')) => {
+                            *pos += 1;
+                            skip_ws(tokens, pos);
+                            match tokens.get(*pos) {
+                                Some(Token::Str(s)) => {
+                                    attr_match = AttrMatch::Equals(s.clone());
+                                    *pos += 1;
+                                }
+                                Some(Token::Ident(s)) => {
+                                    attr_match = AttrMatch::Equals(s.clone());
+                                    *pos += 1;
+                                }
+                                _ => attr_ok = false, // missing/malformed value
+                            }
+                        }
+                        _ => attr_ok = false, // ~=, ^=, $=, *=, |=, or malformed
+                    }
                 }
-                cur_has_content = true;
+                skip_ws(tokens, pos);
+
+                if attr_ok && tokens.get(*pos) == Some(&Token::Delim(']')) {
+                    *pos += 1; // consume ']'
+                    cur.attrs.push(AttrSelector { name: name.expect("attr_ok implies name is Some"), match_: attr_match });
+                    cur_has_content = true;
+                } else {
+                    supported = false;
+                    while *pos < len && tokens[*pos] != Token::Delim(']') {
+                        *pos += 1;
+                    }
+                    if *pos < len {
+                        *pos += 1;
+                    }
+                    cur_has_content = true;
+                }
             }
             _ => {
                 supported = false;
@@ -537,6 +596,7 @@ fn skip_to_decl_boundary(tokens: &[Token], pos: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::media::ColorScheme;
     use crate::style::computed::*;
     use crate::surface::Color;
 
@@ -788,8 +848,8 @@ mod tests {
         let media_rule = &sheet.media_rules[0];
         assert_eq!(media_rule.rules.len(), 1);
         assert_eq!(media_rule.rules[0].declarations.color, Some(Color::rgb(255, 0, 0)));
-        assert!(media_rule.query.matches(1024.0));
-        assert!(!media_rule.query.matches(640.0));
+        assert!(media_rule.query.matches(1024.0, ColorScheme::Light));
+        assert!(!media_rule.query.matches(640.0, ColorScheme::Light));
     }
 
     #[test]

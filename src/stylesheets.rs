@@ -79,7 +79,7 @@ use crate::dom::{Dom, Element, Node, NodeId};
 use crate::fetch::file::FileFetcher;
 use crate::fetch::http1::Http1Client;
 use crate::fetch::{Fetch, Request, Response, Url};
-use crate::style::{self, Stylesheet};
+use crate::style::{self, ColorScheme, Stylesheet};
 
 /// Upper bound on how many `<link rel="stylesheet">` fetch ATTEMPTS one
 /// [`collect_all_author_sheets`] call will make. Charged the moment a
@@ -112,7 +112,7 @@ pub const MAX_LINKS: usize = 32;
 /// Total: an empty DOM returns an empty `Vec`; every per-`<link>` failure
 /// mode (bad `href`, fetch error, non-CSS response, budget exhaustion) skips
 /// just that sheet — see module docs' Totality section.
-pub fn collect_all_author_sheets(dom: &Dom, base: &Url, viewport_width_px: f32) -> Vec<Stylesheet> {
+pub fn collect_all_author_sheets(dom: &Dom, base: &Url, viewport_width_px: f32, scheme: ColorScheme) -> Vec<Stylesheet> {
     let mut sheets = Vec::new();
     if dom.is_empty() {
         return sheets;
@@ -130,10 +130,10 @@ pub fn collect_all_author_sheets(dom: &Dom, base: &Url, viewport_width_px: f32) 
         match el.name.as_str() {
             "style" => {
                 let css = style_text(dom, id);
-                sheets.push(style::parse_and_flatten(&css, viewport_width_px));
+                sheets.push(style::parse_and_flatten(&css, viewport_width_px, scheme));
             }
             "link" => {
-                if let Some(sheet) = collect_link_sheet(el, base, viewport_width_px, &mut link_fetches) {
+                if let Some(sheet) = collect_link_sheet(el, base, viewport_width_px, scheme, &mut link_fetches) {
                     sheets.push(sheet);
                 }
             }
@@ -151,12 +151,12 @@ pub fn collect_all_author_sheets(dom: &Dom, base: &Url, viewport_width_px: f32) 
 /// `None` for every skip reason (not a stylesheet link, non-matching media,
 /// missing/empty href, budget exhausted, fetch failure, non-CSS response) —
 /// see module docs' Totality section.
-fn collect_link_sheet(el: &Element, base: &Url, viewport_width_px: f32, link_fetches: &mut usize) -> Option<Stylesheet> {
+fn collect_link_sheet(el: &Element, base: &Url, viewport_width_px: f32, scheme: ColorScheme, link_fetches: &mut usize) -> Option<Stylesheet> {
     if !is_stylesheet_link(el) {
         return None;
     }
     if let Some(media) = el.attrs.get("media") {
-        if !media.trim().is_empty() && !style::media_attr_matches(media, viewport_width_px) {
+        if !media.trim().is_empty() && !style::media_attr_matches(media, viewport_width_px, scheme) {
             return None;
         }
     }
@@ -170,7 +170,7 @@ fn collect_link_sheet(el: &Element, base: &Url, viewport_width_px: f32, link_fet
     *link_fetches += 1;
 
     let css = fetch_link_css(base, href)?;
-    Some(style::parse_and_flatten(&css, viewport_width_px))
+    Some(style::parse_and_flatten(&css, viewport_width_px, scheme))
 }
 
 /// Does this `<link>`'s `rel` attribute name it a stylesheet? Case-
@@ -266,14 +266,14 @@ mod tests {
     fn empty_dom_yields_no_sheets() {
         let d = dom::Dom::new();
         let base = Url::new("file:///");
-        assert!(collect_all_author_sheets(&d, &base, 320.0).is_empty());
+        assert!(collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light).is_empty());
     }
 
     #[test]
     fn no_link_or_style_yields_no_sheets() {
         let d = dom::parser::parse("<p>hello</p>");
         let base = Url::new("file:///");
-        assert!(collect_all_author_sheets(&d, &base, 320.0).is_empty());
+        assert!(collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light).is_empty());
     }
 
     // ---- external sheet applies --------------------------------------------
@@ -285,7 +285,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 1);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(255, 0, 0));
@@ -302,7 +302,7 @@ mod tests {
         let html = format!(r#"<link rel="stylesheet" href="{filename}"><p>x</p>"#);
         let d = dom::parser::parse(&html);
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 1);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(255, 0, 0));
@@ -317,7 +317,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 2);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 0, 255), "the later <style> should win the source-order tie over the earlier <link>");
@@ -330,7 +330,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 2);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 0, 255), "the later <link> should win the source-order tie over the earlier <style>");
@@ -345,12 +345,12 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let narrow = collect_all_author_sheets(&d, &base, 320.0);
+        let narrow = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(narrow.len(), 1, "narrow viewport should match the link's media query and fetch it");
         let narrow_styles = cascade::cascade(&d, &narrow);
         assert_eq!(narrow_styles[find(&d, "p")].display, Display::None);
 
-        let wide = collect_all_author_sheets(&d, &base, 1024.0);
+        let wide = collect_all_author_sheets(&d, &base, 1024.0, ColorScheme::Light);
         assert!(wide.is_empty(), "wide viewport should never even fetch a non-matching-media link");
     }
 
@@ -362,7 +362,7 @@ mod tests {
         let base = Url::new("file:///");
 
         for width in [100.0, 320.0, 1024.0, 4000.0] {
-            let sheets = collect_all_author_sheets(&d, &base, width);
+            let sheets = collect_all_author_sheets(&d, &base, width, ColorScheme::Light);
             assert_eq!(sheets.len(), 1, "no media attribute should apply at every width ({width})");
         }
     }
@@ -376,7 +376,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert!(sheets.is_empty());
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "p")].display, Display::Block, "an unmatched rel must never apply the sheet's rules");
@@ -388,7 +388,7 @@ mod tests {
         let html = format!(r#"<link href="{}"><p>x</p>"#, css_url.as_str());
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
-        assert!(collect_all_author_sheets(&d, &base, 320.0).is_empty());
+        assert!(collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light).is_empty());
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
         let html = format!(r#"<link rel="Alternate STYLESHEET" href="{}"><p>x</p>"#, css_url.as_str());
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 1);
     }
 
@@ -409,7 +409,7 @@ mod tests {
         let d = dom::parser::parse(html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         // The missing link is skipped, but the sibling <style> still applies.
         assert_eq!(sheets.len(), 1);
         let styles = cascade::cascade(&d, &sheets);
@@ -421,7 +421,7 @@ mod tests {
         let html = r#"<link rel="stylesheet" href=""><p>x</p>"#;
         let d = dom::parser::parse(html);
         let base = Url::new("file:///");
-        assert!(collect_all_author_sheets(&d, &base, 320.0).is_empty());
+        assert!(collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light).is_empty());
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
         let html = r#"<link rel="stylesheet"><p>x</p>"#;
         let d = dom::parser::parse(html);
         let base = Url::new("file:///");
-        assert!(collect_all_author_sheets(&d, &base, 320.0).is_empty());
+        assert!(collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light).is_empty());
     }
 
     #[test]
@@ -437,7 +437,7 @@ mod tests {
         let html = r#"<link rel="stylesheet" href="ftp://example.com/x.css"><p>x</p>"#;
         let d = dom::parser::parse(html);
         let base = Url::new("file:///");
-        assert!(collect_all_author_sheets(&d, &base, 320.0).is_empty());
+        assert!(collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light).is_empty());
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
         let html = format!(r#"<link rel="stylesheet" href="{}"><p>x</p>"#, css_url.as_str());
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 1, "file:// has no Content-Type to sniff, so this text is parsed (total) rather than rejected");
     }
 
@@ -477,7 +477,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), MAX_LINKS, "must stop fetching new <link> stylesheets past MAX_LINKS");
     }
 
@@ -495,7 +495,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), MAX_LINKS + 1, "MAX_LINKS link sheets plus the one <style> sheet");
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles[find(&d, "p")].color, Color::rgb(0, 0, 255));
@@ -510,7 +510,7 @@ mod tests {
         let d = dom::parser::parse(&html);
         let base = Url::new("file:///");
 
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 1);
         assert_eq!(sheets[0].ignored_at_rules, 1, "@import is an ignored at-rule, not followed as a nested fetch");
         let styles = cascade::cascade(&d, &sheets);
@@ -535,7 +535,7 @@ mod tests {
         // Must return (not abort/hang/panic) -- the unreachable href fails
         // to fetch regardless of depth, so an empty Vec is correct either
         // way; the real assertion here is "did not crash."
-        let sheets = collect_all_author_sheets(&d, &base, 320.0);
+        let sheets = collect_all_author_sheets(&d, &base, 320.0, ColorScheme::Light);
         assert!(sheets.is_empty());
     }
 }

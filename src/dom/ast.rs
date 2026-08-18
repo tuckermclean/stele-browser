@@ -104,6 +104,23 @@ impl AttrMap {
         }
     }
 
+    /// Insert or overwrite an attribute's value — unlike [`set`](Self::set)
+    /// (first-value-wins, the tag-soup PARSE-TIME rule), this always takes
+    /// the NEW value: replacing an existing pair's value case-insensitively,
+    /// or appending a fresh pair if the name wasn't present. Built for
+    /// post-parse mutation (packet t1b-color-scheme's `--color-scheme`
+    /// pre-cascade `data-theme`/`data-mode` root stamp — see
+    /// `Dom::set_attribute`), where "the caller's new value wins" is the
+    /// correct semantics, not "the document's original value wins".
+    pub fn set_overwrite(&mut self, name: &str, value: &str) {
+        if let Some(pair) = self.pairs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            pair.1 = value.into();
+        } else {
+            self.pairs
+                .push((name.trim().to_ascii_lowercase().into_boxed_str(), value.into()));
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.pairs.iter().map(|(k, v)| (k.as_ref(), v.as_ref()))
     }
@@ -149,6 +166,22 @@ impl Dom {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Insert or overwrite one attribute on `id`'s element (see
+    /// [`AttrMap::set_overwrite`]) — a total no-op, never a panic, if `id`
+    /// is out of range or names a `Text` node rather than an `Element`.
+    /// Built for packet t1b-color-scheme's `--color-scheme` pre-cascade
+    /// `data-theme`/`data-mode` root stamp (`main.rs`'s `stamp_color_scheme`)
+    /// but deliberately general (any node, any attribute) rather than
+    /// hardcoded to that one caller.
+    pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        let Some(node) = self.nodes.get_mut(id) else {
+            return;
+        };
+        if let Node::Element(el) = node {
+            el.attrs.set_overwrite(name, value);
+        }
     }
 
     /// Allocate an element node, returning its id. Not yet attached to a parent.

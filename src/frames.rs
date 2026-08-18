@@ -136,6 +136,7 @@ use crate::fetch::{Fetch, Request, Url};
 use crate::layout::box_tree::build_box_tree;
 use crate::layout::{self, Fragment, FragmentKind, Point, Rect, Size};
 use crate::style::cascade;
+use crate::style::ColorScheme;
 use crate::style::ComputedStyle;
 
 /// Maximum nesting depth for framesets/frames (a top-level frameset counts
@@ -227,11 +228,11 @@ struct FrameCtx {
 /// wide (matching `--cols`/the top-level pipeline's own width parameter).
 /// Total: never panics regardless of how malformed the frameset markup,
 /// `rows`/`cols` attributes, or any fetched child document is.
-pub fn render(base_url: &Url, dom: &Dom, frameset_id: NodeId, cols: usize) -> TextGrid {
+pub fn render(base_url: &Url, dom: &Dom, frameset_id: NodeId, cols: usize, scheme: ColorScheme) -> TextGrid {
     let width_px = cols as f32 * CELL_W;
     let height_px = DEFAULT_FRAMESET_VIEWPORT_ROWS as f32 * CELL_H;
     let mut ctx = FrameCtx { budget: MAX_TOTAL_FRAMES, visited: vec![base_url.as_str().to_string()] };
-    render_frameset_grid(dom, frameset_id, base_url, width_px, height_px, 0, &mut ctx)
+    render_frameset_grid(dom, frameset_id, base_url, width_px, height_px, 0, scheme, &mut ctx)
 }
 
 /// Render one `<frameset>` node's own region (`width_px` x `height_px`) as a
@@ -250,6 +251,7 @@ fn render_frameset_grid(
     width_px: f32,
     height_px: f32,
     depth: usize,
+    scheme: ColorScheme,
     ctx: &mut FrameCtx,
 ) -> TextGrid {
     let cols_total = tty::cell_index(width_px, CELL_W);
@@ -288,7 +290,7 @@ fn render_frameset_grid(
             // Render exactly one cell, blit it, then let `grid` drop at the
             // end of this iteration -- never held alongside its siblings.
             let grid = match cell_children.get(idx) {
-                Some(&child_id) => render_cell(dom, child_id, base_url, cell_w_px, cell_h_px, cell_w_cells, depth, ctx),
+                Some(&child_id) => render_cell(dom, child_id, base_url, cell_w_px, cell_h_px, cell_w_cells, depth, scheme, ctx),
                 None => TextGrid::blank(cell_w_cells, 0),
             };
             canvas.blit(&grid, col_offset, row_offset);
@@ -317,6 +319,7 @@ fn render_cell(
     cell_h_px: f32,
     cell_w_cells: usize,
     depth: usize,
+    scheme: ColorScheme,
     ctx: &mut FrameCtx,
 ) -> TextGrid {
     if ctx.budget == 0 {
@@ -333,9 +336,9 @@ fn render_cell(
             if depth + 1 >= MAX_FRAME_DEPTH {
                 return placeholder(cell_w_cells, "[frame depth limit]");
             }
-            render_frameset_grid(dom, id, base_url, cell_w_px, cell_h_px, depth + 1, ctx)
+            render_frameset_grid(dom, id, base_url, cell_w_px, cell_h_px, depth + 1, scheme, ctx)
         }
-        "frame" => render_frame(dom, el, base_url, cell_w_px, cell_h_px, cell_w_cells, depth, ctx),
+        "frame" => render_frame(dom, el, base_url, cell_w_px, cell_h_px, cell_w_cells, depth, scheme, ctx),
         _ => TextGrid::blank(cell_w_cells, 0),
     }
 }
@@ -348,6 +351,7 @@ fn render_frame(
     cell_h_px: f32,
     cell_w_cells: usize,
     depth: usize,
+    scheme: ColorScheme,
     ctx: &mut FrameCtx,
 ) -> TextGrid {
     let src = el.attrs.get("src").map(str::trim).filter(|s| !s.is_empty());
@@ -375,10 +379,10 @@ fn render_frame(
             if depth + 1 >= MAX_FRAME_DEPTH {
                 placeholder(cell_w_cells, "[frame depth limit]")
             } else {
-                render_frameset_grid(&child_dom, child_frameset_id, &resolved, cell_w_px, cell_h_px, depth + 1, ctx)
+                render_frameset_grid(&child_dom, child_frameset_id, &resolved, cell_w_px, cell_h_px, depth + 1, scheme, ctx)
             }
         }
-        None => render_single_document(&child_dom, &resolved, cell_w_cells),
+        None => render_single_document(&child_dom, &resolved, cell_w_cells, scheme),
     };
     ctx.visited.pop();
     result
@@ -392,7 +396,7 @@ fn render_frame(
 /// document's) — m5-link-css: a `<link href>` inside this frame's `<head>`
 /// must resolve against ITS document, exactly like ordinary HTML
 /// document-relative resolution rules, not the frameset parent's URL.
-fn render_single_document(dom: &Dom, base_url: &Url, cols: usize) -> TextGrid {
+fn render_single_document(dom: &Dom, base_url: &Url, cols: usize, scheme: ColorScheme) -> TextGrid {
     // M5 + m5-link-css: same author-CSS wiring as main.rs's own
     // single-document pipeline — each frame gets its own <style> blocks,
     // fetched <link rel=stylesheet href> sheets, AND inline style= applied,
@@ -400,9 +404,12 @@ fn render_single_document(dom: &Dom, base_url: &Url, cols: usize) -> TextGrid {
     // `cols * CELL_W` (its region's actual width in px, per the caller's
     // track-sizing math above) — `@media` (in-CSS or a `<link media=...>`
     // attribute) inside a frame's stylesheets is evaluated against THAT
-    // region's width, not the top-level document's.
+    // region's width, not the top-level document's. `scheme` (packet
+    // t1b-color-scheme) is the same `ColorScheme` the top-level document
+    // renders under — every frame in a frameset shares one `--color-scheme`,
+    // there is no per-frame override.
     let viewport_width = cols as f32 * CELL_W;
-    let author_sheets = crate::stylesheets::collect_all_author_sheets(dom, base_url, viewport_width);
+    let author_sheets = crate::stylesheets::collect_all_author_sheets(dom, base_url, viewport_width, scheme);
     let styles = cascade::cascade(dom, &author_sheets);
     // Frames render to a tty text grid, never pixels — no fetch/decode work
     // for images here (mirrors main.rs's own `dump_text` scope), so an
@@ -590,7 +597,7 @@ mod tests {
         // link-css.html itself) -- proves resolution against the frameset's
         // base, not a same-file coincidence.
         let base = fixture_url("frames.html");
-        let grid = render(&base, &dom, fs, 80);
+        let grid = render(&base, &dom, fs, 80, ColorScheme::Light);
         let text = grid.to_text();
 
         assert!(!text.contains("the external"), "the <link>-sourced display:none rule should have removed this paragraph inside the frame: {text:?}");
@@ -727,7 +734,7 @@ mod tests {
         // placeholders, left one starting at col 0, right one at col 5
         // (10 cols total, split 50/50 -> 5 cols each).
         let (dom, fs) = frameset_dom(Some("50%,50%"), None, &["frame", "frame"]);
-        let grid = render(&Url::new("file:///x.html"), &dom, fs, 10);
+        let grid = render(&Url::new("file:///x.html"), &dom, fs, 10, ColorScheme::Light);
         let text = grid.to_text();
         let lines: Vec<&str> = text.lines().collect();
         assert!(!lines.is_empty());
@@ -743,7 +750,7 @@ mod tests {
         // track values must reserve real cell height for the single-line
         // placeholder text to survive, unlike the old content-grown design.
         let (dom, fs) = frameset_dom(None, Some("16,16"), &["frame", "frame"]);
-        let grid = render(&Url::new("file:///x.html"), &dom, fs, 10);
+        let grid = render(&Url::new("file:///x.html"), &dom, fs, 10, ColorScheme::Light);
         let text = grid.to_text();
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines.len() >= 2, "expected at least two rows: {lines:?}");
@@ -762,7 +769,7 @@ mod tests {
             el.attrs.set("name", "nav");
         }
         dom.append_child(fs, frame);
-        let grid = render(&Url::new("file:///x.html"), &dom, fs, 20);
+        let grid = render(&Url::new("file:///x.html"), &dom, fs, 20, ColorScheme::Light);
         assert!(grid.to_text().contains("[nav]"));
     }
 
@@ -777,7 +784,7 @@ mod tests {
             el.attrs.set("src", "ftp://example.com/nope.html");
         }
         dom.append_child(fs, frame);
-        let grid = render(&Url::new("file:///x.html"), &dom, fs, 20);
+        let grid = render(&Url::new("file:///x.html"), &dom, fs, 20, ColorScheme::Light);
         assert!(grid.to_text().contains('['), "expected some placeholder marker: {}", grid.to_text());
     }
 
@@ -799,7 +806,7 @@ mod tests {
         }
         dom.append_child(fs, frame);
         let base = Url::new("file:///self.html");
-        let grid = render(&base, &dom, fs, 20);
+        let grid = render(&base, &dom, fs, 20, ColorScheme::Light);
         // Must not hang/panic; a cycle placeholder or an unavailable-fetch
         // placeholder are both acceptable bounded outcomes.
         assert!(grid.to_text().contains('['));
@@ -822,7 +829,7 @@ mod tests {
             }
             current_parent = fs;
         }
-        let grid = render(&Url::new("file:///deep.html"), &dom, top_fs.unwrap(), 20);
+        let grid = render(&Url::new("file:///deep.html"), &dom, top_fs.unwrap(), 20, ColorScheme::Light);
         // Must terminate (test itself times out if it doesn't) and produce
         // *some* grid without panicking.
         let _ = grid.to_text();
@@ -842,7 +849,7 @@ mod tests {
         let rows_tracks = std::iter::repeat("40").take(32).collect::<Vec<_>>().join(",");
         let names: Vec<&str> = std::iter::repeat("frame").take(1024).collect();
         let (dom, fs) = frameset_dom(Some(cols_tracks.as_str()), Some(rows_tracks.as_str()), &names);
-        let grid = render(&Url::new("file:///wide.html"), &dom, fs, 400);
+        let grid = render(&Url::new("file:///wide.html"), &dom, fs, 400, ColorScheme::Light);
         let text = grid.to_text();
         assert!(text.contains("[frame budget exhausted]"), "expected the budget-exhausted placeholder to appear: {text}");
     }
@@ -874,14 +881,14 @@ mod tests {
             let Node::Element(el) = dom.node(root) else { unreachable!() };
             el.children[0]
         };
-        let grid = render(&Url::new("file:///bomb.html"), &dom, top, 30);
+        let grid = render(&Url::new("file:///bomb.html"), &dom, top, 30, ColorScheme::Light);
         let _ = grid.to_text();
     }
 
     #[test]
     fn zero_cols_yields_an_empty_grid_not_a_panic() {
         let (dom, fs) = frameset_dom(None, None, &["frame"]);
-        let grid = render(&Url::new("file:///x.html"), &dom, fs, 0);
+        let grid = render(&Url::new("file:///x.html"), &dom, fs, 0, ColorScheme::Light);
         assert_eq!(grid.to_text(), "");
     }
 }

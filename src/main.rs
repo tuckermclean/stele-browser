@@ -103,11 +103,44 @@ struct Args {
     /// back to the M0 hello. Not consulted at all in `--headless` mode
     /// (those paths read `dump_text`/`dump_png`/`render_fb` directly).
     source: Option<String>,
+    /// `--color-scheme <light|dark|auto>` (packet t1b-color-scheme): the
+    /// resolved [`style::ColorScheme`] every headless render path evaluates
+    /// `prefers-color-scheme` media queries against (see
+    /// `style::media::Feature::PrefersColorScheme`) — ALWAYS consulted,
+    /// even when the flag is absent (absent defaults to `Light`, the same
+    /// "no OS/JS signal" posture `ColorScheme::parse`'s `auto` arm
+    /// documents). `"auto"` and any unrecognized value both resolve to
+    /// `Light` too (`ColorScheme::parse` is total and fails closed to the
+    /// honest default — never a panic, never a hard CLI error).
+    color_scheme: style::ColorScheme,
+    /// Whether `--color-scheme` was actually given on the command line, as
+    /// opposed to `color_scheme` merely holding its default `Light` —
+    /// separate from `color_scheme` itself because it gates a SECOND,
+    /// independent behavior: the pre-cascade `data-theme`/`data-mode`
+    /// root-attribute stamp (`stamp_color_scheme`, called from
+    /// `dump_text_opts`/`dump_png_opts`/`render_fb_surface_opts`).
+    /// Stamping is flag-gated rather than unconditional so the DEFAULT
+    /// (no flag at all) render path stays byte-for-byte identical to every
+    /// already-blessed golden — see `stamp_color_scheme`'s own doc comment
+    /// for the full golden-churn rationale.
+    color_scheme_given: bool,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Args { headless: false, dump_text: None, dump_png: None, render_fb: None, x11: None, cols: DEFAULT_COLS, stats: false, no_bg_images: false, source: None }
+        Args {
+            headless: false,
+            dump_text: None,
+            dump_png: None,
+            render_fb: None,
+            x11: None,
+            cols: DEFAULT_COLS,
+            stats: false,
+            no_bg_images: false,
+            source: None,
+            color_scheme: style::ColorScheme::Light,
+            color_scheme_given: false,
+        }
     }
 }
 
@@ -160,6 +193,16 @@ fn parse_args(argv: &[String]) -> Args {
             }
             "--stats" => out.stats = true,
             "--no-bg-images" => out.no_bg_images = true,
+            "--color-scheme" => {
+                i += 1;
+                if let Some(v) = argv.get(i) {
+                    out.color_scheme = style::ColorScheme::parse(v);
+                    out.color_scheme_given = true;
+                }
+                // A trailing `--color-scheme` with no value leaves both
+                // fields at their defaults, same "missing value is a no-op,
+                // never a panic" totality `--dump-text`/`--cols` already have.
+            }
             other => {
                 // packet/shell-keyboard: the first bare token (doesn't start
                 // with `--`) is the interactive-mode source. Only the FIRST
@@ -300,33 +343,97 @@ fn format_stats_line(counts: StatsCounts) -> String {
 /// Total: a fetch failure or a document with no author CSS at all still
 /// prints an all-zero line (`aggregate_stats(&[])` is `StatsCounts::default()`)
 /// rather than panicking or silently skipping the line.
+///
+/// Not `--color-scheme`-aware (packet t1b-color-scheme): always collects at
+/// `ColorScheme::Light` — this is diagnostic refusal-counting tooling, not a
+/// rendered-output path, and a `prefers-color-scheme`-gated `@media` block's
+/// declarations are still counted (just under whichever branch is inert)
+/// regardless of which scheme flattens it in. Threading `--color-scheme`
+/// through here too is a reasonable follow-up, not required for this packet.
 fn print_stats(source: &str, viewport_width_px: f32) {
     let url = resolve_url(source);
     let sheets = match fetch_body(&url) {
         Ok(body) => {
             let html = String::from_utf8_lossy(&body);
             let dom_tree = dom::parser::parse(&html);
-            style::collect_author_sheets_for_viewport(&dom_tree, viewport_width_px)
+            style::collect_author_sheets_for_viewport(&dom_tree, viewport_width_px, style::ColorScheme::Light)
         }
         Err(_) => Vec::new(),
     };
     eprintln!("{}", format_stats_line(aggregate_stats(&sheets)));
 }
 
-/// Drive the full headless pipeline for `--dump-text`. Total: a fetch
-/// error, non-UTF-8 body (lossily recovered), empty document, or
-/// `display: none` root all resolve to a clean empty string rather than a
-/// panic — the caller prints whatever comes back verbatim.
+/// Packet t1b-color-scheme: stamp `data-theme="<scheme>"` and
+/// `data-mode="<scheme>"` onto the document's root `<html>` element, BEFORE
+/// cascade runs — the no-JS approximation of what a real theme-toggle
+/// script would do for pages like httpforever.com, whose dark mode is
+/// gated entirely on `html[data-theme="dark"]` with no `@media
+/// (prefers-color-scheme)` fallback at all. This is an explicit,
+/// user-invoked, DOCUMENTED approximation: it sets standard theming hooks
+/// the page's own author already wired up for exactly this purpose, not
+/// arbitrary invented content, and never runs any of the page's own script
+/// (charter C3 is untouched — no JS is parsed or executed anywhere in this
+/// pipeline).
+///
+/// Only called when `--color-scheme` was actually given on the command
+/// line (`Args::color_scheme_given`) — the default (no flag) render path
+/// never stamps anything, so it stays byte-for-byte identical to every
+/// already-blessed golden. (An earlier design considered stamping `light`
+/// unconditionally, since `light` IS the honest default; this packet
+/// chose the more conservative flag-gated behavior instead, since verifying
+/// "no golden churn" for the unconditional-stamp design would require
+/// running the full golden suite, which this environment's write-code/
+/// push/let-CI-verify workflow doesn't do before opening the PR.)
+///
+/// Total: delegates entirely to `Dom::set_attribute` (itself total over any
+/// node id — see its own doc comment), so this is too, including against
+/// `Dom::new()`'s trivial one-node arena or a `Dom` whose root somehow isn't
+/// an `Element` at all.
+fn stamp_color_scheme(dom_tree: &mut dom::Dom, scheme: style::ColorScheme) {
+    let value = match scheme {
+        style::ColorScheme::Light => "light",
+        style::ColorScheme::Dark => "dark",
+    };
+    let root = dom_tree.root();
+    dom_tree.set_attribute(root, "data-theme", value);
+    dom_tree.set_attribute(root, "data-mode", value);
+}
+
+/// [`dump_text`]'s real implementation, parameterized over `scheme`
+/// (packet t1b-color-scheme's `--color-scheme`) and `stamp` (whether to
+/// pre-cascade-stamp `data-theme`/`data-mode` on the root element — see
+/// [`stamp_color_scheme`]'s own doc comment for why that's gated
+/// separately from `scheme` itself). `dump_text` is a thin wrapper always
+/// passing `(ColorScheme::Light, false)`, keeping every existing
+/// `dump_text` call site/test unchanged — mirrors `dump_png`/
+/// `dump_png_opts`'s own wrapper-over-parameterized-impl split for
+/// `--no-bg-images`. `main`'s `--dump-text` branch calls this directly
+/// with `args.color_scheme`/`args.color_scheme_given`.
+///
+/// Total: a fetch error, non-UTF-8 body (lossily recovered), empty
+/// document, or `display: none` root all resolve to a clean empty string
+/// rather than a panic — the caller prints whatever comes back verbatim.
 ///
 /// Frames (packet `frames`): if the fetched document's `<html>` contains a
 /// `<frameset>` anywhere (`stele::frames::find_frameset`), this routes to
 /// the frames renderer (`stele::frames::render`) INSTEAD of the ordinary
 /// cascade->box-tree->layout->tty chain below — a frameset document has no
 /// `<body>` to run that chain over; each `<frame src>` gets its own
-/// independent instance of it, recursively, driven from `frames.rs`. See
-/// that module's docs for the full design (track sizing, compositing,
-/// totality bounds).
+/// independent instance of it, recursively, driven from `frames.rs`.
+/// `stamp_color_scheme` only ever touches a TOP-level `<html>` (frameset
+/// documents route away before it's called — a `<frameset>` document has
+/// no single root author-CSS target the way an ordinary document's `<html>`
+/// is), so a frameset document's `--color-scheme` support is scoped to the
+/// `prefers-color-scheme` media feature `scheme` still threads into
+/// `frames::render`, not the attribute stamp. See that module's docs for
+/// the frames pipeline's own design (track sizing, compositing, totality
+/// bounds).
+#[cfg(test)]
 fn dump_text(source: &str, cols: usize) -> String {
+    dump_text_opts(source, cols, style::ColorScheme::Light, false)
+}
+
+fn dump_text_opts(source: &str, cols: usize, scheme: style::ColorScheme, stamp: bool) -> String {
     let url = resolve_url(source);
     // Fetch the full Response (not just the body) — m5-link-css: `<link
     // href>` stylesheets must resolve against the POST-redirect URL, same
@@ -339,10 +446,14 @@ fn dump_text(source: &str, cols: usize) -> String {
         Err(_) => return String::new(),
     };
     let html = String::from_utf8_lossy(&response.body);
-    let dom_tree = dom::parser::parse(&html);
+    let mut dom_tree = dom::parser::parse(&html);
 
     if let Some(frameset_id) = frames::find_frameset(&dom_tree) {
-        return frames::render(&url, &dom_tree, frameset_id, cols).to_text();
+        return frames::render(&url, &dom_tree, frameset_id, cols, scheme).to_text();
+    }
+
+    if stamp {
+        stamp_color_scheme(&mut dom_tree, scheme);
     }
 
     // M5 + m5-link-css: feed cascade every author sheet in document order —
@@ -357,7 +468,7 @@ fn dump_text(source: &str, cols: usize) -> String {
     // `display:none` etc.), unlike the image pre-pass below, which is
     // pixel-only and skipped here.
     let viewport_width = cols as f32 * 8.0;
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, viewport_width);
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, viewport_width, scheme);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // A tty dump never paints pixels, so skip the image fetch+decode
     // pre-pass entirely (an empty map — every <img> stays its `[alt]`-style
@@ -422,8 +533,10 @@ fn dump_png_opts(source: &str, no_bg_images: bool) -> Vec<u8> {
     // `style=` needs no extra wiring: cascade reads it straight off each
     // Element it already walks. M5 media: `--dump-png`'s viewport width is
     // the fixed `DEFAULT_PNG_WIDTH` (below) — flatten any `@media` (in-CSS
-    // or a `<link media=...>` attribute) against THAT.
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32);
+    // or a `<link media=...>` attribute) against THAT. Not `--color-scheme`-
+    // aware (packet t1b-color-scheme scoped that flag to `--dump-text` only
+    // — see that packet's PR for the rationale): always `Light` here.
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     // Pixels matter on this path: fetch+decode every <img src> up front
     // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
@@ -527,8 +640,9 @@ fn render_fb_surface_opts(source: &str, width: u32, no_bg_images: bool) -> Resul
     // `style=` needs no extra wiring: cascade reads it straight off each
     // Element it already walks. M5 media: `--render-fb`'s viewport width is
     // the real framebuffer width (`width` param) — flatten any `@media`
-    // (in-CSS or a `<link media=...>` attribute) against that.
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32);
+    // (in-CSS or a `<link media=...>` attribute) against that. Not
+    // `--color-scheme`-aware — see `dump_png_opts`'s identical note above.
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
@@ -650,7 +764,8 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
         return Err("frameset documents are not supported by --x11".to_string());
     }
 
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32);
+    // Not `--color-scheme`-aware — see `dump_png_opts`'s identical note.
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
@@ -983,7 +1098,10 @@ fn run_x11(source: &str) {
 /// what the status line prints).
 fn build_page_from_dom(dom_tree: dom::Dom, final_url: &Url, cols: usize) -> browser::Page {
     let viewport_width = cols as f32 * 8.0;
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, final_url, viewport_width);
+    // Not `--color-scheme`-aware (packet t1b-color-scheme scoped that flag
+    // to `--dump-text` only, same as the other pixel/interactive paths —
+    // see `dump_png_opts`'s identical note).
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, final_url, viewport_width, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let fragments = match build_box_tree(&dom_tree, &styles, &HashMap::new()) {
         Some(root) => layout::layout(&root, Size { w: viewport_width, h: HEADLESS_VIEWPORT_HEIGHT }),
@@ -1399,7 +1517,7 @@ fn main() {
             if args.stats {
                 print_stats(&source, args.cols as f32 * 8.0);
             }
-            println!("{}", dump_text(&source, args.cols));
+            println!("{}", dump_text_opts(&source, args.cols, args.color_scheme, args.color_scheme_given));
             return;
         }
         if let Some((source, out_path)) = args.dump_png {
@@ -2119,7 +2237,7 @@ mod tests {
         // the wiring, not just the pure aggregation/formatting helpers above.
         let html = "<style>p { flibbertigibbet: 1; color: red; wobble: 2; } @import url(x.css);</style><p>hi</p>";
         let dom_tree = dom::parser::parse(html);
-        let sheets = style::collect_author_sheets_for_viewport(&dom_tree, 640.0);
+        let sheets = style::collect_author_sheets_for_viewport(&dom_tree, 640.0, style::ColorScheme::Light);
         let counts = aggregate_stats(&sheets);
         assert_eq!(counts.ignored_declarations, 2);
         assert_eq!(counts.ignored_at_rules, 1);
@@ -2130,7 +2248,7 @@ mod tests {
     #[test]
     fn stats_pipeline_is_all_zero_for_a_document_with_no_author_css() {
         let dom_tree = dom::parser::parse("<p>hello</p>");
-        let sheets = style::collect_author_sheets_for_viewport(&dom_tree, 640.0);
+        let sheets = style::collect_author_sheets_for_viewport(&dom_tree, 640.0, style::ColorScheme::Light);
         assert_eq!(aggregate_stats(&sheets), StatsCounts::default());
     }
 

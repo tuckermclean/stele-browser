@@ -1,8 +1,9 @@
 //! Selector matching (brief §4): element, `.class`, `#id`, descendant,
-//! grouping, and `a:link`/`a:visited`. Anything else parses without choking
-//! (the tokenizer/parser never rejects it) but is marked unsupported so it
-//! simply never matches — charter C2's ignore-unknown treaty applied to
-//! selectors instead of declarations.
+//! grouping, `a:link`/`a:visited`, and (packet t1b-color-scheme)
+//! `[attr]`/`[attr=value]` attribute selectors. Anything else parses without
+//! choking (the tokenizer/parser never rejects it) but is marked unsupported
+//! so it simply never matches — charter C2's ignore-unknown treaty applied
+//! to selectors instead of declarations.
 
 use crate::dom::{AttrMap, ElementName};
 
@@ -22,21 +23,53 @@ pub(crate) enum Pseudo {
     Visited,
 }
 
-/// One simple selector: an optional element name, id, classes, and pseudo
-/// classes, all of which must match the same element.
+/// How one `[attr...]` selector's value clause tests an attribute (packet
+/// t1b-color-scheme). Only the two simplest CSS attribute-selector forms are
+/// in the curated subset — `[attr]` (presence) and `[attr=value]` (exact,
+/// case-SENSITIVE value match, no `i` flag) — mirroring `media.rs`'s own
+/// "curated subset, everything else fails closed" posture: `~=`/`^=`/`$=`/
+/// `*=`/`|=` and the `i` case-insensitivity flag all parse without choking
+/// (`parser::parse_selector`'s `[` handling) but mark the whole selector
+/// `supported: false` rather than being evaluated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttrMatch {
+    Present,
+    Equals(String),
+}
+
+/// One `[attr...]` clause within a [`Compound`] (packet t1b-color-scheme) —
+/// e.g. `[data-theme="dark"]` is `AttrSelector { name: "data-theme", match_:
+/// AttrMatch::Equals("dark".into()) }`. `name` is stored already lowercased
+/// (attribute names are ASCII-case-insensitive in HTML); the VALUE is kept
+/// exactly as written — real CSS attribute-value matching is case-sensitive
+/// by default (only an explicit trailing `i` flag, which this curated subset
+/// doesn't support, would fold it).
+#[derive(Debug, Clone)]
+pub(crate) struct AttrSelector {
+    pub name: String,
+    pub match_: AttrMatch,
+}
+
+/// One simple selector: an optional element name, id, classes, pseudo
+/// classes, and attribute selectors, all of which must match the same
+/// element.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Compound {
     pub element: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
     pub pseudo: Vec<Pseudo>,
+    pub attrs: Vec<AttrSelector>,
 }
 
 impl Compound {
     fn specificity(&self) -> Specificity {
         Specificity {
             ids: self.id.is_some() as u32,
-            classes: (self.classes.len() + self.pseudo.len()) as u32,
+            // Attribute selectors carry class-level specificity, same as
+            // real CSS (a `.class`, a `[attr]`, and a `:pseudo-class` are
+            // all specificity (0,1,0) each).
+            classes: (self.classes.len() + self.pseudo.len() + self.attrs.len()) as u32,
             elements: self.element.is_some() as u32,
         }
     }
@@ -64,6 +97,19 @@ impl Compound {
                 }
                 // No history in v0 — nothing is ever :visited.
                 Pseudo::Visited => return false,
+            }
+        }
+        for a in &self.attrs {
+            match &a.match_ {
+                AttrMatch::Present => {
+                    if info.attrs.get(&a.name).is_none() {
+                        return false;
+                    }
+                }
+                AttrMatch::Equals(want) => match info.attrs.get(&a.name) {
+                    Some(v) if v == want.as_str() => {}
+                    _ => return false,
+                },
             }
         }
         true
@@ -127,12 +173,18 @@ impl Selector {
 
 /// The bits of an element the cascade needs to test selectors against,
 /// captured once per node so matching doesn't repeatedly re-walk `AttrMap`.
+/// `attrs` (packet t1b-color-scheme) is a full clone of the element's own
+/// `AttrMap` — cheap (an `AttrMap` is just a small `Vec` of interned
+/// strings) and lets [`Compound`]'s new `[attr...]` matching reuse
+/// `AttrMap::get`'s existing case-insensitive-by-name lookup rather than
+/// duplicating it.
 #[derive(Debug, Clone)]
 pub(crate) struct ElementInfo {
     name: String,
     id: Option<String>,
     classes: Vec<String>,
     has_href: bool,
+    attrs: AttrMap,
 }
 
 impl ElementInfo {
@@ -148,6 +200,7 @@ impl ElementInfo {
             id,
             classes,
             has_href,
+            attrs: attrs.clone(),
         }
     }
 }
@@ -163,6 +216,7 @@ mod tests {
             id: id.map(|s| s.to_string()),
             classes: classes.iter().map(|s| s.to_string()).collect(),
             has_href,
+            attrs: AttrMap::new(),
         }
     }
 

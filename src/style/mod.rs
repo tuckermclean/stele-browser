@@ -15,4 +15,5 @@ mod value;
 
 pub use author::{collect_author_sheets, collect_author_sheets_for_viewport, media_attr_matches, parse_and_flatten};
 pub use computed::ComputedStyle;
+pub use media::ColorScheme;
 pub use parser::Stylesheet;
