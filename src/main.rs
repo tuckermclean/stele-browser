@@ -2467,4 +2467,72 @@ mod tests {
         // test in tests/stats_cli.rs.
         print_stats("fixtures/does-not-exist-nope.html", 640.0);
     }
+
+    // ------------------------------------------------- --audit-contrast (T1c)
+
+    #[test]
+    fn parse_args_recognizes_audit_contrast() {
+        let a = parse_args(&args(&["--headless", "--audit-contrast", "fixtures/basic.html"]));
+        assert!(a.headless);
+        assert_eq!(a.audit_contrast.as_deref(), Some("fixtures/basic.html"));
+    }
+
+    #[test]
+    fn parse_args_audit_contrast_with_no_trailing_value_is_a_no_op_not_a_panic() {
+        let a = parse_args(&args(&["--headless", "--audit-contrast"]));
+        assert_eq!(a.audit_contrast, None);
+    }
+
+    #[test]
+    fn audit_contrast_reports_zero_violations_on_a_clean_black_on_white_fixture() {
+        let violations = audit_contrast("fixtures/basic.html").expect("basic.html should render");
+        assert!(violations.is_empty(), "expected no contrast violations, got: {violations:?}");
+    }
+
+    #[test]
+    fn audit_contrast_reports_zero_violations_on_the_kitchen_sink_fixture() {
+        // The densest real fixture: a dark `.banner` with white text, a
+        // `<pre>`/`.flexrow` with pale backgrounds, default black body text
+        // -- every one of these already clears CONTRAST_MIN today, and this
+        // packet's `repair_fg` must never turn a compliant color INTO a
+        // violation.
+        let violations = audit_contrast("fixtures/kitchen-sink.html").expect("kitchen-sink.html should render");
+        assert!(violations.is_empty(), "expected no contrast violations, got: {violations:?}");
+    }
+
+    #[test]
+    fn audit_contrast_reports_zero_violations_on_the_presentational_fixture() {
+        // Its `<font color="red">` on the default white canvas is the
+        // closest-to-the-floor real color pair in the whole fixture corpus
+        // (~4.0:1, just above CONTRAST_MIN's 3.0:1) -- confirms the audit
+        // doesn't false-positive right at the edge.
+        let violations = audit_contrast("fixtures/presentational.html").expect("presentational.html should render");
+        assert!(violations.is_empty(), "expected no contrast violations, got: {violations:?}");
+    }
+
+    #[test]
+    fn audit_contrast_reports_zero_violations_on_a_background_image_only_box() {
+        // fixtures/bg-image.html's `.tile` sets `color: #ffffff` but only a
+        // `background-image` (no `background-color` of its own) -- per
+        // `raster::effective_background`'s own documented caveat, this
+        // means its effective background resolves to the page canvas
+        // (white), so `repair_fg` engages and turns the text black. The
+        // AUDIT checks the REPAIRED color, so this must still report clean.
+        let violations = audit_contrast("fixtures/bg-image.html").expect("bg-image.html should render");
+        assert!(violations.is_empty(), "expected no contrast violations, got: {violations:?}");
+    }
+
+    #[test]
+    fn audit_contrast_on_a_fetch_failure_is_a_clean_err_not_a_panic() {
+        let result = audit_contrast("fixtures/does-not-exist-nope.html");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_contrast_on_a_frameset_document_is_empty_not_an_error() {
+        // Same carve-out as dump_text/dump_png: a <frameset> document has
+        // no single layout::layout call for this audit to drive.
+        let violations = audit_contrast("fixtures/frames.html").expect("frameset documents degrade cleanly, never error");
+        assert!(violations.is_empty());
+    }
 }

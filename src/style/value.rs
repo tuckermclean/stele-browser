@@ -2116,4 +2116,77 @@ mod tests {
         let result = substitute_vars(&toks(&css), &env, &[], 0);
         assert_eq!(result, None, "depth cap must trip long before any real recursion overflow");
     }
+
+    // ---- packet T1c: gradient -> representative-solid background fallback ----
+
+    #[test]
+    fn radial_gradient_background_shorthand_extracts_first_color_stop() {
+        let mut d = Declarations::default();
+        assert!(apply_property(
+            "background",
+            &toks("radial-gradient(120% 140% at 50% -20%, #46a35f 0%, #2f8f4e 45%, #206b39 100%)"),
+            &mut d
+        ));
+        assert_eq!(d.background_color, Some(Color::rgb(0x46, 0xa3, 0x5f)));
+    }
+
+    #[test]
+    fn linear_gradient_named_color_stops_picks_the_first() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks("linear-gradient(180deg, red, blue)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn webkit_prefixed_gradient_in_background_image_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("-webkit-linear-gradient(top, #112233, #445566)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0x11, 0x22, 0x33)));
+    }
+
+    #[test]
+    fn moz_prefixed_gradient_in_background_image_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("-moz-radial-gradient(circle, green, yellow)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0, 128, 0)));
+    }
+
+    #[test]
+    fn gradient_with_no_parseable_color_stops_leaves_background_unset() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("linear-gradient(to right, nonsense-a, nonsense-b)"), &mut d));
+        assert!(d.background_color.is_none());
+    }
+
+    #[test]
+    fn background_color_property_itself_falls_back_to_a_gradients_first_stop() {
+        // Real-world path (packet T1a): a var() substitution BEFORE
+        // apply_property ever runs (cascade::resolve) can leave
+        // `background-color`'s own value holding a full gradient function
+        // -- real CSS wouldn't accept that for this property, but this
+        // packet extracts a usable color anyway rather than dropping it
+        // (the motivating bug: light text vanishing against the default
+        // white canvas when the gradient it was meant to sit on is dropped
+        // entirely).
+        let mut d = Declarations::default();
+        assert!(apply_property("background-color", &toks("linear-gradient(red, blue)"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn ordinary_background_color_values_are_unaffected_by_the_gradient_fallback() {
+        let mut d = Declarations::default();
+        assert!(apply_property("background-color", &toks("#123456"), &mut d));
+        assert_eq!(d.background_color, Some(Color::rgb(0x12, 0x34, 0x56)));
+    }
+
+    #[test]
+    fn garbage_gradient_like_function_name_does_not_panic() {
+        // Not a real gradient function name at all -- must fall through to
+        // "unrecognized declaration", never panic on the malformed function
+        // body.
+        let mut d = Declarations::default();
+        assert!(!apply_property("background", &toks("not-a-gradient(oops"), &mut d));
+        assert!(d.background_color.is_none());
+    }
 }

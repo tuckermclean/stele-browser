@@ -718,4 +718,150 @@ mod tests {
         s.fill_rect(PixelRect { x: 1, y: 1, w: 2, h: 2 }, Color::BLACK);
         assert_eq!(encode_png(&s), encode_png(&s));
     }
+
+    // ------------------------------------------------ effective_background
+
+    #[test]
+    fn effective_background_nested_boxes_picks_the_innermost_opaque_one() {
+        let mut fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(10, 10, 10), BorderSide::default()) }, interactive: None },
+            Fragment { rect: rect(2.0, 2.0, 10.0, 10.0), kind: FragmentKind::Box { style: box_style(Color::rgb(20, 20, 20), BorderSide::default()) }, interactive: None },
+        ];
+        fragments.push(Fragment {
+            rect: rect(3.0, 3.0, 4.0, 4.0),
+            kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+            interactive: None,
+        });
+        let eff = effective_background(&fragments, 2, Color::WHITE);
+        assert_eq!(eff, Color::rgb(20, 20, 20), "the innermost (nearer, later-painted) opaque box wins");
+    }
+
+    #[test]
+    fn effective_background_skips_a_transparent_box_and_falls_to_the_next_opaque_ancestor() {
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(5, 5, 5), BorderSide::default()) }, interactive: None },
+            Fragment { rect: rect(2.0, 2.0, 10.0, 10.0), kind: FragmentKind::Box { style: box_style(Color::TRANSPARENT, BorderSide::default()) }, interactive: None },
+            Fragment {
+                rect: rect(3.0, 3.0, 4.0, 4.0),
+                kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+                interactive: None,
+            },
+        ];
+        let eff = effective_background(&fragments, 2, Color::WHITE);
+        assert_eq!(eff, Color::rgb(5, 5, 5), "a transparent box must not shadow the next opaque ancestor beneath it");
+    }
+
+    #[test]
+    fn effective_background_with_no_containing_box_falls_back_to_canvas() {
+        let fragments = vec![Fragment {
+            rect: rect(3.0, 3.0, 4.0, 4.0),
+            kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+            interactive: None,
+        }];
+        assert_eq!(effective_background(&fragments, 0, Color::WHITE), Color::WHITE);
+        assert_eq!(effective_background(&fragments, 0, Color::rgb(1, 2, 3)), Color::rgb(1, 2, 3), "must thread the caller's own canvas through, not hardcode white");
+    }
+
+    #[test]
+    fn effective_background_ignores_a_box_painted_after_the_text() {
+        let fragments = vec![
+            Fragment {
+                rect: rect(0.0, 0.0, 20.0, 20.0),
+                kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+                interactive: None,
+            },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(1, 2, 3), BorderSide::default()) }, interactive: None },
+        ];
+        let eff = effective_background(&fragments, 0, Color::WHITE);
+        assert_eq!(eff, Color::WHITE, "a box painted AFTER this text must not count as its background");
+    }
+
+    #[test]
+    fn effective_background_a_box_not_containing_the_text_origin_is_skipped() {
+        let fragments = vec![
+            Fragment { rect: rect(50.0, 50.0, 5.0, 5.0), kind: FragmentKind::Box { style: box_style(Color::rgb(9, 9, 9), BorderSide::default()) }, interactive: None },
+            Fragment {
+                rect: rect(0.0, 0.0, 4.0, 4.0),
+                kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+                interactive: None,
+            },
+        ];
+        let eff = effective_background(&fragments, 1, Color::WHITE);
+        assert_eq!(eff, Color::WHITE, "a box that doesn't geometrically contain the text's own origin must not count");
+    }
+
+    #[test]
+    fn effective_background_out_of_range_index_is_canvas_not_a_panic() {
+        let fragments: Vec<Fragment> = Vec::new();
+        assert_eq!(effective_background(&fragments, 5, Color::WHITE), Color::WHITE);
+    }
+
+    // ---------------------------------------------------- paint: contrast repair
+
+    #[test]
+    fn paint_repairs_illegible_white_text_over_the_default_white_canvas() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let text_style = ComputedStyle { color: Color::WHITE, font_size: 16.0, ..ComputedStyle::default() };
+        let fragments = vec![Fragment {
+            rect: rect(0.0, 0.0, 16.0, 16.0),
+            kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
+            interactive: None,
+        }];
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+        let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
+        assert!(count_black > 0, "white text on the white canvas must be repaired to black ink");
+    }
+
+    #[test]
+    fn paint_leaves_already_legible_black_on_white_text_unchanged() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let text_style = ComputedStyle { color: Color::BLACK, font_size: 16.0, ..ComputedStyle::default() };
+        let fragments = vec![Fragment {
+            rect: rect(0.0, 0.0, 16.0, 16.0),
+            kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
+            interactive: None,
+        }];
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+        let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
+        assert!(count_black > 0, "already-legible black-on-white text must still render");
+    }
+
+    #[test]
+    fn paint_repairs_white_text_against_its_own_boxs_light_background_not_just_the_canvas() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let light_box = box_style(Color::rgb(240, 240, 240), BorderSide::default());
+        let text_style = ComputedStyle { color: Color::WHITE, font_size: 16.0, ..ComputedStyle::default() };
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: light_box }, interactive: None },
+            Fragment {
+                rect: rect(0.0, 0.0, 16.0, 16.0),
+                kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
+                interactive: None,
+            },
+        ];
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+        let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
+        assert!(count_black > 0, "white text over a near-white BOX background (not the canvas) must still be repaired");
+    }
+
+    #[test]
+    fn paint_keeps_white_text_white_over_a_dark_opaque_box() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let dark_box = box_style(Color::rgb(10, 10, 10), BorderSide::default());
+        let text_style = ComputedStyle { color: Color::WHITE, font_size: 16.0, ..ComputedStyle::default() };
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: dark_box }, interactive: None },
+            Fragment {
+                rect: rect(0.0, 0.0, 16.0, 16.0),
+                kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
+                interactive: None,
+            },
+        ];
+        paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+        // The box fills the whole 20x20 surface, so any white pixel found
+        // can only be glyph ink (never leftover canvas) -- proves the
+        // already-legible white-on-dark text passed through unrepaired.
+        let count_white_ink = s.bytes().chunks(4).filter(|p| p == &[255, 255, 255, 255]).count();
+        assert!(count_white_ink > 0, "white text already legible over a dark box must render unchanged");
+    }
 }

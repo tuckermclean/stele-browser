@@ -552,6 +552,45 @@ else
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_PRESENTATIONAL") actual=$(wc -c < /tmp/stele_a3p.png)"
   fi
 
+  # A3q -- packet T1c's contrast covenant: `--audit-contrast <file>` is a
+  # DEFENSE-IN-DEPTH GATE, not the repair itself -- backend::raster::paint
+  # already repairs every text run's foreground color against its own
+  # analytically-resolved effective background before it ever reaches this
+  # check (see style::contrast's own doc comments). A correct implementation
+  # reports ZERO violations on every fixture here: style::contrast::
+  # repair_fg guarantees at least one of black/white always clears
+  # CONTRAST_MIN against ANY background (see that function's own doc
+  # comment) -- so a NONZERO exit below signals a REGRESSION in repair_fg/
+  # effective_background, not an expected/normal outcome. `--bless` has
+  # nothing to bless for an audit gate (no golden render output), so this
+  # block is a deliberate no-op under --bless (composes harmlessly, per
+  # this packet's own brief).
+  #
+  # NOTE (scope, future packet): this audits RAW, pre-quantization computed
+  # colors -- it does NOT re-check contrast after `backend::fb::
+  # convert_to_fb_bytes`'s palette quantization (the `--render-fb`
+  # framebuffer path), which could in principle nudge a borderline-
+  # compliant color across the threshold on very low-color-depth hardware.
+  # Auditing post-quantization is a reasonable follow-up, not this packet's
+  # job (brief scope).
+  if [ "$BLESS" = 1 ]; then
+    pend "A3q: --audit-contrast has no golden to bless (defense-in-depth gate, not a render) -- skipped under --bless"
+  elif [ ! -f "$HOST_BIN" ]; then
+    bad "A3q: host binary still not found at $HOST_BIN"
+  else
+    audit_fail=0
+    for f in fixtures/basic.html fixtures/images.html fixtures/kitchen-sink.html fixtures/presentational.html fixtures/table-border.html fixtures/table-spacing.html; do
+      if ! out_audit="$("$HOST_BIN" --headless --audit-contrast "$f" 2>&1)"; then
+        bad "A3q: --audit-contrast reported a violation on $f"
+        sed 's/^/    /' <<< "$out_audit"
+        audit_fail=1
+      fi
+    done
+    if [ "$audit_fail" = 0 ]; then
+      pass "A3q: --audit-contrast reports zero violations across the fixture corpus"
+    fi
+  fi
+
   # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline
