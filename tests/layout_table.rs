@@ -8,7 +8,7 @@
 //! point of the assertion.
 
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
-use stele::style::computed::{BorderCollapse, BorderSide, BorderStyle, Display, Edges, LengthPercentage};
+use stele::style::computed::{BorderCollapse, BorderSide, BorderStyle, Dimension, Display, Edges, LengthPercentage};
 use stele::style::ComputedStyle;
 use stele::surface::Color;
 
@@ -778,4 +778,83 @@ fn separate_mode_bordered_cells_do_not_overlap() {
     let r0c1 = boxes[3];
     let gap = r0c1.rect.origin.x - (r0c0.rect.origin.x + r0c0.rect.size.w);
     assert!(gap >= 0.0, "separate mode must never overlap adjacent cells, got gap {gap}");
+}
+
+// ---------------------------------------------------------------------------
+// packet/acid1-content-box: a table cell keeps `BorderBox` sizing (the
+// table solver's own long-standing implicit contract -- `layout::block::
+// box_sizing_for`'s own doc comment has the full "why") even though this
+// packet switches every OTHER element to CSS-correct `ContentBox` by
+// default. A cell with an explicit `width` + padding + border must render
+// at EXACTLY that declared width (padding/border eat INTO it, matching
+// pre-packet behavior and everything `layout::table`'s column solver
+// assumes) -- while a plain (non-table) block box with the identical
+// width+padding+border grows PAST its declared width (content-box: padding/
+// border add on top), proving the split is real and per-display-type, not
+// an accidental global regression toward one model or the other.
+// ---------------------------------------------------------------------------
+
+fn sized_bordered_cell(width_px: f32, padding_px: f32, border_px: f32) -> LayoutNode {
+    let mut style = styled(Display::TableCell);
+    style.width = Dimension::Px(width_px);
+    style.padding = Edges::all(LengthPercentage::Px(padding_px));
+    style.border = Edges::all(BorderSide { width: border_px, style: BorderStyle::Solid, color: Color::BLACK });
+    LayoutNode {
+        style,
+        content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
+        children: vec![text_node("x")],
+        interactive: None,
+    }
+}
+
+fn sized_bordered_block(width_px: f32, padding_px: f32, border_px: f32) -> LayoutNode {
+    let mut style = styled(Display::Block);
+    style.width = Dimension::Px(width_px);
+    style.padding = Edges::all(LengthPercentage::Px(padding_px));
+    style.border = Edges::all(BorderSide { width: border_px, style: BorderStyle::Solid, color: Color::BLACK });
+    LayoutNode { style, content: BoxContent::Container, children: vec![text_node("x")], interactive: None }
+}
+
+#[test]
+fn table_cell_with_width_padding_border_keeps_border_box_sizing() {
+    // 100px declared width, 10px padding + 5px border on every side --
+    // BorderBox: padding+border eat INTO the declared 100px, so the
+    // rendered box stays exactly 100px wide (not 100+20+10=130).
+    let t = root_with(table(vec![row(vec![sized_bordered_cell(100.0, 10.0, 5.0)])]));
+    let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
+    let boxes = non_root_boxes(&fragments, 640.0);
+    assert!(!boxes.is_empty(), "expected at least one non-root box (the cell/table)");
+    for b in &boxes {
+        assert_eq!(
+            b.rect.size.w, 100.0,
+            "a table cell's declared width must stay border-box (padding/border absorbed, not added) -- got {}",
+            b.rect.size.w
+        );
+    }
+}
+
+#[test]
+fn plain_block_box_with_width_padding_border_uses_content_box_sizing() {
+    // Same 100px width, 10px padding, 5px border -- but NOT a table cell.
+    // ContentBox (this packet's new default): padding/border add ON TOP of
+    // the declared 100px content width, so the rendered box grows to
+    // 100 + 2*10 (padding) + 2*5 (border) = 130px.
+    let root = LayoutNode {
+        style: styled(Display::Block),
+        content: BoxContent::Container,
+        children: vec![sized_bordered_block(100.0, 10.0, 5.0)],
+        interactive: None,
+    };
+    let fragments = layout(&root, Size { w: 640.0, h: 480.0 });
+    // Filter out the (viewport-stretched, 640px-wide) root box the same way
+    // `non_root_boxes` does for table geometry above -- this avoids any
+    // assumption about paint-order index.
+    let boxes = non_root_boxes(&fragments, 640.0);
+    assert_eq!(boxes.len(), 1, "expected exactly the one sized child box");
+    assert_eq!(
+        boxes[0].rect.size.w,
+        130.0,
+        "a plain block box's declared width must be its CONTENT width under content-box (padding+border add on top) -- got {}",
+        boxes[0].rect.size.w
+    );
 }

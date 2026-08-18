@@ -1509,8 +1509,44 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
         },
         float: map_float(cs.float),
         clear: map_clear(cs.clear),
-        box_sizing: map_box_sizing(cs.box_sizing),
+        box_sizing: box_sizing_for(cs),
         ..Default::default()
+    }
+}
+
+/// `box_sizing` for a node: `map_box_sizing(cs.box_sizing)` (real CSS
+/// `box-sizing`, honoring an explicit author declaration) for everything
+/// EXCEPT table-internal display types (`Display::Table`/`TableRow`/
+/// `TableCell`/`TableRowGroup`), which are hardcoded `BorderBox` regardless
+/// of `cs.box_sizing` -- `layout::table`/this module's own `cell_query_
+/// width`/`cell_content_layout`/`compute_table_cache_entry` compute a
+/// cell's/table's own box dimensions ASSUMING taffy's reported width is a
+/// BORDER-box (they add/subtract padding+border themselves on top of that
+/// assumption -- see e.g. `cell_content_layout`'s `style.size.width =
+/// length(w)` immediately followed by reading the resulting layout's own
+/// border/padding back out). Flipping every node to `ContentBox` (this
+/// packet's own first attempt, verified by the user's own pixel
+/// measurement) makes that path double-count padding+border: a cell grows
+/// by its padding+border TWICE (once from taffy's real `ContentBox`
+/// growth, once again from the table code's own border-box-shaped
+/// arithmetic on top), which doesn't just resize cells -- it desyncs the
+/// column solver's column-width sum from what actually got painted,
+/// producing a phantom extra (empty, or content-overlapping) column at the
+/// table's right edge (`goldens/table-spacing.png`/`table-border.png`, and
+/// `kitchen-sink.png`'s embedded table). No fixture ever declares
+/// `box-sizing` on a table/row/cell (`grep -c "box-sizing" fixtures/
+/// table-*.html fixtures/kitchen-sink.html` is all zeros), so this
+/// hardcoding costs nothing real today -- it's the table engine's own
+/// well-established (if implicit) border-box contract, not a regression;
+/// giving table cells real per-declaration `box-sizing` support is a
+/// separate, out-of-scope rabbit hole (the table solver's own arithmetic
+/// would need to branch on it too, not just this one field) with zero
+/// user-visible benefit -- every fixture's tables already render correctly
+/// under the implicit border-box assumption they were written against.
+fn box_sizing_for(cs: &ComputedStyle) -> TBoxSizing {
+    match cs.display {
+        Display::Table | Display::TableRow | Display::TableCell | Display::TableRowGroup => TBoxSizing::BorderBox,
+        _ => map_box_sizing(cs.box_sizing),
     }
 }
 
