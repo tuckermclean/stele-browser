@@ -735,6 +735,51 @@ fn x11_max_scroll(doc_h: u32, win_h: u32) -> u32 {
     doc_h.saturating_sub(win_h.min(doc_h))
 }
 
+/// The wire-level plan for repainting the window after a scroll from
+/// `old_scroll` to `new_scroll` (both already clamped to `[0, max_scroll]`
+/// by the caller): either re-send the whole window ([`ScrollBlit::Full`]),
+/// or shift the RETAINED rows server-side with a single `CopyArea` and only
+/// re-send the thin newly-exposed strip ([`ScrollBlit::Partial`]).
+///
+/// `Full` is chosen whenever the scroll delta is `>= win_h` — at that point
+/// NOTHING from the old frame is still on screen, so a `CopyArea` would just
+/// be dead weight in front of a full repaint anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollBlit {
+    Full,
+    Partial {
+        /// `CopyArea` source window-row.
+        copy_src_y: u32,
+        /// `CopyArea` destination window-row.
+        copy_dst_y: u32,
+        /// `CopyArea` row count (0 => no `CopyArea` needed at all).
+        copy_h: u32,
+        /// Document row the newly-exposed strip starts at (crop source).
+        strip_page_y: u32,
+        /// Window row the newly-exposed strip lands at (`PutImage` dst_y_base).
+        strip_dst_y: u32,
+        /// Strip row count (0 => nothing new to paint, e.g. a no-op scroll).
+        strip_h: u32,
+    },
+}
+
+/// Compute [`ScrollBlit`] for a scroll from `old_scroll` to `new_scroll`
+/// within a `win_h`-row window. Total: `new_scroll == old_scroll` (a no-op
+/// scroll — e.g. Up already at the top) returns a `Partial` with `copy_h`
+/// and `strip_h` both `0`, so a caller that always runs the `Partial` branch
+/// sends nothing over the wire rather than needing its own separate
+/// early-out. `win_h == 0` degenerates to `Full` (nothing sane to copy),
+/// never a panic/div-by-zero (this function does no division at all).
+///
+/// TODO(packet/x11-perf): not yet implemented. Failing tests:
+/// `scroll_blit_scrolling_down_copies_up_and_paints_the_bottom_strip`,
+/// `scroll_blit_scrolling_up_copies_down_and_paints_the_top_strip`,
+/// `scroll_blit_jump_at_or_past_win_h_is_full`,
+/// `scroll_blit_no_op_scroll_paints_nothing`.
+fn scroll_blit(_old_scroll: u32, _new_scroll: u32, _win_h: u32) -> ScrollBlit {
+    todo!("scroll_blit: packet/x11-perf scroll planning not yet implemented")
+}
+
 /// Default X11 window size (CSS px) — no `--width`/`--height` flag yet (the
 /// packet brief doesn't ask for one); `ConfigureNotify` (a user resizing
 /// the window) reflows to whatever size the window manager/server actually
@@ -1460,6 +1505,57 @@ mod tests {
         assert_eq!(out.len(), 2 * 3 * 4);
         assert_eq!(&out[0..8], &[0, 0, 0, 255, 0, 0, 0, 255], "row 0 is the black surface");
         assert!(out[8..].iter().all(|&b| b == 0xff), "rows below content must be white canvas");
+    }
+
+    // ----------------------------------------------------------- scroll_blit
+
+    #[test]
+    fn scroll_blit_scrolling_down_copies_up_and_paints_the_bottom_strip() {
+        // win_h=768, old=100 -> new=160 (d=60): retained rows shift up by
+        // 60 (CopyArea src_y=60 -> dst_y=0, 708 rows); the newly-exposed
+        // bottom 60-row strip is page rows [160+708, 160+768) = [868, 928).
+        let blit = scroll_blit(100, 160, 768);
+        assert_eq!(
+            blit,
+            ScrollBlit::Partial { copy_src_y: 60, copy_dst_y: 0, copy_h: 708, strip_page_y: 868, strip_dst_y: 708, strip_h: 60 }
+        );
+    }
+
+    #[test]
+    fn scroll_blit_scrolling_up_copies_down_and_paints_the_top_strip() {
+        // win_h=768, old=160 -> new=100 (d=60): retained rows shift down by
+        // 60 (CopyArea src_y=0 -> dst_y=60, 708 rows); the newly-exposed top
+        // 60-row strip is page rows [100, 160).
+        let blit = scroll_blit(160, 100, 768);
+        assert_eq!(
+            blit,
+            ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 60, copy_h: 708, strip_page_y: 100, strip_dst_y: 0, strip_h: 60 }
+        );
+    }
+
+    #[test]
+    fn scroll_blit_jump_at_or_past_win_h_is_full() {
+        // A jump of exactly win_h, and one well past it, both leave nothing
+        // from the old frame on screen -- no CopyArea is worth doing.
+        assert_eq!(scroll_blit(0, 768, 768), ScrollBlit::Full);
+        assert_eq!(scroll_blit(0, 5000, 768), ScrollBlit::Full);
+        assert_eq!(scroll_blit(5000, 0, 768), ScrollBlit::Full); // upward jump too
+    }
+
+    #[test]
+    fn scroll_blit_no_op_scroll_paints_nothing() {
+        // Up already at the top (saturating_sub clamps to the same value) --
+        // must not CopyArea or PutImage anything.
+        let blit = scroll_blit(0, 0, 768);
+        assert_eq!(blit, ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 0, copy_h: 0, strip_page_y: 0, strip_dst_y: 0, strip_h: 0 });
+    }
+
+    #[test]
+    fn scroll_blit_small_window_and_small_delta_stay_bounded() {
+        // A window shorter than a typical line-scroll step still produces a
+        // sane (bounded, non-panicking) plan.
+        let blit = scroll_blit(0, 10, 20);
+        assert_eq!(blit, ScrollBlit::Partial { copy_src_y: 10, copy_dst_y: 0, copy_h: 10, strip_page_y: 20, strip_dst_y: 10, strip_h: 10 });
     }
 
     #[test]
