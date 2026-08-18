@@ -1,0 +1,28 @@
+
+
+ Controls
+
+
+
+ T4 button-honesty: every control below has an HONEST label -- either something
+ the author actually wrote (its own text, a value, an aria-label, a title), or
+ -- for a real submit control with nothing else -- HTML's own "Submit" default.
+ Nothing here is a fabricated word Stele invented on the author's behalf.
+
+
+ Icon button (aria-label only, no text, no form, NOT a submit button): [ Theme
+ ]
+
+
+ Text-labeled button (own text content wins): [ Save ]
+
+
+ Valued submit input (value attribute): [ Go ]
+
+
+ Bare submit input inside a form (HTML's own "Submit" UA default, the ONLY case
+ a hardcoded word is honest): [ Submit ]
+
+
+ Value-less type=button (not a submit control -- renders empty, not an invented
+ "Button"): [ ]

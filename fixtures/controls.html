@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head><title>Controls Fixture</title></head>
+<body>
+<h1>Controls</h1>
+<p>T4 button-honesty: every control below has an HONEST label -- either
+something the author actually wrote (its own text, a <code>value</code>, an
+<code>aria-label</code>, a <code>title</code>), or -- for a real submit
+control with nothing else -- HTML's own "Submit" default. Nothing here is a
+fabricated word Stele invented on the author's behalf.</p>
+<div class="toolbar">
+<p>Icon button (aria-label only, no text, no form, NOT a submit button):
+<button type="button" aria-label="Theme"></button></p>
+</div>
+<form action="/go">
+<p>Text-labeled button (own text content wins):
+<button>Save</button></p>
+<p>Valued submit input (value attribute):
+<input type="submit" value="Go"></p>
+<p>Bare submit input inside a form (HTML's own "Submit" UA default, the
+ONLY case a hardcoded word is honest):
+<input type="submit"></p>
+<p>Value-less type=button (not a submit control -- renders empty, not an
+invented "Button"):
+<input type="button"></p>
+</form>
+</body>
+</html>
