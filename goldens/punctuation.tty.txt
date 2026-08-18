@@ -1,0 +1,28 @@
+
+
+ Punctuation & Glyph Fallback Coverage
+
+
+
+ Dash: en-dash and em-dash
+
+
+ Quotes: 'single' and "double"
+
+
+ Ellipsis: wait for it...
+
+
+ Bullet: * list item
+
+
+ Nbsp: a b
+
+
+ Multiply: 3×4
+
+
+ Arrow: go->there
+
+
+ Unmappable: emoji  and CJK
