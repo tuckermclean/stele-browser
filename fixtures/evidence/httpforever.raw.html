@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>HTTP Forever — A reliably insecure connection</title>
+		<meta name="description" content="HTTP Forever is a plain-HTTP page that helps you trigger captive portal login screens on public WiFi — on trains, in hotels, bars and on flights.">
+		<meta name="keywords" content="http, captive portal, wifi login, captive portal buster, insecure, no https">
+		<meta name="theme-color" content="#2f8f4e">
+		<meta name="author" content="Scott Helme">
+		<link rel="icon" id="favicon" href="favicon.svg" type="image/svg+xml">
+		<link rel="apple-touch-icon" href="apple-touch-icon.png">
+		<link rel="canonical" href="http://httpforever.com/">
+		<meta name="robots" content="index, follow">
+
+		<!-- Open Graph -->
+		<meta property="og:type" content="website">
+		<meta property="og:site_name" content="HTTP Forever">
+		<meta property="og:title" content="HTTP Forever — A reliably insecure connection">
+		<meta property="og:description" content="A plain-HTTP page that helps you trigger captive portal login screens on public WiFi — on trains, in hotels, bars and on flights.">
+		<meta property="og:url" content="http://httpforever.com/">
+		<meta property="og:image" content="http://httpforever.com/og-image.png">
+		<meta property="og:image:width" content="1200">
+		<meta property="og:image:height" content="630">
+		<meta property="og:image:alt" content="An open padlock beside the HTTP Forever wordmark on a green background.">
+		<meta property="og:locale" content="en_GB">
+
+		<!-- Twitter -->
+		<meta name="twitter:card" content="summary_large_image">
+		<meta name="twitter:site" content="@Scott_Helme">
+		<meta name="twitter:creator" content="@Scott_Helme">
+		<meta name="twitter:title" content="HTTP Forever — A reliably insecure connection">
+		<meta name="twitter:description" content="A plain-HTTP page that helps you trigger captive portal login screens on public WiFi — on trains, in hotels, bars and on flights.">
+		<meta name="twitter:image" content="http://httpforever.com/og-image.png">
+		<meta name="twitter:image:alt" content="An open padlock beside the HTTP Forever wordmark on a green background.">
+
+		<link rel="stylesheet" href="css/style.css">
+		<script src="js/theme.js"></script>
+	</head>
+	<body>
+		<div class="switcher">
+			<button type="button" id="themeBtn" class="sw-btn" aria-label="Theme">
+				<svg class="ic ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.8v2.4M12 19.8v2.4M4.4 4.4l1.7 1.7M17.9 17.9l1.7 1.7M1.8 12h2.4M19.8 12h2.4M4.4 19.6l1.7-1.7M17.9 6.1l1.7-1.7"/></svg>
+				<svg class="ic ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8z"/></svg>
+				<svg class="ic ic-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>
+			</button>
+			<button type="button" id="colorBtn" class="sw-btn sw-color" aria-label="Colour"></button>
+		</div>
+		<header class="hero">
+			<div class="hero__inner">
+				<span class="brand">
+					<svg class="brand__mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+						<rect x="3.5" y="10.5" width="17" height="11" rx="2.6" fill="currentColor"/>
+						<path d="M8 10.5V7a4 4 0 0 1 7.9-0.9" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+						<circle cx="12" cy="15.1" r="1.7" fill="#f2f8f0"/>
+						<rect x="11.2" y="15.1" width="1.6" height="3.6" rx="0.8" fill="#f2f8f0"/>
+					</svg>
+					<span class="brand__name">HTTP&nbsp;Forever</span>
+				</span>
+				<h1 class="hero__title">A reliably insecure connection</h1>
+				<p class="hero__url"><span class="hero__scheme">http://</span>httpforever.com</p>
+			</div>
+			<div class="hero__wave" aria-hidden="true"></div>
+		</header>
+
+		<main>
+			<section class="section">
+				<p class="section__kicker">01 — The idea</p>
+				<h2 class="section__title">Why does this site exist?</h2>
+				<p>This domain started out as my personal <strong>captive portal buster</strong>, but I wanted to publicise it for anyone to use. If you're on a train, in a hotel or bar, on a flight, or anywhere that makes you log in for WiFi, this site can help you get to the login screen.</p>
+			</section>
+
+			<section class="section">
+				<p class="section__kicker">02 — The mechanics</p>
+				<h2 class="section__title">How does it work?</h2>
+				<p>When you connect to a WiFi hotspot out and about, you sometimes have to log in or accept terms and conditions. To do that, the <em>captive portal</em> has to intercept one of your requests and inject its own login page.</p>
+				<p>Modern sites use HTTPS, so that interception triggers a big red security warning in your browser — one you should <strong>never</strong> click through. Because this page is served over plain HTTP, the portal can intercept it cleanly and show you the login screen instead. Just open a new tab and come here.</p>
+			</section>
+
+			<section class="section section--cta">
+				<p class="section__kicker">03 — Go ahead</p>
+				<h2 class="section__title">Can I use it?</h2>
+				<p>Yes! Anyone is free to use or link to this site. Just make sure you're always on the HTTP version:</p>
+				<span class="cta__copy" tabindex="0" title="Click to select, then press Ctrl/Cmd + C to copy">http://httpforever.com</span>
+				<span class="cta__hint">Click to select, then copy</span>
+			</section>
+
+			<section class="section">
+				<p class="section__kicker">04 — The author</p>
+				<h2 class="section__title">Who built this?</h2>
+				<p>This site was built by <strong>Scott Helme</strong>, a security researcher trying to help make the web more secure.</p>
+				<ul class="contacts">
+					<li>
+						<a href="https://twitter.com/Scott_Helme" target="_blank" rel="noopener">
+							<svg class="contacts__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M23.643 4.937c-.835.37-1.732.62-2.675.733a4.67 4.67 0 0 0 2.048-2.578 9.3 9.3 0 0 1-2.958 1.13 4.66 4.66 0 0 0-7.938 4.25 13.23 13.23 0 0 1-9.6-4.868 4.66 4.66 0 0 0 1.442 6.22A4.6 4.6 0 0 1 1.67 9.15v.06a4.66 4.66 0 0 0 3.737 4.568 4.7 4.7 0 0 1-2.104.08 4.66 4.66 0 0 0 4.352 3.234 9.35 9.35 0 0 1-5.786 1.995 9 9 0 0 1-1.112-.065 13.19 13.19 0 0 0 7.14 2.093c8.57 0 13.255-7.098 13.255-13.254 0-.2-.005-.402-.014-.602a9.5 9.5 0 0 0 2.323-2.41z"/></svg>
+							<span class="contacts__label">Twitter</span>
+							<span class="contacts__handle">twitter.com/Scott_Helme</span>
+						</a>
+					</li>
+					<li>
+						<a href="https://scotthelme.co.uk" target="_blank" rel="noopener">
+							<svg class="contacts__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 0 20 15.3 15.3 0 0 1 0-20z"/></svg>
+							<span class="contacts__label">Website</span>
+							<span class="contacts__handle">scotthelme.co.uk</span>
+						</a>
+					</li>
+					<li>
+						<a href="https://github.com/ScottHelme" target="_blank" rel="noopener">
+							<svg class="contacts__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.5 11.5 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.014 2.898-.014 3.293 0 .322.216.694.825.576C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12z"/></svg>
+							<span class="contacts__label">GitHub</span>
+							<span class="contacts__handle">github.com/ScottHelme</span>
+						</a>
+					</li>
+					<li>
+						<a href="https://www.linkedin.com/in/scotthelme/" target="_blank" rel="noopener">
+							<svg class="contacts__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
+							<span class="contacts__label">LinkedIn</span>
+							<span class="contacts__handle">linkedin.com/in/scotthelme</span>
+						</a>
+					</li>
+					<li>
+						<a href="https://www.facebook.com/scott.helme" target="_blank" rel="noopener">
+							<svg class="contacts__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+							<span class="contacts__label">Facebook</span>
+							<span class="contacts__handle">facebook.com/scott.helme</span>
+						</a>
+					</li>
+					<li>
+						<a href="https://www.youtube.com/user/ScottHelme" target="_blank" rel="noopener">
+							<svg class="contacts__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+							<span class="contacts__label">YouTube</span>
+							<span class="contacts__handle">youtube.com/user/ScottHelme</span>
+						</a>
+					</li>
+				</ul>
+			</section>
+		</main>
+
+		<footer class="footer">
+			<p class="footer__more">More from Scott Helme</p>
+			<nav class="footer__projects" aria-label="Other projects by Scott Helme">
+				<a href="https://securityheaders.com" target="_blank" rel="noopener">Security Headers</a>
+				<a href="https://report-uri.com" target="_blank" rel="noopener">Report URI</a>
+				<a href="https://crawler.ninja" target="_blank" rel="noopener">Crawler.Ninja</a>
+				<a href="https://whynopasskeys.com" target="_blank" rel="noopener">Why No Passkeys?</a>
+			</nav>
+			<p>Created by Scott Helme · Licensed <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a> · <a href="https://scotthelme.co.uk" target="_blank" rel="noopener">scotthelme.co.uk</a></p>
+		</footer>
+	</body>
+</html>
