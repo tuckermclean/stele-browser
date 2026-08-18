@@ -99,3 +99,54 @@ fn resolve_typical_redirect_location_headers() {
         "http://127.0.0.1:9000/redirect/2"
     );
 }
+
+// -- `file://` resolution (packet/fix-local-img-loading) -------------------
+//
+// Investigating a "local <img> renders blank" report, these pin down that
+// `Url::resolve` and `fetch::file::file_path` (see `tests/fetch_file.rs`)
+// already do the right thing for a `file://` base — a RELATIVE `<img src>`
+// resolves against the document's own directory (not the repo tree, not the
+// process's cwd — directory-INDEPENDENT), and an ABSOLUTE `file://` `<img
+// src>` passes through unchanged, exactly the two shapes the report called
+// out. The actual root cause turned out to live elsewhere (an `<img>` with
+// no `width`/`height` attribute got a 0x0 intrinsic size even after a
+// successful decode — see `src/layout/box_tree.rs`'s `replaced_intrinsic`
+// and its doc comment) — these cases are a real, independently-useful
+// contract regardless, and a regression guard against this exact hypothesis
+// ever becoming true.
+
+#[test]
+fn resolve_relative_file_reference_against_an_arbitrary_tmp_directory() {
+    // Directory-independence is the point: nothing here is under the repo
+    // tree, and the base is a real multi-segment `/tmp/...` path, not `/`.
+    let base = Url::new("file:///tmp/dir/doc.html");
+    assert_eq!(base.resolve("pic.png").as_str(), "file:///tmp/dir/pic.png");
+}
+
+#[test]
+fn resolve_relative_file_reference_against_a_deeper_arbitrary_directory() {
+    let base = Url::new("file:///tmp/a/b/c/doc.html");
+    assert_eq!(base.resolve("pic.png").as_str(), "file:///tmp/a/b/c/pic.png");
+}
+
+#[test]
+fn resolve_an_absolute_file_reference_passes_through_unchanged_regardless_of_base() {
+    let base = Url::new("file:///tmp/dir/doc.html");
+    assert_eq!(
+        base.resolve("file:///other/pic.png").as_str(),
+        "file:///other/pic.png"
+    );
+    // Same result no matter where the document itself lives — this is what
+    // "regardless of the document's directory" means for an absolute ref.
+    let repo_base = Url::new("file:///home/someone/repo/fixtures/doc.html");
+    assert_eq!(
+        repo_base.resolve("file:///other/pic.png").as_str(),
+        "file:///other/pic.png"
+    );
+}
+
+#[test]
+fn resolve_relative_file_reference_into_a_nested_sibling_directory() {
+    let base = Url::new("file:///tmp/dir/doc.html");
+    assert_eq!(base.resolve("images/pic.png").as_str(), "file:///tmp/dir/images/pic.png");
+}

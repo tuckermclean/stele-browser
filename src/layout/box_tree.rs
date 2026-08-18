@@ -1570,6 +1570,88 @@ mod tests {
         }
     }
 
+    /// Bugfix (packet/fix-local-img-loading): an `<img>` with NO `width`/
+    /// `height` attributes used to get [`DEFAULT_IMG_INTRINSIC`] (0x0) even
+    /// when its `src` had already been fetched+decoded into a real
+    /// `RgbaImage` sitting right there in the `images` map this function
+    /// already reads (see the very next line for `image:`). That 0x0
+    /// intrinsic size collapses the `Replaced` box to nothing — the image
+    /// never gets a nonzero rect for `layout`/`raster::paint` to draw into,
+    /// so a perfectly-decoded local image renders as blank pixels. This is
+    /// real-world-reachable: `tools/render-gallery.sh`'s own generated
+    /// `<img src="basic.png" alt="... render" loading="lazy">` (no
+    /// `width`/`height` at all) is exactly this shape, which is why opening
+    /// its `index.html` in Stele showed every thumbnail blank.
+    ///
+    /// The module doc comment's old "no image is decoded on this path
+    /// (that's P9's fb backend)" rationale for the 0x0 default was true when
+    /// P7 (this file, #14) wrote it, but stopped being true once M4's images
+    /// packet (#22) started threading real decoded pixels through the very
+    /// `images: &HashMap<NodeId, Rc<RgbaImage>>` parameter `build_node`
+    /// already has in scope — `img_intrinsic(el)` (attrs-only) just never
+    /// got updated to consult it. The fix: when neither attribute parses
+    /// (both default to 0.0 — `img_element_without_dimensions_defaults_to_
+    /// zero_intrinsic` above still pins that case when NO decoded image is
+    /// available either), fall back to the decoded image's own real pixel
+    /// dimensions before falling back further to 0x0.
+    #[test]
+    fn img_element_without_dimensions_falls_back_to_the_decoded_images_real_intrinsic_size() {
+        let d = dom::parser::parse(r#"<img src="x.png">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let img_id = find(&d, "img").expect("img node present");
+
+        let decoded = Rc::new(RgbaImage { width: 7, height: 3, pixels: vec![9, 9, 9, 255].repeat(21) });
+        let mut images = HashMap::new();
+        images.insert(img_id, decoded);
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match img.content {
+            BoxContent::Replaced { intrinsic, .. } => {
+                assert_eq!(intrinsic.w, 7.0, "should fall back to the decoded image's real width, not 0");
+                assert_eq!(intrinsic.h, 3.0, "should fall back to the decoded image's real height, not 0");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// An explicit `width`/`height` attribute still wins over the decoded
+    /// image's real size (e.g. an author scaling a large image down via
+    /// HTML attributes) -- the fallback above only applies when NEITHER
+    /// attribute parses, never as an override.
+    #[test]
+    fn img_element_with_explicit_dimensions_ignores_the_decoded_images_real_size() {
+        let d = dom::parser::parse(r#"<img src="x.png" width="40" height="20">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let img_id = find(&d, "img").expect("img node present");
+
+        let decoded = Rc::new(RgbaImage { width: 7, height: 3, pixels: vec![9, 9, 9, 255].repeat(21) });
+        let mut images = HashMap::new();
+        images.insert(img_id, decoded);
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match img.content {
+            BoxContent::Replaced { intrinsic, .. } => {
+                assert_eq!(intrinsic.w, 40.0);
+                assert_eq!(intrinsic.h, 20.0);
+            }
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn img_align_left_maps_to_float_left_presentational_hint() {
         let d = dom::parser::parse(r#"<img src="x.png" align="left" width="10" height="10">"#);
