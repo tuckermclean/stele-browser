@@ -1805,4 +1805,79 @@ mod tests {
         let d = presentational_hints("div", &attrs(&[("border", "1")]));
         assert_eq!(d.border_collapse, None);
     }
+
+    // ---- packet T1a: CSS custom properties + var() substitution ----
+
+    #[test]
+    fn substitute_vars_resolves_a_defined_custom_property() {
+        let env = Env::default().child(&[("--ink".into(), toks("blue"))]);
+        let result = substitute_vars(&toks("var(--ink)"), &env, &[], 0);
+        assert_eq!(result, Some(toks("blue")));
+    }
+
+    #[test]
+    fn substitute_vars_uses_fallback_when_undefined() {
+        let env = Env::default();
+        let result = substitute_vars(&toks("var(--missing, green)"), &env, &[], 0);
+        assert_eq!(result, Some(toks("green")));
+    }
+
+    #[test]
+    fn substitute_vars_undefined_with_no_fallback_is_invalid() {
+        // "Invalid at computed-value time" (CSS's own term): the caller
+        // treats `None` as "this declaration doesn't apply", never a crash
+        // and never a garbage value — see `substitute_vars`'s own doc
+        // comment.
+        let env = Env::default();
+        let result = substitute_vars(&toks("var(--missing)"), &env, &[], 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn substitute_vars_resolves_a_chain_through_another_custom_property() {
+        // `--a` doesn't hold a color directly — it holds a reference to
+        // `--b`, which `Env::get` returns UNSUBSTITUTED (see `Env`'s own doc
+        // comment); resolving `var(--a)` must recurse through that chain.
+        let env = Env::default().child(&[("--a".into(), toks("var(--b)")), ("--b".into(), toks("blue"))]);
+        let result = substitute_vars(&toks("var(--a)"), &env, &[], 0);
+        assert_eq!(result, Some(toks("blue")));
+    }
+
+    #[test]
+    fn substitute_vars_direct_self_cycle_is_invalid() {
+        let env = Env::default().child(&[("--a".into(), toks("var(--a)"))]);
+        let result = substitute_vars(&toks("var(--a)"), &env, &[], 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn substitute_vars_two_step_cycle_is_invalid() {
+        let env = Env::default().child(&[("--a".into(), toks("var(--b)")), ("--b".into(), toks("var(--a)"))]);
+        let result = substitute_vars(&toks("var(--a)"), &env, &[], 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn substitute_vars_pathologically_deep_nested_fallback_does_not_panic_or_hang() {
+        // A few thousand nested `var(--missing, var(--missing, ...))`
+        // fallbacks, all missing the same custom property: `--missing`'s
+        // name never enters `visiting` on the fallback path (fallback
+        // tokens aren't a custom-property lookup — see `substitute_vars`'s
+        // own doc comment), so it's `VAR_SUBSTITUTION_DEPTH_CAP`, not cycle
+        // detection, that has to stop this. This test's mere existence and
+        // return (rather than a stack overflow or an infinite loop) IS the
+        // totality proof.
+        let depth = 5000;
+        let mut css = String::new();
+        for _ in 0..depth {
+            css.push_str("var(--missing, ");
+        }
+        css.push_str("red");
+        for _ in 0..depth {
+            css.push(')');
+        }
+        let env = Env::default();
+        let result = substitute_vars(&toks(&css), &env, &[], 0);
+        assert_eq!(result, None, "depth cap must trip long before any real recursion overflow");
+    }
 }

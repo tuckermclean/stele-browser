@@ -265,4 +265,53 @@ mod tests {
         assert_eq!(info.classes, vec!["bar".to_string(), "baz".to_string()]);
         assert!(info.has_href);
     }
+
+    // ---- packet T1a: `:root` pseudo-class + `[name="value"]` attribute selector ----
+
+    #[test]
+    fn root_pseudo_matches_only_the_root_element() {
+        let c = Compound {
+            pseudo: vec![Pseudo::Root],
+            ..Compound::default()
+        };
+        assert!(c.matches(&ElementInfo { is_root: true, ..info("html", None, &[], false) }));
+        assert!(!c.matches(&ElementInfo { is_root: false, ..info("html", None, &[], false) }));
+    }
+
+    #[test]
+    fn attribute_selector_matches_exact_name_value_pair() {
+        let mut attrs = AttrMap::new();
+        attrs.set("data-theme", "dark");
+        let target = ElementInfo { attrs, ..info("html", None, &[], false) };
+
+        let matching = Compound {
+            attrs: vec![("data-theme".into(), "dark".into())],
+            ..Compound::default()
+        };
+        assert!(matching.matches(&target));
+
+        let wrong_value = Compound {
+            attrs: vec![("data-theme".into(), "light".into())],
+            ..Compound::default()
+        };
+        assert!(!wrong_value.matches(&target), "a different value must not match");
+
+        let missing_attr = Compound {
+            attrs: vec![("data-missing".into(), "dark".into())],
+            ..Compound::default()
+        };
+        assert!(!missing_attr.matches(&target), "an attribute the element doesn't carry must not match");
+    }
+
+    #[test]
+    fn specificity_counts_attribute_selectors_like_classes() {
+        // Per CSS's own specificity rules, an attribute selector contributes
+        // to the same "class" bucket as `.foo`/`:pseudo-class` — see
+        // `Compound::specificity`'s own doc comment.
+        let c = Compound {
+            attrs: vec![("data-theme".into(), "dark".into())],
+            ..Compound::default()
+        };
+        assert_eq!(c.specificity(), Specificity { ids: 0, classes: 1, elements: 0 });
+    }
 }

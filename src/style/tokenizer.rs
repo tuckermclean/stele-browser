@@ -279,4 +279,18 @@ mod tests {
             let _ = tokenize(input);
         }
     }
+
+    #[test]
+    fn custom_property_name_lexes_as_one_ident_token() {
+        // CSS custom-property names (`--name`) must lex as a single Ident token
+        // so the parser can recognize a declaration as custom-property vs.
+        // ordinary property purely by checking `Ident::starts_with("--")` — no
+        // tokenizer change turned out to be needed for this (packet T1a): `-` is
+        // already a valid ident-start/continue character (see `is_ident_start`/
+        // `is_ident_continue` above), and the numeric-literal fast path only
+        // claims a leading `-`/`+` when immediately followed by a digit (or
+        // `.digit`), which `--bg` never is.
+        let t = tokenize("--bg: red;");
+        assert_eq!(t[0], Token::Ident("--bg".into()));
+    }
 }
