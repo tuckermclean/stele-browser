@@ -735,6 +735,72 @@ fn x11_max_scroll(doc_h: u32, win_h: u32) -> u32 {
     doc_h.saturating_sub(win_h.min(doc_h))
 }
 
+/// The wire-level plan for repainting the window after a scroll from
+/// `old_scroll` to `new_scroll` (both already clamped to `[0, max_scroll]`
+/// by the caller): either re-send the whole window ([`ScrollBlit::Full`]),
+/// or shift the RETAINED rows server-side with a single `CopyArea` and only
+/// re-send the thin newly-exposed strip ([`ScrollBlit::Partial`]).
+///
+/// `Full` is chosen whenever the scroll delta is `>= win_h` — at that point
+/// NOTHING from the old frame is still on screen, so a `CopyArea` would just
+/// be dead weight in front of a full repaint anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollBlit {
+    Full,
+    Partial {
+        /// `CopyArea` source window-row.
+        copy_src_y: u32,
+        /// `CopyArea` destination window-row.
+        copy_dst_y: u32,
+        /// `CopyArea` row count (0 => no `CopyArea` needed at all).
+        copy_h: u32,
+        /// Document row the newly-exposed strip starts at (crop source).
+        strip_page_y: u32,
+        /// Window row the newly-exposed strip lands at (`PutImage` dst_y_base).
+        strip_dst_y: u32,
+        /// Strip row count (0 => nothing new to paint, e.g. a no-op scroll).
+        strip_h: u32,
+    },
+}
+
+/// Compute [`ScrollBlit`] for a scroll from `old_scroll` to `new_scroll`
+/// within a `win_h`-row window. Total: `new_scroll == old_scroll` (a no-op
+/// scroll — e.g. Up already at the top) returns a `Partial` with `copy_h`
+/// and `strip_h` both `0`, so a caller that always runs the `Partial` branch
+/// sends nothing over the wire rather than needing its own separate
+/// early-out. `win_h == 0` degenerates to `Full` (nothing sane to copy),
+/// never a panic/div-by-zero (this function does no division at all).
+fn scroll_blit(old_scroll: u32, new_scroll: u32, win_h: u32) -> ScrollBlit {
+    if new_scroll == old_scroll {
+        return ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 0, copy_h: 0, strip_page_y: new_scroll, strip_dst_y: 0, strip_h: 0 };
+    }
+    if new_scroll > old_scroll {
+        // Scrolling DOWN: the page moves up under the window. Retained rows
+        // (window rows [d, win_h) of the OLD frame) become window rows
+        // [0, win_h-d) of the new frame -- CopyArea shifts them up by `d`.
+        // The strip below that (window rows [win_h-d, win_h)) is newly
+        // exposed page rows [new_scroll+(win_h-d), new_scroll+win_h).
+        let d = new_scroll - old_scroll;
+        if d >= win_h {
+            return ScrollBlit::Full;
+        }
+        let copy_h = win_h - d;
+        ScrollBlit::Partial { copy_src_y: d, copy_dst_y: 0, copy_h, strip_page_y: new_scroll + copy_h, strip_dst_y: copy_h, strip_h: d }
+    } else {
+        // Scrolling UP: the page moves down under the window. Retained rows
+        // (window rows [0, win_h-d) of the OLD frame) become window rows
+        // [d, win_h) of the new frame -- CopyArea shifts them down by `d`.
+        // The strip above that (window rows [0, d)) is newly exposed page
+        // rows [new_scroll, new_scroll+d).
+        let d = old_scroll - new_scroll;
+        if d >= win_h {
+            return ScrollBlit::Full;
+        }
+        let copy_h = win_h - d;
+        ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: d, copy_h, strip_page_y: new_scroll, strip_dst_y: 0, strip_h: d }
+    }
+}
+
 /// Default X11 window size (CSS px) — no `--width`/`--height` flag yet (the
 /// packet brief doesn't ask for one); `ConfigureNotify` (a user resizing
 /// the window) reflows to whatever size the window manager/server actually
@@ -745,21 +811,102 @@ const DEFAULT_X11_HEIGHT: u32 = 768;
 /// Pixels scrolled per arrow-key press / mouse-wheel notch.
 const X11_LINE_SCROLL: u32 = 60;
 
+/// Full re-crop + re-convert + re-`PutImage` of the whole window at
+/// `scroll_y` — used for the initial paint, `Expose`, a resize
+/// (`ConfigureNotify`), and anything that changes the CONTENT (reload,
+/// navigate), where nothing already on screen is worth retaining via
+/// `CopyArea`. Manual/interactive-only, like `run_x11` itself (see its own
+/// doc comment) — takes `window`/`gc`/`depth`/`bpp`/`scanline_pad` as
+/// explicit params (rather than closing over them) since it's called from
+/// both `run_x11` and [`x11_scroll_to`]'s `Full` fallback.
+#[allow(clippy::too_many_arguments)]
+fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, surface: &MemSurface, window: u32, gc: u32, depth: u8, bpp: u32, scanline_pad: u32, width: u32, height: u32, scroll_y: u32) {
+    let cropped = crop_surface_rows(surface, width, height, scroll_y);
+    let stride = x11_row_stride(width, bpp, scanline_pad);
+    let fb_info = fb::FbInfo { width, height, bpp, stride };
+    match fb::convert_to_fb_bytes(&cropped, width, height, fb_info) {
+        Ok(bytes) => {
+            if let Err(e) = conn.put_image(window, gc, width as u16, height as u16, depth, &bytes, stride as usize) {
+                eprintln!("stele: --x11: PutImage failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("stele: --x11: pixel conversion failed: {e}"),
+    }
+}
+
+/// Repaint the window for a scroll from `old_scroll_y` to `new_scroll_y`,
+/// per [`scroll_blit`]'s plan: `ScrollBlit::Full` falls back to
+/// [`x11_full_redraw`] (nothing survives to copy); `ScrollBlit::Partial`
+/// server-side `CopyArea`s the retained rows (skipped entirely when
+/// `copy_h == 0`) and re-crops + re-converts + `PutImage`s ONLY the
+/// newly-exposed strip at `strip_dst_y` (skipped entirely when
+/// `strip_h == 0`, e.g. a no-op scroll) — never the whole window. Manual/
+/// interactive-only, like `run_x11` itself.
+#[allow(clippy::too_many_arguments)]
+fn x11_scroll_to(
+    conn: &mut stele::backend::x11::XConnection,
+    surface: &MemSurface,
+    window: u32,
+    gc: u32,
+    depth: u8,
+    bpp: u32,
+    scanline_pad: u32,
+    width: u32,
+    height: u32,
+    old_scroll_y: u32,
+    new_scroll_y: u32,
+) {
+    match scroll_blit(old_scroll_y, new_scroll_y, height) {
+        ScrollBlit::Full => x11_full_redraw(conn, surface, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y),
+        ScrollBlit::Partial { copy_src_y, copy_dst_y, copy_h, strip_page_y, strip_dst_y, strip_h } => {
+            if copy_h > 0 {
+                if let Err(e) = conn.copy_area(window, window, gc, 0, copy_src_y as i16, 0, copy_dst_y as i16, width as u16, copy_h as u16) {
+                    eprintln!("stele: --x11: CopyArea failed: {e}");
+                }
+            }
+            if strip_h > 0 {
+                let cropped = crop_surface_rows(surface, width, strip_h, strip_page_y);
+                let stride = x11_row_stride(width, bpp, scanline_pad);
+                let fb_info = fb::FbInfo { width, height: strip_h, bpp, stride };
+                match fb::convert_to_fb_bytes(&cropped, width, strip_h, fb_info) {
+                    Ok(bytes) => {
+                        if let Err(e) = conn.put_image_at(window, gc, width as u16, strip_h as u16, depth, &bytes, stride as usize, strip_dst_y as i16) {
+                            eprintln!("stele: --x11: PutImage (scroll strip) failed: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("stele: --x11: pixel conversion (scroll strip) failed: {e}"),
+                }
+            }
+        }
+    }
+}
+
 /// `stele --x11 <url>`: open a real X11 window (kdrive/Xfbdev, core
 /// protocol only — see `backend::x11`'s own doc comment for the wire
 /// details) and drive it interactively: `Expose` repaints the current
-/// frame; arrow keys/PageUp/PageDown/mouse wheel scroll (re-cropping +
-/// re-`PutImage`ing, no re-layout); `F5` reloads; a left click
+/// frame (and, on the FIRST `Expose`, claims keyboard focus — see below);
+/// arrow keys/PageUp/PageDown/mouse wheel scroll via [`x11_scroll_to`]
+/// (server-side `CopyArea` of the retained rows + `PutImage` of only the
+/// newly-exposed strip, no re-layout); `F5` reloads; a left click
 /// pixel-hit-tests the current fragment stream and, on a link hit,
 /// navigates; `ConfigureNotify` (a resize) re-lays-out at the new width;
 /// `q`/Escape quits.
 ///
+/// `SetInputFocus` is deliberately NOT sent right after `MapWindow`: the
+/// window isn't viewable yet at that point, and a real server replies
+/// `BadMatch` (confirmed against a live server: `X BadMatch(8) on
+/// SetInputFocus(major=42)`). Waiting for the first `Expose` guarantees
+/// viewability — and, as a side effect, is what actually GIVES this window
+/// keyboard focus on a WM-less server (Xfbdev/TinyX): under a real window
+/// manager the WM already handled focus, so this is a no-op there.
+///
 /// Deliberately NOT unit-tested — same split as `run_browser`'s own doc
 /// comment: there is no X server in CI to open a window against. Every
 /// pure decision this loop makes (protocol encode/parse, keysym mapping,
-/// pixel hit-test) already IS unit-tested, in `backend::x11`; this
-/// function is thin glue over those plus this module's own
-/// `render_x11_page`/`crop_surface_rows`/`x11_row_stride`. Bounded/total
+/// pixel hit-test, scroll-repaint planning) already IS unit-tested, in
+/// `backend::x11` and this module's own [`scroll_blit`]; this function is
+/// thin glue over those plus [`render_x11_page`]/[`crop_surface_rows`]/
+/// [`x11_row_stride`]/[`x11_full_redraw`]/[`x11_scroll_to`]. Bounded/total
 /// throughout: every socket read goes through `XConnection`'s own
 /// fixed-size-buffer reads, and a page-load/reload/navigate failure prints
 /// to stderr and keeps the previous frame on screen rather than panicking.
@@ -810,12 +957,10 @@ fn run_x11(source: &str) {
         }
     };
 
-    // No window manager under Xfbdev, so nothing else will hand us keyboard
-    // focus — do it ourselves, or q/Escape/scroll keys never arrive and the
-    // only escape from the mapped window is a reboot. Best-effort.
-    if let Err(e) = conn.set_input_focus(window) {
-        eprintln!("stele: --x11: SetInputFocus failed: {e}");
-    }
+    // SetInputFocus is sent on the first Expose (window is only guaranteed
+    // viewable then), not here -- see run_x11's own doc comment for why a
+    // pre-loop call gets BadMatch on a real server.
+    let mut focus_set = false;
 
     // Best-effort: a server that fails GetKeyboardMapping still gets a
     // working (mouse-only) shell rather than a hard exit.
@@ -834,21 +979,7 @@ fn run_x11(source: &str) {
         }
     };
 
-    let redraw = |conn: &mut XConnection, surface: &MemSurface, width: u32, height: u32, scroll_y: u32| {
-        let cropped = crop_surface_rows(surface, width, height, scroll_y);
-        let stride = x11_row_stride(width, bpp, scanline_pad);
-        let fb_info = fb::FbInfo { width, height, bpp, stride };
-        match fb::convert_to_fb_bytes(&cropped, width, height, fb_info) {
-            Ok(bytes) => {
-                if let Err(e) = conn.put_image(window, gc, width as u16, height as u16, depth, &bytes, stride as usize) {
-                    eprintln!("stele: --x11: PutImage failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("stele: --x11: pixel conversion failed: {e}"),
-        }
-    };
-
-    redraw(&mut conn, &surface, width, height, scroll_y);
+    x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
 
     loop {
         let event = match conn.next_event() {
@@ -860,7 +991,18 @@ fn run_x11(source: &str) {
         };
 
         match event {
-            xproto::XEvent::Expose => redraw(&mut conn, &surface, width, height, scroll_y),
+            xproto::XEvent::Expose => {
+                if !focus_set {
+                    // Window is guaranteed viewable now (Expose only fires
+                    // for a viewable window) -- see run_x11's doc comment
+                    // for why this can't happen right after MapWindow.
+                    if let Err(e) = conn.set_input_focus(window) {
+                        eprintln!("stele: --x11: SetInputFocus failed: {e}");
+                    }
+                    focus_set = true;
+                }
+                x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+            }
 
             xproto::XEvent::ConfigureNotify { width: w, height: h } => {
                 if w == 0 || h == 0 {
@@ -877,7 +1019,9 @@ fn run_x11(source: &str) {
                 }
                 let (_, doc_h) = stele::surface::Surface::size(&surface);
                 scroll_y = scroll_y.min(x11_max_scroll(doc_h, height));
-                redraw(&mut conn, &surface, width, height, scroll_y);
+                // Content (and possibly the window geometry itself) changed
+                // -- nothing on screen is safe to retain via CopyArea.
+                x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
             }
 
             xproto::XEvent::KeyPress { keycode, .. } => {
@@ -889,20 +1033,24 @@ fn run_x11(source: &str) {
                 match key {
                     xproto::X11Key::Escape | xproto::X11Key::Char('q') => break,
                     xproto::X11Key::Up => {
+                        let old = scroll_y;
                         scroll_y = scroll_y.saturating_sub(X11_LINE_SCROLL);
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                     }
                     xproto::X11Key::Down => {
+                        let old = scroll_y;
                         scroll_y = (scroll_y + X11_LINE_SCROLL).min(max_scroll);
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                     }
                     xproto::X11Key::PageUp => {
+                        let old = scroll_y;
                         scroll_y = scroll_y.saturating_sub(height);
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                     }
                     xproto::X11Key::PageDown => {
+                        let old = scroll_y;
                         scroll_y = (scroll_y + height).min(max_scroll);
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                     }
                     xproto::X11Key::F5 => {
                         match render_x11_page(history.current(), width) {
@@ -913,7 +1061,9 @@ fn run_x11(source: &str) {
                             }
                             Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
                         }
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        // New content -- full repaint, same reasoning as
+                        // ConfigureNotify above.
+                        x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                     }
                     _ => {}
                 }
@@ -925,13 +1075,15 @@ fn run_x11(source: &str) {
                 match button {
                     4 => {
                         // Wheel up.
+                        let old = scroll_y;
                         scroll_y = scroll_y.saturating_sub(X11_LINE_SCROLL);
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                     }
                     5 => {
                         // Wheel down.
+                        let old = scroll_y;
                         scroll_y = (scroll_y + X11_LINE_SCROLL).min(max_scroll);
-                        redraw(&mut conn, &surface, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                     }
                     1 => {
                         let doc_x = x.max(0) as f32;
@@ -947,7 +1099,9 @@ fn run_x11(source: &str) {
                                 }
                                 Err(e) => eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}"),
                             }
-                            redraw(&mut conn, &surface, width, height, scroll_y);
+                            // New content -- full repaint, same reasoning as
+                            // ConfigureNotify above.
+                            x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                         }
                     }
                     _ => {}
@@ -1460,6 +1614,57 @@ mod tests {
         assert_eq!(out.len(), 2 * 3 * 4);
         assert_eq!(&out[0..8], &[0, 0, 0, 255, 0, 0, 0, 255], "row 0 is the black surface");
         assert!(out[8..].iter().all(|&b| b == 0xff), "rows below content must be white canvas");
+    }
+
+    // ----------------------------------------------------------- scroll_blit
+
+    #[test]
+    fn scroll_blit_scrolling_down_copies_up_and_paints_the_bottom_strip() {
+        // win_h=768, old=100 -> new=160 (d=60): retained rows shift up by
+        // 60 (CopyArea src_y=60 -> dst_y=0, 708 rows); the newly-exposed
+        // bottom 60-row strip is page rows [160+708, 160+768) = [868, 928).
+        let blit = scroll_blit(100, 160, 768);
+        assert_eq!(
+            blit,
+            ScrollBlit::Partial { copy_src_y: 60, copy_dst_y: 0, copy_h: 708, strip_page_y: 868, strip_dst_y: 708, strip_h: 60 }
+        );
+    }
+
+    #[test]
+    fn scroll_blit_scrolling_up_copies_down_and_paints_the_top_strip() {
+        // win_h=768, old=160 -> new=100 (d=60): retained rows shift down by
+        // 60 (CopyArea src_y=0 -> dst_y=60, 708 rows); the newly-exposed top
+        // 60-row strip is page rows [100, 160).
+        let blit = scroll_blit(160, 100, 768);
+        assert_eq!(
+            blit,
+            ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 60, copy_h: 708, strip_page_y: 100, strip_dst_y: 0, strip_h: 60 }
+        );
+    }
+
+    #[test]
+    fn scroll_blit_jump_at_or_past_win_h_is_full() {
+        // A jump of exactly win_h, and one well past it, both leave nothing
+        // from the old frame on screen -- no CopyArea is worth doing.
+        assert_eq!(scroll_blit(0, 768, 768), ScrollBlit::Full);
+        assert_eq!(scroll_blit(0, 5000, 768), ScrollBlit::Full);
+        assert_eq!(scroll_blit(5000, 0, 768), ScrollBlit::Full); // upward jump too
+    }
+
+    #[test]
+    fn scroll_blit_no_op_scroll_paints_nothing() {
+        // Up already at the top (saturating_sub clamps to the same value) --
+        // must not CopyArea or PutImage anything.
+        let blit = scroll_blit(0, 0, 768);
+        assert_eq!(blit, ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 0, copy_h: 0, strip_page_y: 0, strip_dst_y: 0, strip_h: 0 });
+    }
+
+    #[test]
+    fn scroll_blit_small_window_and_small_delta_stay_bounded() {
+        // A window shorter than a typical line-scroll step still produces a
+        // sane (bounded, non-panicking) plan.
+        let blit = scroll_blit(0, 10, 20);
+        assert_eq!(blit, ScrollBlit::Partial { copy_src_y: 10, copy_dst_y: 0, copy_h: 10, strip_page_y: 20, strip_dst_y: 10, strip_h: 10 });
     }
 
     #[test]

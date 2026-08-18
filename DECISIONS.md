@@ -21,6 +21,15 @@ only `<style>`-sourced ignored declarations (documented undercount); `@import`;
 
 ## Backend — X11 client (hand-rolled)
 
+### D52 — X11 scrolls via server-side CopyArea + strip PutImage
+Scroll no longer re-sends the whole window. `scroll_blit(old, new, win_h)` yields
+either `Full` (|delta| >= win_h) or a `Partial` plan: `CopyArea` shifts the
+retained rows inside the window (server-side, no pixel transfer) and a single
+`PutImage` (via `put_image_at`'s `dst_y_base`) paints only the newly-exposed
+strip. ~12-13x less wire+convert per line-scroll on a 486. Full redraw still
+covers Expose/resize/reload/nav. SetInputFocus moved to the first Expose (was
+BadMatch when sent before the window was viewable).
+
 ### D51 — X11 backend is a hand-rolled pure-Rust core-protocol client, no deps
 `stele --x11 <url>` speaks the X11 wire protocol directly (`backend/x11.rs`) over
 a unix socket — no libX11/xcb FFI, no x11rb, no new dependency, no unsafe. Chosen
