@@ -263,7 +263,7 @@ fn drive_pipeline(bytes: &[u8], cols: usize, also_paint: bool) {
     let dom_tree = dom::parser::parse(&html);
 
     let viewport_w = (cols as f32) * 8.0;
-    let sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_w);
+    let sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_w, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &sheets);
 
     let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {

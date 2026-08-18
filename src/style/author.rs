@@ -16,6 +16,7 @@
 //! packet having to loosen their privacy or duplicate their logic.
 
 use crate::dom::{Dom, Node, NodeId};
+use crate::style::media::ColorScheme;
 use crate::style::{media, parser, tokenizer, Stylesheet};
 
 /// Walk `dom` in document order, parse every `<style>` element's raw-text
@@ -79,8 +80,8 @@ pub fn collect_author_sheets(dom: &Dom) -> Vec<Stylesheet> {
 /// Total: delegates entirely to `collect_author_sheets` (already total —
 /// see its own doc comment) and `flatten_media` (also total, bounded by the
 /// sheet's own size — see that function's doc comment); no new failure mode.
-pub fn collect_author_sheets_for_viewport(dom: &Dom, viewport_width_px: f32) -> Vec<Stylesheet> {
-    collect_author_sheets(dom).into_iter().map(|s| media::flatten_media(&s, viewport_width_px)).collect()
+pub fn collect_author_sheets_for_viewport(dom: &Dom, viewport_width_px: f32, scheme: ColorScheme) -> Vec<Stylesheet> {
+    collect_author_sheets(dom).into_iter().map(|s| media::flatten_media(&s, viewport_width_px, scheme)).collect()
 }
 
 /// Parse `css` and immediately flatten any `@media` blocks it contains
@@ -94,8 +95,8 @@ pub fn collect_author_sheets_for_viewport(dom: &Dom, viewport_width_px: f32) -> 
 /// `parser::parse` (total over any `&str`, per its own doc comment) and
 /// `media::flatten_media` (total, see its own doc comment) — no new failure
 /// mode.
-pub fn parse_and_flatten(css: &str, viewport_width_px: f32) -> Stylesheet {
-    media::flatten_media(&parser::parse(css), viewport_width_px)
+pub fn parse_and_flatten(css: &str, viewport_width_px: f32, scheme: ColorScheme) -> Stylesheet {
+    media::flatten_media(&parser::parse(css), viewport_width_px, scheme)
 }
 
 /// Does a `media="..."` attribute VALUE (as found on a `<link>` or `<style>`
@@ -111,8 +112,8 @@ pub fn parse_and_flatten(css: &str, viewport_width_px: f32) -> Stylesheet {
 /// `media_attr` fails closed (never matches — same C2 fail-closed treatment
 /// `media`'s own module doc describes), matching plain CSS `@media`'s
 /// behavior for the same malformed input.
-pub fn media_attr_matches(media_attr: &str, viewport_width_px: f32) -> bool {
-    media::MediaQuery::parse(&tokenizer::tokenize(media_attr)).matches(viewport_width_px)
+pub fn media_attr_matches(media_attr: &str, viewport_width_px: f32, scheme: ColorScheme) -> bool {
+    media::MediaQuery::parse(&tokenizer::tokenize(media_attr)).matches(viewport_width_px, scheme)
 }
 
 fn style_text(dom: &Dom, style_id: NodeId) -> String {
@@ -217,7 +218,7 @@ mod tests {
     fn viewport_variant_matches_plain_collect_when_no_media_present() {
         let d = dom::parser::parse("<style>p { color: red }</style><p>x</p>");
         let plain = collect_author_sheets(&d);
-        let viewport = collect_author_sheets_for_viewport(&d, 320.0);
+        let viewport = collect_author_sheets_for_viewport(&d, 320.0, ColorScheme::Light);
         assert_eq!(plain.len(), viewport.len());
         let styles_plain = cascade::cascade(&d, &plain);
         let styles_viewport = cascade::cascade(&d, &viewport);
@@ -232,11 +233,11 @@ mod tests {
         </style><p>x</p>"#;
         let d = dom::parser::parse(html);
 
-        let narrow = collect_author_sheets_for_viewport(&d, 320.0);
+        let narrow = collect_author_sheets_for_viewport(&d, 320.0, ColorScheme::Light);
         let narrow_styles = cascade::cascade(&d, &narrow);
         assert_eq!(narrow_styles[find(&d, "p")].color, Color::rgb(255, 0, 0));
 
-        let wide = collect_author_sheets_for_viewport(&d, 640.0);
+        let wide = collect_author_sheets_for_viewport(&d, 640.0, ColorScheme::Light);
         let wide_styles = cascade::cascade(&d, &wide);
         assert_eq!(wide_styles[find(&d, "p")].color, Color::rgb(0, 0, 255));
     }
@@ -256,7 +257,7 @@ mod tests {
             html.push_str("</div>");
         }
         let d = dom::parser::parse(&html);
-        let sheets = collect_author_sheets_for_viewport(&d, 1024.0);
+        let sheets = collect_author_sheets_for_viewport(&d, 1024.0, ColorScheme::Light);
         assert_eq!(sheets.len(), 1);
         let styles = cascade::cascade(&d, &sheets);
         assert_eq!(styles.len(), d.len());
@@ -295,44 +296,44 @@ mod tests {
 
     #[test]
     fn parse_and_flatten_parses_plain_rules_with_no_media() {
-        let sheet = parse_and_flatten("p { color: red }", 320.0);
+        let sheet = parse_and_flatten("p { color: red }", 320.0, ColorScheme::Light);
         assert_eq!(sheet.rules.len(), 1);
     }
 
     #[test]
     fn parse_and_flatten_folds_a_matching_media_block_into_rules() {
-        let sheet = parse_and_flatten("@media (max-width: 500px) { p { color: red } }", 320.0);
+        let sheet = parse_and_flatten("@media (max-width: 500px) { p { color: red } }", 320.0, ColorScheme::Light);
         assert!(sheet.media_rules.is_empty());
         assert_eq!(sheet.rules.len(), 1);
     }
 
     #[test]
     fn parse_and_flatten_drops_a_non_matching_media_block() {
-        let sheet = parse_and_flatten("@media (max-width: 500px) { p { color: red } }", 640.0);
+        let sheet = parse_and_flatten("@media (max-width: 500px) { p { color: red } }", 640.0, ColorScheme::Light);
         assert!(sheet.rules.is_empty());
     }
 
     #[test]
     fn parse_and_flatten_is_total_over_garbage_css() {
-        let sheet = parse_and_flatten("!!!not css!!!", 320.0);
+        let sheet = parse_and_flatten("!!!not css!!!", 320.0, ColorScheme::Light);
         assert!(sheet.rules.is_empty());
     }
 
     #[test]
     fn media_attr_matches_narrow_query_at_narrow_viewport_only() {
-        assert!(media_attr_matches("(max-width: 500px)", 320.0));
-        assert!(!media_attr_matches("(max-width: 500px)", 640.0));
+        assert!(media_attr_matches("(max-width: 500px)", 320.0, ColorScheme::Light));
+        assert!(!media_attr_matches("(max-width: 500px)", 640.0, ColorScheme::Light));
     }
 
     #[test]
     fn media_attr_matches_screen_and_feature() {
-        assert!(media_attr_matches("screen and (min-width: 800px)", 1024.0));
-        assert!(!media_attr_matches("screen and (min-width: 800px)", 320.0));
+        assert!(media_attr_matches("screen and (min-width: 800px)", 1024.0, ColorScheme::Light));
+        assert!(!media_attr_matches("screen and (min-width: 800px)", 320.0, ColorScheme::Light));
     }
 
     #[test]
     fn media_attr_matches_fails_closed_on_garbage_or_empty() {
-        assert!(!media_attr_matches("!!!garbage!!!", 320.0));
-        assert!(!media_attr_matches("!!!garbage!!!", 1_000_000.0));
+        assert!(!media_attr_matches("!!!garbage!!!", 320.0, ColorScheme::Light));
+        assert!(!media_attr_matches("!!!garbage!!!", 1_000_000.0, ColorScheme::Light));
     }
 }

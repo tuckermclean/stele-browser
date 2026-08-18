@@ -58,7 +58,7 @@ fn fetch_fixture_html(url: &Url) -> String {
 fn dump_tty(html: &str, cols: usize) -> String {
     let dom_tree = dom::parser::parse(html);
     let viewport_w = cols as f32 * 8.0;
-    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_w);
+    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_w, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return String::new();
@@ -75,7 +75,7 @@ fn render_png() -> Vec<u8> {
     let url = fixture_url();
     let html = fetch_fixture_html(&url);
     let dom_tree = dom::parser::parse(&html);
-    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, PNG_VIEWPORT_WIDTH as f32);
+    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, PNG_VIEWPORT_WIDTH as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let decoded = images::collect_images(&dom_tree, &url);
     let Some(root) = build_box_tree(&dom_tree, &styles, &decoded) else {

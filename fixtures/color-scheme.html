@@ -1,0 +1,20 @@
+<html>
+<head>
+<style>
+  .light-only { display: block; }
+  .dark-only { display: none; }
+  html[data-theme="dark"] .light-only { display: none; }
+  html[data-theme="dark"] .dark-only { display: block; }
+
+  .media-dark-only { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .media-dark-only { display: block; }
+  }
+</style>
+</head>
+<body>
+<p class="light-only">LIGHT MODE TEXT</p>
+<p class="dark-only">DARK MODE TEXT</p>
+<p class="media-dark-only">MEDIA DARK TEXT</p>
+</body>
+</html>

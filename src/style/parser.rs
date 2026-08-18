@@ -1,7 +1,10 @@
 //! CSS parsing (P2, Wave 1). Full syntax is parsed; unknown declarations are
 //! counted and dropped (the IGNORE-UNKNOWN treaty, charter C2). Selectors in
 //! scope: element, `.class`, `#id`, descendant, grouping, `a:link`/`:visited`
-//! (brief §4).
+//! (brief §4), `:root` (packet T1a), plus (packet T1a) the curated
+//! exact-match attribute selector `[attr=value]`/`[attr="value"]` — see
+//! `parse_attr_selector`'s doc comment for exactly which attribute-selector
+//! shapes are and aren't in scope.
 
 use crate::style::media::MediaQuery;
 use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
@@ -627,6 +630,7 @@ fn skip_to_decl_boundary(tokens: &[Token], pos: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::media::ColorScheme;
     use crate::style::computed::*;
     use crate::surface::Color;
 
@@ -878,8 +882,8 @@ mod tests {
         let media_rule = &sheet.media_rules[0];
         assert_eq!(media_rule.rules.len(), 1);
         assert_eq!(media_rule.rules[0].declarations.color, Some(Color::rgb(255, 0, 0)));
-        assert!(media_rule.query.matches(1024.0));
-        assert!(!media_rule.query.matches(640.0));
+        assert!(media_rule.query.matches(1024.0, ColorScheme::Light));
+        assert!(!media_rule.query.matches(640.0, ColorScheme::Light));
     }
 
     #[test]
@@ -949,6 +953,56 @@ mod tests {
             let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
             let p = find(&dom, "p").unwrap();
             assert_ne!(styles[p].color, Color::rgb(255, 0, 0), "for {css}");
+        }
+    }
+
+    // ---- packet T1a: attribute selectors ([attr=value]) -----------------
+    // (packet t1b-color-scheme reconciliation note: `html[data-theme="dark"]`
+    // -- the no-JS theme hook `main.rs` stamps pre-cascade -- needs to
+    // actually parse AND match, unlike the pre-T1a "always unsupported"
+    // treatment `a[href='x']` above still (correctly) exercises for an
+    // ELEMENT mismatch, not an attribute one. T1a's curated grammar covers
+    // exact-match `[attr=value]` only -- no presence-only `[attr]` form --
+    // so `[attr]` and every other operator fall through to the same
+    // fail-closed "unsupported" path exercised below.)
+
+    #[test]
+    fn attribute_equals_selector_matches_the_stamped_root_html_element() {
+        let dom = crate::dom::parser::parse(r#"<html data-theme="dark"><body><p>t</p></body></html>"#);
+        let sheet = parse(r#"html[data-theme="dark"] p { color: red; }"#);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_eq!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn attribute_equals_selector_does_not_match_a_different_value() {
+        let dom = crate::dom::parser::parse(r#"<html data-theme="light"><body><p>t</p></body></html>"#);
+        let sheet = parse(r#"html[data-theme="dark"] p { color: red; }"#);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_ne!(styles[p].color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn attribute_selector_with_an_unsupported_operator_fails_closed() {
+        // `~=` (and `^=`/`$=`/`*=`/`|=`, plus the bare presence-only
+        // `[attr]` form) are outside the curated subset -- must never
+        // match, same C2 fail-closed treatment as the rest of this
+        // module's unsupported selector constructs.
+        let dom = crate::dom::parser::parse(r#"<p class="x">t</p>"#);
+        let sheet = parse(r#"p[class~="x"] { color: red; }"#);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_ne!(styles[p].color, Color::rgb(255, 0, 0), "~= is out of the curated subset and must fail closed");
+    }
+
+    #[test]
+    fn unterminated_attribute_selector_does_not_panic() {
+        // Totality sweep target: a malformed/unterminated `[` must recover
+        // (skip to EOF), never panic or hang.
+        for css in ["p[ { color: red; }", "p[data-x", "p[data-x=", "p[data-x=\"unterminated"] {
+            let _ = parse(css);
         }
     }
 

@@ -28,7 +28,7 @@ use stele::dom;
 use stele::fetch::file::FileFetcher;
 use stele::fetch::{Fetch, Request, Url};
 use stele::layout::{self, box_tree::build_box_tree, Size};
-use stele::style::cascade;
+use stele::style::{cascade, ColorScheme};
 use stele::surface::{Color, MemSurface};
 
 const GOLDEN_PNG: &[u8] = include_bytes!("../goldens/bg-image.png");
@@ -53,7 +53,7 @@ fn render_bg_image_fixture(no_bg_images: bool) -> Vec<u8> {
     let url = fixture_url();
     let html = fetch_fixture_html(&url);
     let dom_tree = dom::parser::parse(&html);
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &url, VIEWPORT_WIDTH as f32);
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &url, VIEWPORT_WIDTH as f32, ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return raster::encode_png(&MemSurface::new(1, 1, Color::WHITE));
@@ -138,7 +138,7 @@ fn the_bg_image_actually_decodes_not_fallen_back_to_color_only() {
     let url = fixture_url();
     let html = fetch_fixture_html(&url);
     let dom_tree = dom::parser::parse(&html);
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &url, VIEWPORT_WIDTH as f32);
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &url, VIEWPORT_WIDTH as f32, ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let images = bg_images::collect_bg_images(&styles, &url);
     assert_eq!(images.len(), 1, "fixtures/bg-image.html declares exactly one distinct background-image url");

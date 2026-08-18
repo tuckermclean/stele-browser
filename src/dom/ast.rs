@@ -104,6 +104,23 @@ impl AttrMap {
         }
     }
 
+    /// Insert or overwrite an attribute's value — unlike [`set`](Self::set)
+    /// (first-value-wins, the tag-soup PARSE-TIME rule), this always takes
+    /// the NEW value: replacing an existing pair's value case-insensitively,
+    /// or appending a fresh pair if the name wasn't present. Built for
+    /// post-parse mutation (packet t1b-color-scheme's `--color-scheme`
+    /// pre-cascade `data-theme`/`data-mode` root stamp — see
+    /// `Dom::set_attribute`), where "the caller's new value wins" is the
+    /// correct semantics, not "the document's original value wins".
+    pub fn set_overwrite(&mut self, name: &str, value: &str) {
+        if let Some(pair) = self.pairs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            pair.1 = value.into();
+        } else {
+            self.pairs
+                .push((name.trim().to_ascii_lowercase().into_boxed_str(), value.into()));
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.pairs.iter().map(|(k, v)| (k.as_ref(), v.as_ref()))
     }
@@ -149,6 +166,22 @@ impl Dom {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Insert or overwrite one attribute on `id`'s element (see
+    /// [`AttrMap::set_overwrite`]) — a total no-op, never a panic, if `id`
+    /// is out of range or names a `Text` node rather than an `Element`.
+    /// Built for packet t1b-color-scheme's `--color-scheme` pre-cascade
+    /// `data-theme`/`data-mode` root stamp (`main.rs`'s `stamp_color_scheme`)
+    /// but deliberately general (any node, any attribute) rather than
+    /// hardcoded to that one caller.
+    pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        let Some(node) = self.nodes.get_mut(id) else {
+            return;
+        };
+        if let Node::Element(el) = node {
+            el.attrs.set_overwrite(name, value);
+        }
     }
 
     /// Allocate an element node, returning its id. Not yet attached to a parent.
@@ -211,5 +244,60 @@ mod tests {
         assert_eq!(a.get("HrEf"), Some("one"));
         assert_eq!(a.get("missing"), None);
         assert_eq!(a.len(), 1);
+    }
+
+    // ---- T1b: AttrMap::set_overwrite / Dom::set_attribute --------------------
+    // (packet t1b-color-scheme: the `--color-scheme` pre-cascade `data-theme`/
+    // `data-mode` root stamp needs an OVERWRITE-semantics attribute setter,
+    // unlike `AttrMap::set`'s parse-time first-value-wins rule.)
+
+    #[test]
+    fn set_overwrite_replaces_an_existing_value_case_insensitively() {
+        let mut a = AttrMap::new();
+        a.set("data-theme", "light");
+        a.set_overwrite("DATA-THEME", "dark");
+        assert_eq!(a.get("data-theme"), Some("dark"));
+        assert_eq!(a.len(), 1, "overwrite must not add a duplicate pair");
+    }
+
+    #[test]
+    fn set_overwrite_inserts_when_the_attribute_is_absent() {
+        let mut a = AttrMap::new();
+        a.set_overwrite("data-mode", "dark");
+        assert_eq!(a.get("data-mode"), Some("dark"));
+        assert_eq!(a.len(), 1);
+    }
+
+    #[test]
+    fn dom_set_attribute_overwrites_the_root_elements_attribute() {
+        let mut dom = Dom::new();
+        let root = dom.root();
+        dom.set_attribute(root, "data-theme", "dark");
+        dom.set_attribute(root, "data-theme", "light");
+        let el = dom.node(root).element().expect("root is an element");
+        assert_eq!(el.attrs.get("data-theme"), Some("light"));
+    }
+
+    #[test]
+    fn dom_set_attribute_sets_a_fresh_attribute_when_absent() {
+        let mut dom = Dom::new();
+        let root = dom.root();
+        dom.set_attribute(root, "data-mode", "dark");
+        let el = dom.node(root).element().expect("root is an element");
+        assert_eq!(el.attrs.get("data-mode"), Some("dark"));
+    }
+
+    #[test]
+    fn dom_set_attribute_is_a_total_noop_on_an_out_of_range_id() {
+        let mut dom = Dom::new();
+        dom.set_attribute(9999, "data-theme", "dark"); // must not panic
+    }
+
+    #[test]
+    fn dom_set_attribute_is_a_noop_on_a_text_node() {
+        let mut dom = Dom::new();
+        let text = dom.new_text("hi".to_string());
+        dom.set_attribute(text, "data-theme", "dark"); // must not panic
+        assert_eq!(dom.node(text).text(), Some("hi"));
     }
 }

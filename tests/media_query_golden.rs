@@ -47,7 +47,7 @@ const CELL_W: f32 = 8.0;
 fn dump(html: &str, cols: usize) -> String {
     let dom_tree = dom::parser::parse(html);
     let viewport_width = cols as f32 * CELL_W;
-    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_width);
+    let author_sheets = style::collect_author_sheets_for_viewport(&dom_tree, viewport_width, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
     let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return String::new();

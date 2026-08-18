@@ -23,6 +23,14 @@
 //!   lengths (and unitless `0`) are recognized — `em`/`%`/`pt` in a media
 //!   feature is unsupported (a viewport has no font-size/parent to resolve
 //!   `em`/`%` against the way a property value does) and fails closed.
+//! - `(prefers-color-scheme: dark)` / `(prefers-color-scheme: light)`
+//!   (packet t1b-color-scheme): evaluated against a [`ColorScheme`] threaded
+//!   the same way `viewport_width_px` already is (see [`ColorScheme`]'s own
+//!   doc comment for how a CLI `--color-scheme` value resolves to one before
+//!   ever reaching here) — combines with `and` alongside width features
+//!   exactly like any other feature. Any other value (`(prefers-color-
+//!   scheme: turquoise)`, a missing/malformed value) fails closed, same as
+//!   an unrecognized feature NAME already does.
 //! - A comma-separated list of items is OR: the query matches if ANY item
 //!   matches.
 //! - Height features (`min-height`/`max-height`) are OUT OF SCOPE: every
@@ -48,6 +56,44 @@
 use crate::style::parser::{Stylesheet, StyleRule};
 use crate::style::tokenizer::Token;
 
+/// The color scheme Stele renders under (packet t1b-color-scheme). Drives
+/// two independent things: the `prefers-color-scheme` media feature
+/// ([`Feature::PrefersColorScheme`] below) and, pre-cascade in `main.rs`,
+/// the `data-theme`/`data-mode` root-attribute stamp
+/// (`main.rs::stamp_color_scheme`) that lets attribute-gated no-JS themes
+/// (e.g. httpforever.com's `html[data-theme="dark"]`) respond to a scheme
+/// the same way a real theme-toggle script would set it.
+///
+/// Deliberately just two variants, not three: `auto` is a CLI-facing
+/// concept only (see [`ColorScheme::parse`]) that resolves to `Light`
+/// before it ever reaches the media-query engine or the attribute stamp —
+/// Stele has no OS/JS signal to ask "what does the user's system prefer?",
+/// so treating `auto` as `Light` is the honest, documented default (the
+/// same default a browser with no matching `prefers-color-scheme` rule at
+/// all would render under).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    Light,
+    Dark,
+}
+
+impl ColorScheme {
+    /// Parse a `--color-scheme` CLI value. `"light"`/`"dark"` map directly
+    /// (case-insensitively); `"auto"` resolves to `Light` (see the type's
+    /// own doc comment); anything else — empty, garbage, an unrecognized
+    /// word — ALSO falls back to `Light` rather than panicking or
+    /// propagating an error: the same fail-closed-to-the-honest-default
+    /// posture this module's own doc comment already uses for unparseable
+    /// media conditions. Total over any `&str`.
+    pub fn parse(raw: &str) -> ColorScheme {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "dark" => ColorScheme::Dark,
+            // "light", "auto", or anything unrecognized.
+            _ => ColorScheme::Light,
+        }
+    }
+}
+
 /// The `<media-type>` half of one comma-separated query item. `All` is both
 /// the explicit `all` keyword AND the implicit default when a query item
 /// opens straight with a feature (e.g. `(min-width: 800px)` with no leading
@@ -59,17 +105,20 @@ enum MediaType {
     Print,
 }
 
-/// One `(feature: value)` test, value already resolved to px (brief above:
-/// px/unitless-0 only).
+/// One `(feature: value)` test — a width feature's value already resolved
+/// to px (brief above: px/unitless-0 only), or (packet t1b-color-scheme) a
+/// `prefers-color-scheme` feature's value already resolved to a
+/// [`ColorScheme`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Feature {
     MinWidth(f32),
     MaxWidth(f32),
     Width(f32),
+    PrefersColorScheme(ColorScheme),
 }
 
 impl Feature {
-    fn matches(&self, viewport_width_px: f32) -> bool {
+    fn matches(&self, viewport_width_px: f32, scheme: ColorScheme) -> bool {
         match *self {
             Feature::MinWidth(v) => viewport_width_px >= v,
             Feature::MaxWidth(v) => viewport_width_px <= v,
@@ -77,6 +126,7 @@ impl Feature {
             // comparison here; a tiny epsilon just absorbs f32 rounding
             // noise from unit conversions elsewhere in the pipeline.
             Feature::Width(v) => (viewport_width_px - v).abs() < 0.5,
+            Feature::PrefersColorScheme(want) => scheme == want,
         }
     }
 }
@@ -95,14 +145,14 @@ struct QueryItem {
 }
 
 impl QueryItem {
-    fn matches(&self, viewport_width_px: f32) -> bool {
+    fn matches(&self, viewport_width_px: f32, scheme: ColorScheme) -> bool {
         if !self.supported {
             return false;
         }
         if self.media_type == MediaType::Print {
             return false;
         }
-        self.features.iter().all(|f| f.matches(viewport_width_px))
+        self.features.iter().all(|f| f.matches(viewport_width_px, scheme))
     }
 }
 
@@ -124,10 +174,10 @@ impl MediaQuery {
         MediaQuery { items }
     }
 
-    /// Does this query match a screen render at `viewport_width_px`? OR
-    /// across every comma-separated item.
-    pub(crate) fn matches(&self, viewport_width_px: f32) -> bool {
-        self.items.iter().any(|item| item.matches(viewport_width_px))
+    /// Does this query match a screen render at `viewport_width_px` under
+    /// `scheme`? OR across every comma-separated item.
+    pub(crate) fn matches(&self, viewport_width_px: f32, scheme: ColorScheme) -> bool {
+        self.items.iter().any(|item| item.matches(viewport_width_px, scheme))
     }
 }
 
@@ -275,7 +325,7 @@ fn parse_item(tokens: &[Token]) -> QueryItem {
             break;
         }
         i += 1;
-        let value = toks.get(i).and_then(feature_length_px);
+        let value_tok = toks.get(i).cloned();
         i += 1;
         if toks.get(i) != Some(&Token::RParen) {
             supported = false;
@@ -283,11 +333,22 @@ fn parse_item(tokens: &[Token]) -> QueryItem {
         }
         i += 1;
 
-        match (name.as_str(), value) {
-            ("min-width", Some(v)) => features.push(Feature::MinWidth(v)),
-            ("max-width", Some(v)) => features.push(Feature::MaxWidth(v)),
-            ("width", Some(v)) => features.push(Feature::Width(v)),
-            _ => supported = false, // unknown feature name or unparseable value
+        match name.as_str() {
+            "min-width" | "max-width" | "width" => match value_tok.as_ref().and_then(feature_length_px) {
+                Some(v) => features.push(match name.as_str() {
+                    "min-width" => Feature::MinWidth(v),
+                    "max-width" => Feature::MaxWidth(v),
+                    _ => Feature::Width(v),
+                }),
+                None => supported = false, // unparseable length value
+            },
+            // Packet t1b-color-scheme.
+            "prefers-color-scheme" => match value_tok {
+                Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("dark") => features.push(Feature::PrefersColorScheme(ColorScheme::Dark)),
+                Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("light") => features.push(Feature::PrefersColorScheme(ColorScheme::Light)),
+                _ => supported = false, // unknown/garbage value fails closed
+            },
+            _ => supported = false, // unknown feature name
         }
         if !supported {
             break;
@@ -329,10 +390,10 @@ fn parse_item(tokens: &[Token]) -> QueryItem {
 /// Total and bounded: one linear pass over `sheet.media_rules`, no
 /// recursion — a sheet with thousands of `@media` blocks (or thousands of
 /// rules inside one) flattens in time proportional to their total size.
-pub(crate) fn flatten_media(sheet: &Stylesheet, viewport_width_px: f32) -> Stylesheet {
+pub(crate) fn flatten_media(sheet: &Stylesheet, viewport_width_px: f32, scheme: ColorScheme) -> Stylesheet {
     let mut rules: Vec<StyleRule> = sheet.rules.clone();
     for m in &sheet.media_rules {
-        if m.query.matches(viewport_width_px) {
+        if m.query.matches(viewport_width_px, scheme) {
             rules.extend(m.rules.iter().cloned());
         }
     }
@@ -361,30 +422,30 @@ mod tests {
     #[test]
     fn max_width_matches_narrower_viewport_not_wider() {
         let q = query("(max-width: 500px)");
-        assert!(q.matches(320.0));
-        assert!(!q.matches(640.0));
+        assert!(q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(640.0, ColorScheme::Light));
     }
 
     #[test]
     fn min_width_matches_wider_viewport_not_narrower() {
         let q = query("(min-width: 800px)");
-        assert!(q.matches(1024.0));
-        assert!(!q.matches(640.0));
+        assert!(q.matches(1024.0, ColorScheme::Light));
+        assert!(!q.matches(640.0, ColorScheme::Light));
     }
 
     #[test]
     fn exact_width_matches_only_that_width() {
         let q = query("(width: 640px)");
-        assert!(q.matches(640.0));
-        assert!(!q.matches(641.0));
-        assert!(!q.matches(320.0));
+        assert!(q.matches(640.0, ColorScheme::Light));
+        assert!(!q.matches(641.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Light));
     }
 
     #[test]
     fn screen_and_max_width_requires_both() {
         let q = query("screen and (max-width: 500px)");
-        assert!(q.matches(320.0));
-        assert!(!q.matches(640.0));
+        assert!(q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(640.0, ColorScheme::Light));
     }
 
     #[test]
@@ -392,52 +453,52 @@ mod tests {
         let with_all = query("all and (min-width: 800px)");
         let bare = query("(min-width: 800px)");
         for w in [320.0, 640.0, 800.0, 1024.0] {
-            assert_eq!(with_all.matches(w), bare.matches(w));
+            assert_eq!(with_all.matches(w, ColorScheme::Light), bare.matches(w, ColorScheme::Light));
         }
     }
 
     #[test]
     fn comma_separated_list_is_or() {
         let q = query("(max-width: 500px), (min-width: 1200px)");
-        assert!(q.matches(320.0)); // first branch
-        assert!(q.matches(1600.0)); // second branch
-        assert!(!q.matches(800.0)); // neither branch
+        assert!(q.matches(320.0, ColorScheme::Light)); // first branch
+        assert!(q.matches(1600.0, ColorScheme::Light)); // second branch
+        assert!(!q.matches(800.0, ColorScheme::Light)); // neither branch
     }
 
     #[test]
     fn print_never_matches_a_screen_render() {
         let q = query("print");
-        assert!(!q.matches(320.0));
-        assert!(!q.matches(1600.0));
-        assert!(!q.matches(100_000.0));
+        assert!(!q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(1600.0, ColorScheme::Light));
+        assert!(!q.matches(100_000.0, ColorScheme::Light));
     }
 
     #[test]
     fn print_with_a_matching_width_feature_still_never_matches() {
         let q = query("print and (max-width: 5000px)");
-        assert!(!q.matches(320.0));
+        assert!(!q.matches(320.0, ColorScheme::Light));
     }
 
     #[test]
     fn unknown_media_type_never_matches() {
         let q = query("speech");
-        assert!(!q.matches(320.0));
-        assert!(!q.matches(1600.0));
+        assert!(!q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(1600.0, ColorScheme::Light));
     }
 
     #[test]
     fn unknown_feature_name_fails_closed() {
         let q = query("(orientation: landscape)");
-        assert!(!q.matches(320.0));
-        assert!(!q.matches(1600.0));
+        assert!(!q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(1600.0, ColorScheme::Light));
     }
 
     #[test]
     fn malformed_condition_never_matches_and_never_panics() {
         for cond in ["", "!!!garbage!!!", "(", ")", "(min-width", "min-width: 800px)", "screen and", "and and and"] {
             let q = query(cond);
-            assert!(!q.matches(320.0), "for {cond:?}");
-            assert!(!q.matches(1_000_000.0), "for {cond:?}");
+            assert!(!q.matches(320.0, ColorScheme::Light), "for {cond:?}");
+            assert!(!q.matches(1_000_000.0, ColorScheme::Light), "for {cond:?}");
         }
     }
 
@@ -447,15 +508,87 @@ mod tests {
         // viewport (negation). Negation isn't implemented, so this must
         // never match ANY width, rather than silently inverting wrong.
         let q = query("not screen and (max-width: 500px)");
-        assert!(!q.matches(320.0));
-        assert!(!q.matches(1600.0));
+        assert!(!q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(1600.0, ColorScheme::Light));
     }
 
     #[test]
     fn huge_query_list_does_not_panic() {
         let cond = (0..5000).map(|i| format!("(min-width: {i}px)")).collect::<Vec<_>>().join(", ");
         let q = query(&cond);
-        assert!(q.matches(1_000_000.0));
+        assert!(q.matches(1_000_000.0, ColorScheme::Light));
+    }
+
+    // ---- T1b: prefers-color-scheme / ColorScheme --------------------------
+    // (packet t1b-color-scheme: httpforever.com-style no-JS pages toggle dark
+    // mode purely via a `data-theme` attribute a theme-toggle script sets,
+    // with NO `@media (prefers-color-scheme)` fallback -- `--color-scheme`
+    // gives Stele a way to pick a scheme anyway. This block covers the
+    // standards-correct primitive: the media feature itself.)
+
+    #[test]
+    fn prefers_color_scheme_dark_matches_only_under_dark_scheme() {
+        let q = query("(prefers-color-scheme: dark)");
+        assert!(q.matches(320.0, ColorScheme::Dark));
+        assert!(!q.matches(320.0, ColorScheme::Light));
+    }
+
+    #[test]
+    fn prefers_color_scheme_light_matches_only_under_light_scheme() {
+        let q = query("(prefers-color-scheme: light)");
+        assert!(q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Dark));
+    }
+
+    #[test]
+    fn color_scheme_parse_auto_resolves_to_light() {
+        // No OS/JS signal exists in this renderer -- `auto` resolving to
+        // `Light` is the documented, honest default (see `ColorScheme::parse`'s
+        // own doc comment).
+        assert_eq!(ColorScheme::parse("auto"), ColorScheme::Light);
+        assert_eq!(ColorScheme::parse("AUTO"), ColorScheme::Light);
+    }
+
+    #[test]
+    fn color_scheme_parse_dark_and_light_case_insensitively() {
+        assert_eq!(ColorScheme::parse("dark"), ColorScheme::Dark);
+        assert_eq!(ColorScheme::parse("Dark"), ColorScheme::Dark);
+        assert_eq!(ColorScheme::parse("DARK"), ColorScheme::Dark);
+        assert_eq!(ColorScheme::parse("light"), ColorScheme::Light);
+        assert_eq!(ColorScheme::parse("Light"), ColorScheme::Light);
+    }
+
+    #[test]
+    fn color_scheme_parse_garbage_falls_back_to_light_not_a_panic() {
+        for v in ["", "!!!garbage!!!", "darkness", " dark ", "\0\0\0"] {
+            let _ = ColorScheme::parse(v); // must not panic
+        }
+        assert_eq!(ColorScheme::parse("nonsense"), ColorScheme::Light);
+        assert_eq!(ColorScheme::parse(""), ColorScheme::Light);
+    }
+
+    #[test]
+    fn prefers_color_scheme_unknown_value_fails_closed() {
+        let q = query("(prefers-color-scheme: turquoise)");
+        assert!(!q.matches(320.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Dark));
+    }
+
+    #[test]
+    fn prefers_color_scheme_combines_with_width_via_and() {
+        let q = query("(min-width: 800px) and (prefers-color-scheme: dark)");
+        assert!(q.matches(1024.0, ColorScheme::Dark));
+        assert!(!q.matches(1024.0, ColorScheme::Light));
+        assert!(!q.matches(320.0, ColorScheme::Dark));
+    }
+
+    #[test]
+    fn prefers_color_scheme_malformed_value_does_not_panic() {
+        for cond in ["(prefers-color-scheme:)", "(prefers-color-scheme: )", "(prefers-color-scheme: 800px)", "(prefers-color-scheme"] {
+            let q = query(cond);
+            assert!(!q.matches(320.0, ColorScheme::Light), "for {cond:?}");
+            assert!(!q.matches(320.0, ColorScheme::Dark), "for {cond:?}");
+        }
     }
 
     // ---- flatten_media ----------------------------------------------------
@@ -465,7 +598,7 @@ mod tests {
     #[test]
     fn flatten_media_includes_matching_block_rules_at_narrow_viewport() {
         let sheet = parse("@media (max-width: 500px) { p { color: red } } p { color: blue }");
-        let narrow = flatten_media(&sheet, 320.0);
+        let narrow = flatten_media(&sheet, 320.0, ColorScheme::Light);
         assert!(narrow.media_rules.is_empty());
         // Two `p` rules now live in `rules`: the flattened @media one plus
         // the original top-level one.
@@ -475,16 +608,25 @@ mod tests {
     #[test]
     fn flatten_media_excludes_non_matching_block_rules_at_wide_viewport() {
         let sheet = parse("@media (max-width: 500px) { p { color: red } } p { color: blue }");
-        let wide = flatten_media(&sheet, 640.0);
+        let wide = flatten_media(&sheet, 640.0, ColorScheme::Light);
         assert_eq!(wide.rules.len(), 1); // only the top-level rule
     }
 
     #[test]
     fn flatten_media_preserves_counters() {
         let sheet = parse("@media (max-width: 500px) { p { color: red } } @font-face { }");
-        let flat = flatten_media(&sheet, 320.0);
+        let flat = flatten_media(&sheet, 320.0, ColorScheme::Light);
         assert_eq!(flat.media_at_rules, sheet.media_at_rules);
         assert_eq!(flat.ignored_at_rules, sheet.ignored_at_rules);
+    }
+
+    #[test]
+    fn flatten_media_respects_color_scheme() {
+        let sheet = parse("@media (prefers-color-scheme: dark) { p { color: red } } p { color: blue }");
+        let dark = flatten_media(&sheet, 320.0, ColorScheme::Dark);
+        assert_eq!(dark.rules.len(), 2, "the dark-gated block should be included under a dark scheme");
+        let light = flatten_media(&sheet, 320.0, ColorScheme::Light);
+        assert_eq!(light.rules.len(), 1, "the dark-gated block should be excluded under a light scheme");
     }
 
     #[test]
@@ -494,7 +636,7 @@ mod tests {
             css.push_str(&format!("@media (min-width: {i}px) {{ .c{i} {{ color: red; }} }}\n"));
         }
         let sheet = parse(&css);
-        let flat = flatten_media(&sheet, 1_000_000.0);
+        let flat = flatten_media(&sheet, 1_000_000.0, ColorScheme::Light);
         assert_eq!(flat.rules.len(), 2000); // every block matches at 1,000,000px
     }
 }

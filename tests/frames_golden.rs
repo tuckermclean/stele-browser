@@ -17,6 +17,7 @@
 use std::time::{Duration, Instant};
 
 use stele::fetch::Url;
+use stele::style::ColorScheme;
 use stele::{dom, frames};
 
 const COLS: usize = 80;
@@ -37,7 +38,7 @@ fn frames_fixture_tty_dump_matches_golden() {
     let html = String::from_utf8_lossy(&body);
     let dom_tree = dom::parser::parse(&html);
     let frameset_id = frames::find_frameset(&dom_tree).expect("fixtures/frames.html has a <frameset>");
-    let actual = frames::render(&url, &dom_tree, frameset_id, COLS).to_text();
+    let actual = frames::render(&url, &dom_tree, frameset_id, COLS, ColorScheme::Light).to_text();
 
     let golden = include_str!("../goldens/frames.tty.txt");
     assert_eq!(actual, golden.trim_end_matches('\n'), "tty dump of fixtures/frames.html changed from the PROPOSED golden");
@@ -73,7 +74,7 @@ fn cross_document_frameset_cycle_terminates_promptly_not_a_hang() {
     let frameset_id = frames::find_frameset(&dom_tree).expect("fixtures/frame_cycle_a.html has a <frameset>");
 
     let start = Instant::now();
-    let grid = frames::render(&url, &dom_tree, frameset_id, COLS);
+    let grid = frames::render(&url, &dom_tree, frameset_id, COLS, ColorScheme::Light);
     let elapsed = start.elapsed();
 
     assert!(elapsed < Duration::from_secs(5), "cyclic frameset dump took too long: {elapsed:?} (possible hang)");

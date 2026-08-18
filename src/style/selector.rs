@@ -1,8 +1,16 @@
 //! Selector matching (brief §4): element, `.class`, `#id`, descendant,
-//! grouping, and `a:link`/`a:visited`. Anything else parses without choking
-//! (the tokenizer/parser never rejects it) but is marked unsupported so it
-//! simply never matches — charter C2's ignore-unknown treaty applied to
-//! selectors instead of declarations.
+//! grouping, `a:link`/`a:visited`, `:root` (packet T1a), and (packet T1a)
+//! exact-match `[attr="value"]` attribute selectors. Anything else parses
+//! without choking (the tokenizer/parser never rejects it) but is marked
+//! unsupported so it simply never matches — charter C2's ignore-unknown
+//! treaty applied to selectors instead of declarations.
+//!
+//! (packet t1b-color-scheme reconciliation note: this packet independently
+//! prototyped a near-identical `[attr="value"]`/`:root` implementation
+//! before T1a merged into `main`. Reconciled onto T1a's version rather than
+//! keeping two copies of the same infrastructure — T1b's actual value-add,
+//! `prefers-color-scheme`, lives entirely in `media.rs`/`author.rs`/
+//! `main.rs` and is untouched by this reconciliation.)
 
 use crate::dom::{AttrMap, ElementName};
 
@@ -29,8 +37,9 @@ pub(crate) enum Pseudo {
     Root,
 }
 
-/// One simple selector: an optional element name, id, classes, and pseudo
-/// classes, all of which must match the same element.
+/// One simple selector: an optional element name, id, classes, pseudo
+/// classes, and attribute selectors, all of which must match the same
+/// element.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Compound {
     pub element: Option<String>,
