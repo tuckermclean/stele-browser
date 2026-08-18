@@ -573,22 +573,88 @@ else
   # compliant color across the threshold on very low-color-depth hardware.
   # Auditing post-quantization is a reasonable follow-up, not this packet's
   # job (brief scope).
+  # t1d-httpforever extends this corpus with fixtures/httpforever.html --
+  # the real-world dark-theme fidelity fixture (see fixtures/evidence/
+  # README.md's own "httpforever" section) -- run in BOTH its default
+  # (light) rendering AND, in a second independent loop below, under
+  # `--color-scheme dark` (that page's dark theme is reachable ONLY via
+  # that flag -- no `prefers-color-scheme` fallback in its own CSS). This is
+  # the proof this packet's brief asks for: the T1a/T1b/T1c stack (var(),
+  # --color-scheme, and the contrast-repair covenant) actually holds on a
+  # dense, unmodified, real-world page in EITHER theme, not just the
+  # synthetic fixtures the earlier packets shipped their own tests against.
   if [ "$BLESS" = 1 ]; then
     pend "A3q: --audit-contrast has no golden to bless (defense-in-depth gate, not a render) -- skipped under --bless"
   elif [ ! -f "$HOST_BIN" ]; then
     bad "A3q: host binary still not found at $HOST_BIN"
   else
     audit_fail=0
-    for f in fixtures/basic.html fixtures/images.html fixtures/kitchen-sink.html fixtures/presentational.html fixtures/table-border.html fixtures/table-spacing.html; do
+    for f in fixtures/basic.html fixtures/images.html fixtures/kitchen-sink.html fixtures/presentational.html fixtures/table-border.html fixtures/table-spacing.html fixtures/httpforever.html; do
       if ! out_audit="$("$HOST_BIN" --headless --audit-contrast "$f" 2>&1)"; then
         bad "A3q: --audit-contrast reported a violation on $f"
         sed 's/^/    /' <<< "$out_audit"
         audit_fail=1
       fi
     done
-    if [ "$audit_fail" = 0 ]; then
-      pass "A3q: --audit-contrast reports zero violations across the fixture corpus"
+    if ! out_audit_dark="$("$HOST_BIN" --headless --color-scheme dark --audit-contrast fixtures/httpforever.html 2>&1)"; then
+      bad "A3q: --audit-contrast --color-scheme dark reported a violation on fixtures/httpforever.html"
+      sed 's/^/    /' <<< "$out_audit_dark"
+      audit_fail=1
     fi
+    if [ "$audit_fail" = 0 ]; then
+      pass "A3q: --audit-contrast reports zero violations across the fixture corpus (including httpforever.html light AND dark)"
+    fi
+  fi
+
+  # ---------------------------------------------------------------------
+  # A3r/A3s -- packet t1d-httpforever's own PNG goldens: fixtures/
+  # httpforever.html, Stele's canonical dark-theme fidelity fixture (see
+  # fixtures/evidence/README.md's "httpforever" section for the full
+  # provenance/theme-mechanism writeup). A3r is the LIGHT (default, no
+  # `--color-scheme` flag) render; A3s is the SAME fixture under
+  # `--color-scheme dark` -- the only way to reach this real-world page's
+  # dark theme through Stele at all, since its own dark mode is gated
+  # entirely on a JS-toggled `html[data-theme="dark"]` with no
+  # `prefers-color-scheme` fallback (packet t1d-httpforever wired
+  # `--dump-png` through to `--color-scheme` for exactly this fixture --
+  # see `dump_png_opts`'s own doc comment in src/main.rs). Same blessing
+  # discipline, same byte-equality rationale as every other PNG golden here
+  # (A3e/A3f/A3g/A3p).
+  GOLDEN_PNG_HTTPFOREVER_LIGHT="goldens/httpforever.light.png"
+  GOLDEN_PNG_HTTPFOREVER_DARK="goldens/httpforever.dark.png"
+  FIXTURE_HTTPFOREVER="fixtures/httpforever.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3r: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_HTTPFOREVER" /tmp/stele_a3r.png 2>/tmp/stele_a3r.err; then
+    bad "A3r: stele --headless --dump-png crashed on $FIXTURE_HTTPFOREVER"
+    sed 's/^/    /' /tmp/stele_a3r.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3r.png "$GOLDEN_PNG_HTTPFOREVER_LIGHT"
+    pass "A3r: blessed httpforever LIGHT PNG golden -> $GOLDEN_PNG_HTTPFOREVER_LIGHT (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_HTTPFOREVER_LIGHT" ]; then
+    bad "A3r: no golden at $GOLDEN_PNG_HTTPFOREVER_LIGHT to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_HTTPFOREVER_LIGHT" /tmp/stele_a3r.png; then
+    pass "A3r: PNG dump of $FIXTURE_HTTPFOREVER (light) matches golden"
+  else
+    bad "A3r: PNG dump of $FIXTURE_HTTPFOREVER (light) differs from $GOLDEN_PNG_HTTPFOREVER_LIGHT"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_HTTPFOREVER_LIGHT") actual=$(wc -c < /tmp/stele_a3r.png)"
+  fi
+
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3s: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --color-scheme dark --dump-png "$FIXTURE_HTTPFOREVER" /tmp/stele_a3s.png 2>/tmp/stele_a3s.err; then
+    bad "A3s: stele --headless --color-scheme dark --dump-png crashed on $FIXTURE_HTTPFOREVER"
+    sed 's/^/    /' /tmp/stele_a3s.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3s.png "$GOLDEN_PNG_HTTPFOREVER_DARK"
+    pass "A3s: blessed httpforever DARK PNG golden -> $GOLDEN_PNG_HTTPFOREVER_DARK (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_HTTPFOREVER_DARK" ]; then
+    bad "A3s: no golden at $GOLDEN_PNG_HTTPFOREVER_DARK to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_HTTPFOREVER_DARK" /tmp/stele_a3s.png; then
+    pass "A3s: PNG dump of $FIXTURE_HTTPFOREVER (dark) matches golden"
+  else
+    bad "A3s: PNG dump of $FIXTURE_HTTPFOREVER (dark) differs from $GOLDEN_PNG_HTTPFOREVER_DARK"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_HTTPFOREVER_DARK") actual=$(wc -c < /tmp/stele_a3s.png)"
   fi
 
   # ---------------------------------------------------------------------
