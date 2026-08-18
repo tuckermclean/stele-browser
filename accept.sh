@@ -658,6 +658,55 @@ else
   fi
 
   # ---------------------------------------------------------------------
+  # A3t/A3u -- packet t4-button-honesty's OWN fixture (fixtures/
+  # controls.html, NOT httpforever.html -- that fixture's goldens are
+  # deliberately left untouched here and re-blessed in a later
+  # consolidation step once every T4-era label change has landed).
+  # controls.html exercises every rung of `box_tree::resolve_bracket_label`'s
+  # label-resolution order (own text, `value`, `aria-label`, `title`, the
+  # submit-only "Submit" default, honest-empty `[ ]`) in one document,
+  # including the exact D4 repro shape: an icon-only `<button type=button
+  # aria-label="Theme">` with no text/value, which must render `[ Theme ]`,
+  # never a fabricated `[ Submit ]`. A3t is the tty dump (same discipline as
+  # A3/A3b/A3c/A3d); A3u is the PNG dump (same byte-equality rationale as
+  # A3e/A3f/.../A3s).
+  # ---------------------------------------------------------------------
+  GOLDEN_TTY_CONTROLS="goldens/controls.tty.txt"
+  FIXTURE_CONTROLS="fixtures/controls.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3t: host binary still not found at $HOST_BIN"
+  elif ! out_controls="$("$HOST_BIN" --headless --dump-text "$FIXTURE_CONTROLS" 2>/tmp/stele_a3t.err)"; then
+    bad "A3t: stele --headless --dump-text crashed on $FIXTURE_CONTROLS"
+    sed 's/^/    /' /tmp/stele_a3t.err
+  elif [ "$BLESS" = 1 ]; then
+    printf '%s\n' "$out_controls" > "$GOLDEN_TTY_CONTROLS"
+    pass "A3t: blessed controls tty golden -> $GOLDEN_TTY_CONTROLS (never bless your own render blind — see brief §10)"
+  elif diff -u "$GOLDEN_TTY_CONTROLS" <(printf '%s\n' "$out_controls") >/tmp/stele_a3t.diff 2>&1; then
+    pass "A3t: tty dump of $FIXTURE_CONTROLS matches golden"
+  else
+    bad "A3t: tty dump of $FIXTURE_CONTROLS differs from $GOLDEN_TTY_CONTROLS"
+    sed 's/^/    /' /tmp/stele_a3t.diff
+  fi
+
+  GOLDEN_PNG_CONTROLS="goldens/controls.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3u: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_CONTROLS" /tmp/stele_a3u.png 2>/tmp/stele_a3u.err; then
+    bad "A3u: stele --headless --dump-png crashed on $FIXTURE_CONTROLS"
+    sed 's/^/    /' /tmp/stele_a3u.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3u.png "$GOLDEN_PNG_CONTROLS"
+    pass "A3u: blessed controls PNG golden -> $GOLDEN_PNG_CONTROLS (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_CONTROLS" ]; then
+    bad "A3u: no golden at $GOLDEN_PNG_CONTROLS to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_CONTROLS" /tmp/stele_a3u.png; then
+    pass "A3u: PNG dump of $FIXTURE_CONTROLS matches golden"
+  else
+    bad "A3u: PNG dump of $FIXTURE_CONTROLS differs from $GOLDEN_PNG_CONTROLS"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_CONTROLS") actual=$(wc -c < /tmp/stele_a3u.png)"
+  fi
+
+  # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline
   # markup, lists, blockquote, pre, hr, br, a table with colspan/rowspan, a
