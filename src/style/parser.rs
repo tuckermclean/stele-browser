@@ -1,13 +1,13 @@
 //! CSS parsing (P2, Wave 1). Full syntax is parsed; unknown declarations are
 //! counted and dropped (the IGNORE-UNKNOWN treaty, charter C2). Selectors in
 //! scope: element, `.class`, `#id`, descendant, grouping, `a:link`/`:visited`
-//! (brief §4), plus (packet t1b-color-scheme) the two simplest attribute
-//! selectors `[attr]`/`[attr=value]` — see `style::selector::AttrMatch`'s
-//! doc comment for exactly which attribute-selector operators are and
-//! aren't in scope.
+//! (brief §4), `:root` (packet T1a), plus (packet T1a) the curated
+//! exact-match attribute selector `[attr=value]`/`[attr="value"]` — see
+//! `parse_attr_selector`'s doc comment for exactly which attribute-selector
+//! shapes are and aren't in scope.
 
 use crate::style::media::MediaQuery;
-use crate::style::selector::{AttrMatch, AttrSelector, Compound, ElementInfo, Pseudo, Selector};
+use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
 use crate::style::tokenizer::{tokenize, Token};
 use crate::style::value::{self, Declarations};
 
@@ -407,6 +407,7 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                     match name.to_ascii_lowercase().as_str() {
                         "link" => cur.pseudo.push(Pseudo::Link),
                         "visited" => cur.pseudo.push(Pseudo::Visited),
+                        "root" => cur.pseudo.push(Pseudo::Root),
                         _ => supported = false,
                     }
                     cur_has_content = true;
@@ -450,62 +451,23 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Delim('[') => {
-                // Packet t1b-color-scheme: `[attr]` (presence) and
-                // `[attr=value]`/`[attr="value"]` (exact match) are parsed
-                // into a real `AttrSelector`; every other attribute-selector
-                // shape (`~=`, `^=`, `$=`, `*=`, `|=`, an `i` flag, a
-                // missing/malformed name or value, an unterminated `[`)
-                // falls through to the same "mark unsupported, skip to the
-                // matching `]` (or EOF)" recovery this arm always used —
-                // charter C2's fail-closed treatment, now scoped to just the
-                // UNSUPPORTED attribute-selector shapes instead of all of them.
-                if pending_descendant {
-                    flush!();
-                    pending_descendant = false;
-                }
-                *pos += 1; // consume '['
-                skip_ws(tokens, pos);
-                let name = if let Some(Token::Ident(n)) = tokens.get(*pos) {
-                    let n = n.to_ascii_lowercase();
-                    *pos += 1;
-                    Some(n)
-                } else {
-                    None
-                };
-                skip_ws(tokens, pos);
-
-                let mut attr_ok = name.is_some();
-                let mut attr_match = AttrMatch::Present;
-                if attr_ok {
-                    match tokens.get(*pos) {
-                        Some(Token::Delim(']')) => {
-                            // `[attr]` — presence only, attr_match stays Present.
-                        }
-                        Some(Token::Delim('=')) => {
-                            *pos += 1;
-                            skip_ws(tokens, pos);
-                            match tokens.get(*pos) {
-                                Some(Token::Str(s)) => {
-                                    attr_match = AttrMatch::Equals(s.clone());
-                                    *pos += 1;
-                                }
-                                Some(Token::Ident(s)) => {
-                                    attr_match = AttrMatch::Equals(s.clone());
-                                    *pos += 1;
-                                }
-                                _ => attr_ok = false, // missing/malformed value
-                            }
-                        }
-                        _ => attr_ok = false, // ~=, ^=, $=, *=, |=, or malformed
+                *pos += 1;
+                if let Some((attr_name, attr_value, next)) = parse_attr_selector(tokens, *pos) {
+                    // The curated exact-match attribute-selector form
+                    // (packet T1a) — see `Compound::attrs`'s own doc comment
+                    // in `selector.rs` for the full rationale/scope.
+                    if pending_descendant {
+                        flush!();
+                        pending_descendant = false;
                     }
-                }
-                skip_ws(tokens, pos);
-
-                if attr_ok && tokens.get(*pos) == Some(&Token::Delim(']')) {
-                    *pos += 1; // consume ']'
-                    cur.attrs.push(AttrSelector { name: name.expect("attr_ok implies name is Some"), match_: attr_match });
+                    cur.attrs.push((attr_name, attr_value));
                     cur_has_content = true;
+                    *pos = next;
                 } else {
+                    // Every other attribute-selector shape stays out of
+                    // scope (unchanged pre-T1a behavior): parsed defensively
+                    // but marked unsupported so the selector simply never
+                    // matches (charter C2).
                     supported = false;
                     while *pos < len && tokens[*pos] != Token::Delim(']') {
                         *pos += 1;
@@ -530,6 +492,49 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
     }
 }
 
+/// Parse `[name="value"]` / `[name=value]` starting at `tokens[start]` (just
+/// past the already-consumed `[`) — the ONLY attribute-selector shape this
+/// curated dialect recognizes (packet T1a — just enough for attribute-scoped
+/// custom-property overrides like `html[data-theme="dark"]`, this packet's
+/// own theming-setup test). Returns the lowercased attribute name (HTML
+/// attribute NAMES are case-insensitive, matching `AttrMap::get`'s own
+/// case-insensitive lookup), the value verbatim (quoted or bare — HTML
+/// attribute VALUES are case-sensitive, no `i`-flag support), and the index
+/// just past the matching `]`; `None` for anything else (presence-only
+/// `[name]`, `~=`/`^=`/`$=`/`*=` operators, a missing `=`/value/`]`, ...) —
+/// the caller then falls back to the pre-existing "parse defensively, mark
+/// unsupported" path. Total: only ever reads forward from `start`, tolerates
+/// running off the end of `tokens` without panicking.
+fn parse_attr_selector(tokens: &[Token], start: usize) -> Option<(String, String, usize)> {
+    let len = tokens.len();
+    let skip_ws_at = |mut i: usize| -> usize {
+        while i < len && tokens[i] == Token::Whitespace {
+            i += 1;
+        }
+        i
+    };
+    let mut i = skip_ws_at(start);
+    let name = match tokens.get(i) {
+        Some(Token::Ident(s)) => s.to_ascii_lowercase(),
+        _ => return None,
+    };
+    i = skip_ws_at(i + 1);
+    if tokens.get(i) != Some(&Token::Delim('=')) {
+        return None;
+    }
+    i = skip_ws_at(i + 1);
+    let value = match tokens.get(i) {
+        Some(Token::Str(s)) => s.clone(),
+        Some(Token::Ident(s)) => s.clone(),
+        _ => return None,
+    };
+    i = skip_ws_at(i + 1);
+    if tokens.get(i) != Some(&Token::Delim(']')) {
+        return None;
+    }
+    Some((name, value, i + 1))
+}
+
 /// Parse a `{ ... }` declaration block; `*pos` starts just past the `{` and
 /// ends just past the matching `}` (or at EOF, tolerated). Each declaration
 /// that fails to parse (bad property/colon/value) or names a property
@@ -552,7 +557,15 @@ fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Styles
                 *pos += 1;
             }
             Token::Ident(name) => {
-                let name = name.to_ascii_lowercase();
+                // Custom-property names (`--name`, packet T1a) are
+                // CASE-SENSITIVE — unlike every ordinary CSS property name,
+                // which this parser has always folded to lowercase (real
+                // CSS property names are ASCII-case-insensitive; custom
+                // property names deliberately are NOT, per spec). Check the
+                // RAW (pre-lowercase) token text for the `--` prefix before
+                // deciding whether to lowercase at all.
+                let is_custom = name.starts_with("--");
+                let name = if is_custom { name.clone() } else { name.to_ascii_lowercase() };
                 *pos += 1;
                 skip_ws(tokens, pos);
                 if *pos < len && tokens[*pos] == Token::Colon {
@@ -571,7 +584,28 @@ fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Styles
                 if *pos < len && tokens[*pos] == Token::Semicolon {
                     *pos += 1;
                 }
-                if !value::apply_property(&name, &value_tokens, &mut decls) {
+                if is_custom {
+                    // A custom-property declaration (packet T1a): stored
+                    // raw (never eagerly parsed/applied — see
+                    // `Declarations::custom`'s own doc comment) and never
+                    // counted against `ignored_declarations`, matching how
+                    // every RECOGNIZED declaration (custom or not) is
+                    // treated — only genuinely unparseable/unknown input
+                    // counts against that stat.
+                    decls.custom.push((name.into_boxed_str(), value_tokens));
+                } else if value_tokens.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var"))) {
+                    // An ordinary property whose value contains `var()`
+                    // ANYWHERE (including nested inside another function,
+                    // e.g. `rgb(var(--r), 0, 0)` — the token stream is
+                    // flat, so this `any` check finds it regardless of
+                    // nesting) can't be resolved yet: defer it to cascade
+                    // time (packet T1a) instead of calling `apply_property`
+                    // now. Not counted against `ignored_declarations` either
+                    // — whether it ultimately applies is decided later by
+                    // `cascade::resolve`, exactly like any other
+                    // successfully-parsed declaration.
+                    decls.deferred.push((name.into_boxed_str(), value_tokens));
+                } else if !value::apply_property(&name, &value_tokens, &mut decls) {
                     sheet.ignored_declarations += 1;
                 }
             }
@@ -922,12 +956,15 @@ mod tests {
         }
     }
 
-    // ---- T1b: attribute selectors ([attr], [attr=value]) ---------------------
-    // (packet t1b-color-scheme: `html[data-theme="dark"]` -- the no-JS theme
-    // hook `main.rs` stamps pre-cascade -- needs to actually parse AND match,
-    // unlike the pre-T1b "always unsupported" treatment `a[href='x']` above
-    // still (correctly) exercises for an ELEMENT mismatch, not an attribute
-    // one.)
+    // ---- packet T1a: attribute selectors ([attr=value]) -----------------
+    // (packet t1b-color-scheme reconciliation note: `html[data-theme="dark"]`
+    // -- the no-JS theme hook `main.rs` stamps pre-cascade -- needs to
+    // actually parse AND match, unlike the pre-T1a "always unsupported"
+    // treatment `a[href='x']` above still (correctly) exercises for an
+    // ELEMENT mismatch, not an attribute one. T1a's curated grammar covers
+    // exact-match `[attr=value]` only -- no presence-only `[attr]` form --
+    // so `[attr]` and every other operator fall through to the same
+    // fail-closed "unsupported" path exercised below.)
 
     #[test]
     fn attribute_equals_selector_matches_the_stamped_root_html_element() {
@@ -948,28 +985,11 @@ mod tests {
     }
 
     #[test]
-    fn attribute_presence_selector_matches_regardless_of_value() {
-        let dom = crate::dom::parser::parse(r#"<p data-x="anything">t</p>"#);
-        let sheet = parse("p[data-x] { color: red; }");
-        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
-        let p = find(&dom, "p").unwrap();
-        assert_eq!(styles[p].color, Color::rgb(255, 0, 0));
-    }
-
-    #[test]
-    fn attribute_presence_selector_does_not_match_when_absent() {
-        let dom = crate::dom::parser::parse("<p>t</p>");
-        let sheet = parse("p[data-x] { color: red; }");
-        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
-        let p = find(&dom, "p").unwrap();
-        assert_ne!(styles[p].color, Color::rgb(255, 0, 0));
-    }
-
-    #[test]
     fn attribute_selector_with_an_unsupported_operator_fails_closed() {
-        // `~=` (and `^=`/`$=`/`*=`/`|=`) are outside the curated subset --
-        // must never match, same C2 fail-closed treatment as the rest of
-        // this module's unsupported selector constructs.
+        // `~=` (and `^=`/`$=`/`*=`/`|=`, plus the bare presence-only
+        // `[attr]` form) are outside the curated subset -- must never
+        // match, same C2 fail-closed treatment as the rest of this
+        // module's unsupported selector constructs.
         let dom = crate::dom::parser::parse(r#"<p class="x">t</p>"#);
         let sheet = parse(r#"p[class~="x"] { color: red; }"#);
         let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));

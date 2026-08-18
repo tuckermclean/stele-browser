@@ -1,9 +1,16 @@
 //! Selector matching (brief §4): element, `.class`, `#id`, descendant,
-//! grouping, `a:link`/`a:visited`, and (packet t1b-color-scheme)
-//! `[attr]`/`[attr=value]` attribute selectors. Anything else parses without
-//! choking (the tokenizer/parser never rejects it) but is marked unsupported
-//! so it simply never matches — charter C2's ignore-unknown treaty applied
-//! to selectors instead of declarations.
+//! grouping, `a:link`/`a:visited`, `:root` (packet T1a), and (packet T1a)
+//! exact-match `[attr="value"]` attribute selectors. Anything else parses
+//! without choking (the tokenizer/parser never rejects it) but is marked
+//! unsupported so it simply never matches — charter C2's ignore-unknown
+//! treaty applied to selectors instead of declarations.
+//!
+//! (packet t1b-color-scheme reconciliation note: this packet independently
+//! prototyped a near-identical `[attr="value"]`/`:root` implementation
+//! before T1a merged into `main`. Reconciled onto T1a's version rather than
+//! keeping two copies of the same infrastructure — T1b's actual value-add,
+//! `prefers-color-scheme`, lives entirely in `media.rs`/`author.rs`/
+//! `main.rs` and is untouched by this reconciliation.)
 
 use crate::dom::{AttrMap, ElementName};
 
@@ -21,33 +28,13 @@ pub(crate) struct Specificity {
 pub(crate) enum Pseudo {
     Link,
     Visited,
-}
-
-/// How one `[attr...]` selector's value clause tests an attribute (packet
-/// t1b-color-scheme). Only the two simplest CSS attribute-selector forms are
-/// in the curated subset — `[attr]` (presence) and `[attr=value]` (exact,
-/// case-SENSITIVE value match, no `i` flag) — mirroring `media.rs`'s own
-/// "curated subset, everything else fails closed" posture: `~=`/`^=`/`$=`/
-/// `*=`/`|=` and the `i` case-insensitivity flag all parse without choking
-/// (`parser::parse_selector`'s `[` handling) but mark the whole selector
-/// `supported: false` rather than being evaluated.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AttrMatch {
-    Present,
-    Equals(String),
-}
-
-/// One `[attr...]` clause within a [`Compound`] (packet t1b-color-scheme) —
-/// e.g. `[data-theme="dark"]` is `AttrSelector { name: "data-theme", match_:
-/// AttrMatch::Equals("dark".into()) }`. `name` is stored already lowercased
-/// (attribute names are ASCII-case-insensitive in HTML); the VALUE is kept
-/// exactly as written — real CSS attribute-value matching is case-sensitive
-/// by default (only an explicit trailing `i` flag, which this curated subset
-/// doesn't support, would fold it).
-#[derive(Debug, Clone)]
-pub(crate) struct AttrSelector {
-    pub name: String,
-    pub match_: AttrMatch,
+    /// `:root` (packet T1a — CSS custom properties + `var()`, needed for
+    /// `:root { --name: ... }` theming declarations). Matches the
+    /// document's root element — `ElementInfo::is_root` (this module) is
+    /// always well-defined and always identifies the single `<html>`
+    /// element (`dom::ast::Dom::new`'s frozen root — see that module's own
+    /// doc comment), so matching this is simply an `is_root` flag check.
+    Root,
 }
 
 /// One simple selector: an optional element name, id, classes, pseudo
@@ -59,16 +46,18 @@ pub(crate) struct Compound {
     pub id: Option<String>,
     pub classes: Vec<String>,
     pub pseudo: Vec<Pseudo>,
-    pub attrs: Vec<AttrSelector>,
+    /// `[name="value"]` attribute-selector requirements (packet T1a) — see
+    /// `ElementInfo::attrs`'s doc comment for the matching half, and
+    /// `parser::parse_attr_selector` for the (curated, exact-match-only)
+    /// grammar this can hold. Every compound must satisfy ALL of these
+    /// (same "AND" semantics as `classes`).
+    pub attrs: Vec<(String, String)>,
 }
 
 impl Compound {
     fn specificity(&self) -> Specificity {
         Specificity {
             ids: self.id.is_some() as u32,
-            // Attribute selectors carry class-level specificity, same as
-            // real CSS (a `.class`, a `[attr]`, and a `:pseudo-class` are
-            // all specificity (0,1,0) each).
             classes: (self.classes.len() + self.pseudo.len() + self.attrs.len()) as u32,
             elements: self.element.is_some() as u32,
         }
@@ -88,6 +77,9 @@ impl Compound {
         if !self.classes.iter().all(|c| info.classes.iter().any(|ic| ic == c)) {
             return false;
         }
+        if !self.attrs.iter().all(|(name, value)| info.attrs.get(name) == Some(value.as_str())) {
+            return false;
+        }
         for p in &self.pseudo {
             match p {
                 Pseudo::Link => {
@@ -97,19 +89,11 @@ impl Compound {
                 }
                 // No history in v0 — nothing is ever :visited.
                 Pseudo::Visited => return false,
-            }
-        }
-        for a in &self.attrs {
-            match &a.match_ {
-                AttrMatch::Present => {
-                    if info.attrs.get(&a.name).is_none() {
+                Pseudo::Root => {
+                    if !info.is_root {
                         return false;
                     }
                 }
-                AttrMatch::Equals(want) => match info.attrs.get(&a.name) {
-                    Some(v) if v == want.as_str() => {}
-                    _ => return false,
-                },
             }
         }
         true
@@ -173,22 +157,30 @@ impl Selector {
 
 /// The bits of an element the cascade needs to test selectors against,
 /// captured once per node so matching doesn't repeatedly re-walk `AttrMap`.
-/// `attrs` (packet t1b-color-scheme) is a full clone of the element's own
-/// `AttrMap` — cheap (an `AttrMap` is just a small `Vec` of interned
-/// strings) and lets [`Compound`]'s new `[attr...]` matching reuse
-/// `AttrMap::get`'s existing case-insensitive-by-name lookup rather than
-/// duplicating it.
 #[derive(Debug, Clone)]
 pub(crate) struct ElementInfo {
     name: String,
     id: Option<String>,
     classes: Vec<String>,
     has_href: bool,
+    /// Every attribute this element carries, verbatim (packet T1a) — needed
+    /// for `[name="value"]` attribute-selector matching (`Compound::
+    /// matches`), which can name ANY attribute, not just the handful
+    /// (`id`/`class`/`href`) the fields above cover. Cloned once here so
+    /// `ElementInfo` stays a plain owned value with no lifetime tied back to
+    /// the `Element` it was built from, matching every other field's own
+    /// tradeoff.
     attrs: AttrMap,
+    /// Whether this is the document's root element (packet T1a, for `:root`
+    /// matching — see `Pseudo::Root`'s doc comment). Computed by the one
+    /// caller that has both a `NodeId` and `dom.root()` in hand
+    /// (`cascade::visit`), since `ElementInfo` itself has no notion of the
+    /// wider document.
+    is_root: bool,
 }
 
 impl ElementInfo {
-    pub fn from_element(name: &ElementName, attrs: &AttrMap) -> Self {
+    pub fn from_element(name: &ElementName, attrs: &AttrMap, is_root: bool) -> Self {
         let id = attrs.get("id").map(|s| s.trim().to_ascii_lowercase());
         let classes = attrs
             .get("class")
@@ -201,6 +193,7 @@ impl ElementInfo {
             classes,
             has_href,
             attrs: attrs.clone(),
+            is_root,
         }
     }
 }
@@ -216,7 +209,14 @@ mod tests {
             id: id.map(|s| s.to_string()),
             classes: classes.iter().map(|s| s.to_string()).collect(),
             has_href,
+            // Neutral defaults (packet T1a): none of the pre-existing call
+            // sites of this helper care about attribute-selector matching or
+            // `:root`-ness, so every one of them keeps compiling and passing
+            // unchanged with an empty `AttrMap`/`is_root: false` here — the
+            // new tests below override these two fields explicitly via
+            // struct-update syntax where they matter.
             attrs: AttrMap::new(),
+            is_root: false,
         }
     }
 
@@ -313,43 +313,59 @@ mod tests {
         attrs.set("ID", "Foo");
         attrs.set("class", "Bar Baz");
         attrs.set("HREF", "x");
-        let info = ElementInfo::from_element(&ElementName::new("A"), &attrs);
+        let info = ElementInfo::from_element(&ElementName::new("A"), &attrs, false);
         assert_eq!(info.name, "a");
         assert_eq!(info.id.as_deref(), Some("foo"));
         assert_eq!(info.classes, vec!["bar".to_string(), "baz".to_string()]);
         assert!(info.has_href);
     }
 
-    // ---- T1b: attribute selectors ([attr], [attr=value]) ---------------------
-    // (packet t1b-color-scheme: `html[data-theme="dark"]` needs to actually
-    // match once `main.rs` stamps that attribute pre-cascade -- see
-    // `Compound.attrs`/`AttrSelector`/`AttrMatch` below.)
+    // ---- packet T1a: `:root` pseudo-class + `[name="value"]` attribute selector ----
 
-    fn info_with_attr(name: &str, attr_name: &str, attr_value: &str) -> ElementInfo {
+    #[test]
+    fn root_pseudo_matches_only_the_root_element() {
+        let c = Compound {
+            pseudo: vec![Pseudo::Root],
+            ..Compound::default()
+        };
+        assert!(c.matches(&ElementInfo { is_root: true, ..info("html", None, &[], false) }));
+        assert!(!c.matches(&ElementInfo { is_root: false, ..info("html", None, &[], false) }));
+    }
+
+    #[test]
+    fn attribute_selector_matches_exact_name_value_pair() {
         let mut attrs = AttrMap::new();
-        attrs.set(attr_name, attr_value);
-        ElementInfo::from_element(&ElementName::new(name), &attrs)
+        attrs.set("data-theme", "dark");
+        let target = ElementInfo { attrs, ..info("html", None, &[], false) };
+
+        let matching = Compound {
+            attrs: vec![("data-theme".into(), "dark".into())],
+            ..Compound::default()
+        };
+        assert!(matching.matches(&target));
+
+        let wrong_value = Compound {
+            attrs: vec![("data-theme".into(), "light".into())],
+            ..Compound::default()
+        };
+        assert!(!wrong_value.matches(&target), "a different value must not match");
+
+        let missing_attr = Compound {
+            attrs: vec![("data-missing".into(), "dark".into())],
+            ..Compound::default()
+        };
+        assert!(!missing_attr.matches(&target), "an attribute the element doesn't carry must not match");
     }
 
     #[test]
-    fn attr_present_selector_matches_when_the_attribute_exists() {
+    fn specificity_counts_attribute_selectors_like_classes() {
+        // Per CSS's own specificity rules, an attribute selector contributes
+        // to the same "class" bucket as `.foo`/`:pseudo-class` — see
+        // `Compound::specificity`'s own doc comment.
         let c = Compound {
-            attrs: vec![AttrSelector { name: "data-theme".into(), match_: AttrMatch::Present }],
+            attrs: vec![("data-theme".into(), "dark".into())],
             ..Compound::default()
         };
-        assert!(c.matches(&info_with_attr("html", "data-theme", "dark")));
-        assert!(!c.matches(&info("html", None, &[], false)));
-    }
-
-    #[test]
-    fn attr_equals_selector_matches_only_the_exact_value() {
-        let c = Compound {
-            element: Some("html".into()),
-            attrs: vec![AttrSelector { name: "data-theme".into(), match_: AttrMatch::Equals("dark".into()) }],
-            ..Compound::default()
-        };
-        assert!(c.matches(&info_with_attr("html", "data-theme", "dark")));
-        assert!(!c.matches(&info_with_attr("html", "data-theme", "light")));
-        assert!(!c.matches(&info("html", None, &[], false)));
+        assert_eq!(c.specificity(), Specificity { ids: 0, classes: 1, elements: 0 });
     }
 }

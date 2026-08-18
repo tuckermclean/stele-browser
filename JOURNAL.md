@@ -426,6 +426,23 @@ Append-only running log. Newest at the bottom.
   touched `frames.rs`); 699 tests green. Documented gap: `--stats` still
   counts only `<style>` (undercounts `<link>`-sourced ignored decls). See D35.
 
+## 2026-08-18 — X11 responsiveness + SetInputFocus fix
+
+- **SetInputFocus BadMatch fixed:** the pre-loop `set_input_focus` (right after
+  MapWindow, before the window was viewable) drew `BadMatch(8)` on real servers.
+  Moved it to the first `Expose` (window guaranteed viewable) — clears the error
+  and actually grabs keyboard focus on WM-less servers (Xfbdev/TinyX).
+- **CopyArea scrolling:** scroll used to re-crop, re-convert (~786K px RGBA→bpp),
+  and re-`PutImage` the whole ~3MB window every notch. Now `scroll_blit` plans a
+  server-side `CopyArea` (opcode 62) to shift the retained rows within the
+  window + a `PutImage` of ONLY the newly-exposed strip (`put_image_at` with a
+  `dst_y_base`). A 60px line-scroll drops from ~3.15MB to a 28-byte CopyArea +
+  ~246KB strip (~12-13x less wire + convert work). Full redraw still used for
+  Expose/resize/reload/nav. Unit tests: `encode_copy_area`, `put_image_requests`
+  dst_y_base, `scroll_blit` (down/up/jump/no-op). See D52.
+- RAM (full-page surface) left as-is — shrinking it trades RAM for
+  re-render-on-scroll CPU, the wrong trade on a 486; flagged for a design call.
+
 ## 2026-08-15 — X11 backend (spike) · stele --x11 <url> — a real window
 
 - Hand-rolled minimal X11 client (`src/backend/x11.rs`, self-contained, pure Rust

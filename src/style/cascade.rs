@@ -11,7 +11,7 @@ use crate::style::computed::{
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
-use crate::style::value::{presentational_hints, BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
+use crate::style::value::{self, presentational_hints, BorderRaw, Declarations, Env, RawLength, RawLengthAuto, RawLineHeight};
 use crate::style::{parser, ComputedStyle, Stylesheet};
 use crate::surface::Color;
 
@@ -51,8 +51,15 @@ pub fn cascade(dom: &Dom, author_sheets: &[Stylesheet]) -> Vec<ComputedStyle> {
 /// children have been pushed -- pop that subtree's `ElementInfo` back off
 /// `ancestors` now that nothing left on the stack still needs it as an
 /// ancestor.
+///
+/// `parent_env` (packet T1a) threads the inherited custom-property
+/// environment down the walk alongside the parent's already-resolved
+/// `ComputedStyle` -- `Env` deliberately does NOT become a `ComputedStyle`
+/// field (see `Env`'s own doc comment for why: `ComputedStyle` is a frozen
+/// contract with layout/paint), so it has to ride along as its own bit of
+/// per-frame state instead.
 enum Frame {
-    Enter { id: NodeId, parent: Option<ComputedStyle> },
+    Enter { id: NodeId, parent: Option<ComputedStyle>, parent_env: Env },
     Exit,
 }
 
@@ -63,14 +70,14 @@ enum Frame {
 /// heap instead of the native call stack, so nesting depth cannot blow it.
 fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &mut [ComputedStyle]) {
     let mut ancestors: Vec<ElementInfo> = Vec::new();
-    let mut stack: Vec<Frame> = vec![Frame::Enter { id: root, parent: None }];
+    let mut stack: Vec<Frame> = vec![Frame::Enter { id: root, parent: None, parent_env: Env::default() }];
 
     while let Some(frame) = stack.pop() {
         match frame {
             Frame::Exit => {
                 ancestors.pop();
             }
-            Frame::Enter { id, parent } => match dom.node(id) {
+            Frame::Enter { id, parent, parent_env } => match dom.node(id) {
                 // Character data carries no rules of its own; it takes the
                 // parent's computed style wholesale (the inline engine reads
                 // font/color etc. straight off it).
@@ -80,7 +87,8 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                     }
                 }
                 Node::Element(el) => {
-                    let info = ElementInfo::from_element(&el.name, &el.attrs);
+                    let is_root = id == root;
+                    let info = ElementInfo::from_element(&el.name, &el.attrs, is_root);
                     // Vintage HTML presentational attributes (packet/
                     // presentational-attrs: <font color/size>, bgcolor,
                     // align=, <body text>) -- computed straight from the
@@ -100,7 +108,14 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                     if let Some(style_attr) = el.attrs.get("style") {
                         decls.overlay(&parser::parse_inline(style_attr));
                     }
-                    let style = resolve(&decls, parent.as_ref());
+                    // This element's custom-property environment (packet
+                    // T1a): the inherited chain (`parent_env`) overlaid with
+                    // this element's OWN `--name` declarations
+                    // (`decls.custom`) — built BEFORE `resolve`, since
+                    // `resolve` needs it to substitute any `var()`-bearing
+                    // `deferred` declarations this element itself carries.
+                    let env = parent_env.child(&decls.custom);
+                    let style = resolve(&decls, parent.as_ref(), &env);
                     out[id] = style.clone();
 
                     ancestors.push(info);
@@ -109,7 +124,7 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                     // visited) in source order, matching the old recursive
                     // walk's iteration order exactly.
                     for &child in el.children.iter().rev() {
-                        stack.push(Frame::Enter { id: child, parent: Some(style.clone()) });
+                        stack.push(Frame::Enter { id: child, parent: Some(style.clone()), parent_env: env.clone() });
                     }
                 }
             },
@@ -183,7 +198,30 @@ fn fold_matching_declarations(
 /// `em`/`%` on `font-size` resolve against the *parent's* font size; every
 /// other `em` resolves against *this node's own* resolved font size, per
 /// CSS (computed here first, so everything else can use it).
-fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
+fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> ComputedStyle {
+    // Deferred var()-bearing declarations (packet T1a): substitute each
+    // one's `var()` calls against this element's full custom-property
+    // environment (`env`, built by the caller — `cascade::visit` — from the
+    // inherited chain plus this element's own `--name` declarations), now
+    // that it's finally available (it couldn't be, at parse time). A
+    // successful substitution is applied to a LOCAL clone of `d` via
+    // `value::apply_property`, exactly as if it had been parsed eagerly —
+    // every macro/field below this point then sees it precisely like any
+    // other declaration. A failed substitution ("invalid at computed-value
+    // time", in CSS's own terms — an undefined custom property with no
+    // fallback, or a cyclic/pathologically deep chain — see `value::
+    // substitute_vars`'s own doc comment) simply leaves that field unset on
+    // this local `d`, so it falls through to the ordinary inherited/CSS-
+    // initial fallback exactly like a declaration that was never present at
+    // all — never a crash, never a garbage value.
+    let mut d = d.clone();
+    for (name, tokens) in d.deferred.clone() {
+        if let Some(substituted) = value::substitute_vars(&tokens, env, &[], 0) {
+            value::apply_property(&name, &substituted, &mut d);
+        }
+    }
+    let d = &d; // shadow back to `&Declarations` so every existing line below (which all read `d.field`) needs zero further changes
+
     let default = ComputedStyle::default();
     let parent_font_size = parent.map(|p| p.font_size).unwrap_or(default.font_size);
 
@@ -964,5 +1002,152 @@ mod tests {
         let sheet = parser::parse("span { display: block; }");
         let styles = cascade(&d, std::slice::from_ref(&sheet));
         assert_eq!(styles[find(&d, "span")].display, Display::Block);
+    }
+
+    // ---- packet T1a: CSS custom properties + var() resolution ----
+
+    #[test]
+    fn root_custom_property_resolves_via_var_on_a_descendant() {
+        // `:root` matches `dom.root()`, which is ALWAYS the literal `<html>`
+        // element (see `dom::ast::Dom::new`'s own doc comment) -- this is the
+        // packet's motivating shape: a theme variable declared once at the
+        // top and consumed several levels down.
+        let d = dom::parser::parse("<html><body>x</body></html>");
+        let sheet = parser::parse(":root { --ink: #123456; } body { color: var(--ink); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let body = find(&d, "body");
+        assert_eq!(styles[body].color, Color::rgb(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn custom_property_inherits_through_intermediate_elements_with_no_custom_properties_of_their_own() {
+        // `--c` is declared on the `<div>`; `<section>`/`<article>` in
+        // between set no custom properties of their own, yet `var(--c)`
+        // still resolves several levels down on `<span>` -- `Env::child`
+        // threading the inherited chain down `cascade::visit`'s walk.
+        let d = dom::parser::parse("<div><section><article><span>x</span></article></section></div>");
+        let sheet = parser::parse("div { --c: teal; } span { color: var(--c); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let span = find(&d, "span");
+        assert_eq!(styles[span].color, Color::rgb(0, 128, 128));
+    }
+
+    #[test]
+    fn var_fallback_is_used_when_the_custom_property_is_never_declared_anywhere() {
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse("p { color: var(--missing, green); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let p = find(&d, "p");
+        assert_eq!(styles[p].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn var_with_no_fallback_and_undefined_custom_property_falls_back_to_css_initial() {
+        // "Invalid at computed-value time" (CSS's own term): the whole
+        // `color` declaration simply doesn't apply -- `color` falls back to
+        // whatever it would resolve to with NO declaration at all (here:
+        // the CSS initial `Color::BLACK`, there being no other color source
+        // in this document), never a crash and never a garbage value.
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse("p { color: var(--missing); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let p = find(&d, "p");
+        assert_eq!(styles[p].color, Color::BLACK);
+    }
+
+    #[test]
+    fn var_chain_resolves_through_another_custom_property() {
+        // `--a` doesn't hold a color directly -- it holds a reference to
+        // `--b` -- so resolving `color: var(--a)` must recurse one level
+        // through `--b`'s own raw value before it bottoms out at `blue`.
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse("p { --a: var(--b); --b: blue; color: var(--a); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let p = find(&d, "p");
+        assert_eq!(styles[p].color, Color::rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn var_cycles_are_invalid_and_the_cascade_never_hangs() {
+        // Two-step cycle: `--a` and `--b` reference each other, so neither
+        // ever bottoms out at a real value -- `substitute_vars`'s `visiting`
+        // chain catches this the instant it closes, well before
+        // `VAR_SUBSTITUTION_DEPTH_CAP` would even matter. This test's very
+        // existence and return (not a hang) is itself part of the totality
+        // proof -- see also the dedicated pathological test below.
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse("p { --a: var(--b); --b: var(--a); color: var(--a); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let p = find(&d, "p");
+        assert_eq!(styles[p].color, Color::BLACK, "a two-step cycle must fall back to CSS initial, never hang");
+
+        // Direct self-reference: `--a` references itself.
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse("p { --a: var(--a); color: var(--a); }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let p = find(&d, "p");
+        assert_eq!(styles[p].color, Color::BLACK, "a direct self-cycle must fall back to CSS initial, never hang");
+    }
+
+    #[test]
+    fn attribute_scoped_custom_property_override_gates_on_the_attribute() {
+        // Packet-motivating theming shape: `:root` sets a light-mode
+        // default, `html[data-theme="dark"]` overrides it (higher
+        // specificity: an attribute selector counts like a class, so it
+        // beats the bare `:root` compound), and `body` consumes the
+        // resulting value via `var()`. Testing both the attribute's PRESENCE
+        // and its ABSENCE confirms the attribute selector is actually gating
+        // the override, not just always matching regardless of the DOM.
+        let sheet = parser::parse(
+            r#":root { --bg: #fbfcfb; } html[data-theme="dark"] { --bg: #0f1211; } body { background-color: var(--bg); }"#,
+        );
+
+        let dark = dom::parser::parse(r#"<html data-theme="dark"><body>x</body></html>"#);
+        let styles = cascade(&dark, std::slice::from_ref(&sheet));
+        let body = find(&dark, "body");
+        assert_eq!(styles[body].background_color, Color::rgb(0x0f, 0x12, 0x11));
+
+        let light = dom::parser::parse("<html><body>x</body></html>");
+        let styles = cascade(&light, std::slice::from_ref(&sheet));
+        let body = find(&light, "body");
+        assert_eq!(
+            styles[body].background_color,
+            Color::rgb(0xfb, 0xfc, 0xfb),
+            "without the data-theme attribute the dark override must not apply"
+        );
+    }
+
+    #[test]
+    fn pathological_custom_property_chain_and_unused_cycles_do_not_panic_or_hang() {
+        // A long but strictly ACYCLIC chain of custom properties, each
+        // referencing the next, plus one real usage. `VAR_SUBSTITUTION_
+        // DEPTH_CAP` means this specific chain resolves to the fallback/
+        // initial rather than `red` (it's far longer than the cap) -- this
+        // only asserts TOTALITY (the call completes, every node still gets a
+        // style), never a specific color.
+        let mut css = String::from("p { ");
+        let depth = 3000;
+        for i in 0..depth {
+            css.push_str(&format!("--v{i}: var(--v{next});", next = i + 1));
+        }
+        css.push_str(&format!("--v{depth}: red; color: var(--v0); }}"));
+        let d = dom::parser::parse("<p>x</p>");
+        let sheet = parser::parse(&css);
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        assert_eq!(styles.len(), d.len());
+
+        // Thousands of self-referential custom properties, declared but
+        // never even consumed by any real property -- confirms parsing and
+        // cascading a stylesheet like this alone doesn't hang, independent
+        // of whether anything ever actually resolves.
+        let mut css2 = String::from(":root { ");
+        for i in 0..depth {
+            css2.push_str(&format!("--u{i}: var(--u{i});"));
+        }
+        css2.push_str(" }");
+        let d2 = dom::parser::parse("<p>x</p>");
+        let sheet2 = parser::parse(&css2);
+        let styles2 = cascade(&d2, std::slice::from_ref(&sheet2));
+        assert_eq!(styles2.len(), d2.len());
     }
 }

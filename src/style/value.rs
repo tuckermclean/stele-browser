@@ -153,6 +153,34 @@ pub(crate) struct Declarations {
     pub flex_shrink: Option<f32>,
     pub flex_basis: Option<RawLengthAuto>,
     pub gap: Option<RawLength>,
+
+    /// Custom-property (`--name: <tokens>;`) declarations captured by this
+    /// block (packet T1a — CSS custom properties + `var()`). Stored as RAW
+    /// tokens, never eagerly resolved: a custom property's value may itself
+    /// reference `var()` (a chain), and — unlike every other field in this
+    /// struct — its name is CASE-SENSITIVE (`--Foo` and `--foo` are distinct
+    /// custom properties; see `parser::parse_declaration_block`, which is
+    /// careful NOT to lowercase a name starting with `--` the way it
+    /// lowercases every ordinary property name). A flat `Vec` rather than a
+    /// map: a single declaration block's custom-property count is small in
+    /// practice, and this keeps the type as simple/dependency-free as every
+    /// other field here. `overlay` below merges these last-write-wins by
+    /// name, exactly like every other property.
+    pub custom: Vec<(Box<str>, Vec<Token>)>,
+    /// Ordinary (non-custom) declarations whose value tokens contained a
+    /// `var()` function at parse time (packet T1a) — `parser::
+    /// parse_declaration_block` defers these instead of calling
+    /// `apply_property` immediately, because resolving `var()` needs the
+    /// element's full custom-property environment, which only exists at
+    /// cascade time (`cascade::resolve` substitutes these against that
+    /// environment via `substitute_vars` and, on success, calls
+    /// `apply_property` itself to fill in the typed field above). Every
+    /// OTHER declaration (no `var()` present) keeps going through the
+    /// existing eager `apply_property` fast path unchanged, so this packet
+    /// causes zero golden/behavior churn for stylesheets that don't use
+    /// custom properties. `Box<str>` keys here ARE lowercased (these are
+    /// ordinary property names, unlike `custom`'s case-sensitive keys).
+    pub deferred: Vec<(Box<str>, Vec<Token>)>,
 }
 
 impl Declarations {
@@ -207,7 +235,215 @@ impl Declarations {
         if other.background_image.is_some() {
             self.background_image = other.background_image.clone();
         }
+        // Custom properties and var()-bearing deferred declarations both
+        // cascade with the same last-write-wins-by-name semantics as every
+        // typed field above (packet T1a) — can't go through the `ov!` macro
+        // (that macro is `Option<Copy>`-only; these are `Vec`s of name/token
+        // pairs), so it's spelled out by hand, mirroring `background_image`'s
+        // explicit merge just above. Custom-property names are matched
+        // CASE-SENSITIVELY (`custom`'s own field doc comment); deferred
+        // (ordinary) property names are already lowercased by the time they
+        // land here.
+        for (name, tokens) in &other.custom {
+            match self.custom.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => entry.1 = tokens.clone(),
+                None => self.custom.push((name.clone(), tokens.clone())),
+            }
+        }
+        for (name, tokens) in &other.deferred {
+            match self.deferred.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => entry.1 = tokens.clone(),
+                None => self.deferred.push((name.clone(), tokens.clone())),
+            }
+        }
     }
+}
+
+/// The custom-property environment visible to one element during `var()`
+/// substitution (packet T1a): every `--name -> raw tokens` pair inherited
+/// from the parent element, overlaid with this element's own `--name`
+/// declarations (`Declarations::custom`) — exactly mirroring how every other
+/// property cascades and inherits, just carried as a side channel alongside
+/// `ComputedStyle` rather than as a typed field ON it (the brief for this
+/// packet is explicit that `ComputedStyle` — the frozen contract with
+/// layout/paint — must NOT grow a field for this). `cascade::visit` threads
+/// one `Env` per element down its walk (in `Frame::Enter`), builds each
+/// child's `Env` via `child` below, and discards it once `cascade::resolve`
+/// has used it to substitute that element's `deferred` declarations — an
+/// `Env` never outlives the cascade pass that built it.
+///
+/// Values are stored UNSUBSTITUTED (exactly as declared) rather than
+/// pre-resolved: a chain like `--a: var(--b); --b: blue;` only makes sense
+/// if looking up `--a` returns the raw `var(--b)` tokens, which
+/// `substitute_vars` then resolves recursively at the point of use — trying
+/// to pre-resolve `custom` entries up front would need the SAME recursive
+/// substitution machinery anyway, with no benefit (every custom property
+/// gets looked up at most a handful of times per cascade pass in practice).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Env(Vec<(Box<str>, Vec<Token>)>);
+
+impl Env {
+    /// Build a child element's environment from this (parent) one: clone the
+    /// inherited chain and overlay `own` (that child's own `Declarations::
+    /// custom`), last-write-wins by name — the same semantics `Declarations::
+    /// overlay` already uses for the custom-property side of a single
+    /// declaration block, just extended across the inheritance chain here.
+    /// Siblings must never see each other's custom properties, so this
+    /// always returns a fresh, independent `Env` rather than mutating `self`.
+    pub(crate) fn child(&self, own: &[(Box<str>, Vec<Token>)]) -> Env {
+        let mut next = self.0.clone();
+        for (name, tokens) in own {
+            match next.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => entry.1 = tokens.clone(),
+                None => next.push((name.clone(), tokens.clone())),
+            }
+        }
+        Env(next)
+    }
+
+    /// Look up a custom property's raw (unsubstituted) token value by its
+    /// CASE-SENSITIVE name, if it's defined anywhere in the inheritance
+    /// chain up to and including this element.
+    fn get(&self, name: &str) -> Option<&[Token]> {
+        self.0.iter().find(|(n, _)| n.as_ref() == name).map(|(_, t)| t.as_slice())
+    }
+}
+
+/// Hard recursion-depth backstop for `var()` substitution (packet T1a): a
+/// document-controlled stylesheet is hostile input, and while `substitute_
+/// vars` below also does PRECISE cycle detection (a name that references
+/// itself directly or transitively is caught immediately via `visiting`,
+/// well before this cap could matter), this cap exists as a backstop for any
+/// pathological shape that tracking doesn't anticipate — e.g. a very long
+/// but strictly acyclic chain, or thousands of nested `var(--x, var(--x,
+/// var(--x, ...)))` fallbacks all missing the same `--x`. 64 is generous for
+/// any real stylesheet's custom-property chain while keeping the native
+/// recursion this function uses (bounded by this constant, unlike
+/// `cascade::visit`'s explicit-stack walk) provably shallow.
+const VAR_SUBSTITUTION_DEPTH_CAP: u32 = 64;
+
+/// Substitute every `var(--name)` / `var(--name, <fallback>)` function in
+/// `tokens` against `env`, recursively (a custom property's own value may
+/// itself contain `var()` — see `Env`'s doc comment). Returns `None` — CSS's
+/// own term for this is "invalid at computed-value time" — if ANY `var()` in
+/// `tokens` fails to resolve: `--name` is undefined in `env` and has no
+/// fallback, `--name` is malformed (`var()` with no leading custom-property
+/// ident), OR resolving it would exceed `VAR_SUBSTITUTION_DEPTH_CAP` nested
+/// substitutions. The caller (`cascade::resolve`) treats `None` as "this
+/// declaration doesn't apply" — the property falls back to its ordinary
+/// inherited-or-initial value, never a crash, never a garbage value.
+///
+/// `visiting` carries the chain of custom-property names CURRENTLY being
+/// substituted (i.e. the names on the path from the top-level `var()` down
+/// to this recursive call) — a direct or transitive self-reference (`--a:
+/// var(--b); --b: var(--a)`) is caught the instant the cycle closes, by
+/// name, rather than only by exhausting `depth`. `depth` is a separate
+/// counter (not just `visiting.len()`) because it also grows through
+/// FALLBACK substitution, which doesn't add a name to `visiting` at all
+/// (fallback tokens aren't a custom-property lookup) but still must be
+/// depth-capped against something like `var(--missing, var(--missing,
+/// var(--missing, ...)))` nested thousands deep.
+///
+/// Total: `tokens` is only ever scanned forward (see `parse_var_args`), and
+/// native recursion depth is hard-capped by `VAR_SUBSTITUTION_DEPTH_CAP` —
+/// this can never panic, hang, or overflow the stack, on any input.
+pub(crate) fn substitute_vars(tokens: &[Token], env: &Env, visiting: &[&str], depth: u32) -> Option<Vec<Token>> {
+    if depth > VAR_SUBSTITUTION_DEPTH_CAP {
+        return None;
+    }
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Function(f) if f.eq_ignore_ascii_case("var") => {
+                let (name_opt, fallback, next_i) = parse_var_args(tokens, i + 1);
+                i = next_i;
+                let name = name_opt?; // malformed `var()` (no leading ident): invalid
+                if visiting.contains(&name.as_str()) {
+                    return None; // direct or transitive cycle
+                }
+                match env.get(&name) {
+                    Some(value_tokens) => {
+                        let mut next_visiting: Vec<&str> = visiting.to_vec();
+                        next_visiting.push(&name);
+                        out.extend(substitute_vars(value_tokens, env, &next_visiting, depth + 1)?);
+                    }
+                    None => match fallback {
+                        Some(fallback_tokens) => {
+                            out.extend(substitute_vars(&fallback_tokens, env, visiting, depth + 1)?);
+                        }
+                        None => return None, // undefined custom property, no fallback: invalid
+                    },
+                }
+            }
+            other => {
+                out.push(other.clone());
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Parse one `var(...)` function's arguments, given `tokens[i]` is the first
+/// token AFTER the already-consumed `Function("var")` token. Returns
+/// `(name, fallback, next)`: `name` is `Some(ident text)` iff the first
+/// (non-whitespace) token is a `Token::Ident` — real CSS requires it to
+/// start with `--`, but this simply doesn't matter here: if it doesn't, `Env
+/// ::get` will never find a match for it (custom-property names are exactly
+/// what `parser::parse_declaration_block` stores under `Declarations::
+/// custom`, all of which DO start with `--`), so a malformed name behaves
+/// identically to an undefined one — consistent with charter C2's "unknown/
+/// unrecognized input fails to apply, never guessed at". `fallback` is
+/// `Some(tokens)` iff a top-level comma follows the name — everything from
+/// just after that comma up to the function's own matching `RParen`,
+/// UNSPLIT on any inner commas (CSS custom-property fallbacks may themselves
+/// contain commas, e.g. `var(--x, 1px, 2px)` is a single two-token fallback,
+/// not three arguments). `next` is the index just past the matching
+/// `RParen`, or `tokens.len()` if the function is unterminated (tolerated,
+/// never panics — matches every other tolerant-of-truncation parser in this
+/// module, e.g. `parse_url_function`). Total: the scan index only ever
+/// advances, so this always terminates, regardless of nesting depth (nested
+/// functions are skipped via a simple depth counter, not recursion).
+fn parse_var_args(tokens: &[Token], start: usize) -> (Option<String>, Option<Vec<Token>>, usize) {
+    let len = tokens.len();
+    let mut j = start;
+    while j < len && tokens[j] == Token::Whitespace {
+        j += 1;
+    }
+    let name = match tokens.get(j) {
+        Some(Token::Ident(s)) => {
+            j += 1;
+            Some(s.clone())
+        }
+        _ => None,
+    };
+    while j < len && tokens[j] == Token::Whitespace {
+        j += 1;
+    }
+    let mut fallback: Option<Vec<Token>> = None;
+    if j < len && tokens[j] == Token::Comma {
+        j += 1;
+        while j < len && tokens[j] == Token::Whitespace {
+            j += 1;
+        }
+        fallback = Some(Vec::new());
+    }
+    let mut depth = 0i32;
+    while j < len {
+        match &tokens[j] {
+            Token::RParen if depth == 0 => break,
+            Token::LParen | Token::Function(_) => depth += 1,
+            Token::RParen => depth -= 1,
+            _ => {}
+        }
+        if let Some(fb) = fallback.as_mut() {
+            fb.push(tokens[j].clone());
+        }
+        j += 1;
+    }
+    let next = if j < len && tokens[j] == Token::RParen { j + 1 } else { len };
+    (name, fallback, next)
 }
 
 fn named_color(name: &str) -> Option<Color> {
@@ -1804,5 +2040,80 @@ mod tests {
     fn border_collapse_hint_only_applies_to_table_elements() {
         let d = presentational_hints("div", &attrs(&[("border", "1")]));
         assert_eq!(d.border_collapse, None);
+    }
+
+    // ---- packet T1a: CSS custom properties + var() substitution ----
+
+    #[test]
+    fn substitute_vars_resolves_a_defined_custom_property() {
+        let env = Env::default().child(&[("--ink".into(), toks("blue"))]);
+        let result = substitute_vars(&toks("var(--ink)"), &env, &[], 0);
+        assert_eq!(result, Some(toks("blue")));
+    }
+
+    #[test]
+    fn substitute_vars_uses_fallback_when_undefined() {
+        let env = Env::default();
+        let result = substitute_vars(&toks("var(--missing, green)"), &env, &[], 0);
+        assert_eq!(result, Some(toks("green")));
+    }
+
+    #[test]
+    fn substitute_vars_undefined_with_no_fallback_is_invalid() {
+        // "Invalid at computed-value time" (CSS's own term): the caller
+        // treats `None` as "this declaration doesn't apply", never a crash
+        // and never a garbage value — see `substitute_vars`'s own doc
+        // comment.
+        let env = Env::default();
+        let result = substitute_vars(&toks("var(--missing)"), &env, &[], 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn substitute_vars_resolves_a_chain_through_another_custom_property() {
+        // `--a` doesn't hold a color directly — it holds a reference to
+        // `--b`, which `Env::get` returns UNSUBSTITUTED (see `Env`'s own doc
+        // comment); resolving `var(--a)` must recurse through that chain.
+        let env = Env::default().child(&[("--a".into(), toks("var(--b)")), ("--b".into(), toks("blue"))]);
+        let result = substitute_vars(&toks("var(--a)"), &env, &[], 0);
+        assert_eq!(result, Some(toks("blue")));
+    }
+
+    #[test]
+    fn substitute_vars_direct_self_cycle_is_invalid() {
+        let env = Env::default().child(&[("--a".into(), toks("var(--a)"))]);
+        let result = substitute_vars(&toks("var(--a)"), &env, &[], 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn substitute_vars_two_step_cycle_is_invalid() {
+        let env = Env::default().child(&[("--a".into(), toks("var(--b)")), ("--b".into(), toks("var(--a)"))]);
+        let result = substitute_vars(&toks("var(--a)"), &env, &[], 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn substitute_vars_pathologically_deep_nested_fallback_does_not_panic_or_hang() {
+        // A few thousand nested `var(--missing, var(--missing, ...))`
+        // fallbacks, all missing the same custom property: `--missing`'s
+        // name never enters `visiting` on the fallback path (fallback
+        // tokens aren't a custom-property lookup — see `substitute_vars`'s
+        // own doc comment), so it's `VAR_SUBSTITUTION_DEPTH_CAP`, not cycle
+        // detection, that has to stop this. This test's mere existence and
+        // return (rather than a stack overflow or an infinite loop) IS the
+        // totality proof.
+        let depth = 5000;
+        let mut css = String::new();
+        for _ in 0..depth {
+            css.push_str("var(--missing, ");
+        }
+        css.push_str("red");
+        for _ in 0..depth {
+            css.push(')');
+        }
+        let env = Env::default();
+        let result = substitute_vars(&toks(&css), &env, &[], 0);
+        assert_eq!(result, None, "depth cap must trip long before any real recursion overflow");
     }
 }
