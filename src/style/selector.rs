@@ -20,6 +20,13 @@ pub(crate) struct Specificity {
 pub(crate) enum Pseudo {
     Link,
     Visited,
+    /// `:root` (packet T1a — CSS custom properties + `var()`, needed for
+    /// `:root { --name: ... }` theming declarations). Matches the
+    /// document's root element — `ElementInfo::is_root` (this module) is
+    /// always well-defined and always identifies the single `<html>`
+    /// element (`dom::ast::Dom::new`'s frozen root — see that module's own
+    /// doc comment), so matching this is simply an `is_root` flag check.
+    Root,
 }
 
 /// One simple selector: an optional element name, id, classes, and pseudo
@@ -30,13 +37,19 @@ pub(crate) struct Compound {
     pub id: Option<String>,
     pub classes: Vec<String>,
     pub pseudo: Vec<Pseudo>,
+    /// `[name="value"]` attribute-selector requirements (packet T1a) — see
+    /// `ElementInfo::attrs`'s doc comment for the matching half, and
+    /// `parser::parse_attr_selector` for the (curated, exact-match-only)
+    /// grammar this can hold. Every compound must satisfy ALL of these
+    /// (same "AND" semantics as `classes`).
+    pub attrs: Vec<(String, String)>,
 }
 
 impl Compound {
     fn specificity(&self) -> Specificity {
         Specificity {
             ids: self.id.is_some() as u32,
-            classes: (self.classes.len() + self.pseudo.len()) as u32,
+            classes: (self.classes.len() + self.pseudo.len() + self.attrs.len()) as u32,
             elements: self.element.is_some() as u32,
         }
     }
@@ -55,6 +68,9 @@ impl Compound {
         if !self.classes.iter().all(|c| info.classes.iter().any(|ic| ic == c)) {
             return false;
         }
+        if !self.attrs.iter().all(|(name, value)| info.attrs.get(name) == Some(value.as_str())) {
+            return false;
+        }
         for p in &self.pseudo {
             match p {
                 Pseudo::Link => {
@@ -64,6 +80,11 @@ impl Compound {
                 }
                 // No history in v0 — nothing is ever :visited.
                 Pseudo::Visited => return false,
+                Pseudo::Root => {
+                    if !info.is_root {
+                        return false;
+                    }
+                }
             }
         }
         true
@@ -133,10 +154,24 @@ pub(crate) struct ElementInfo {
     id: Option<String>,
     classes: Vec<String>,
     has_href: bool,
+    /// Every attribute this element carries, verbatim (packet T1a) — needed
+    /// for `[name="value"]` attribute-selector matching (`Compound::
+    /// matches`), which can name ANY attribute, not just the handful
+    /// (`id`/`class`/`href`) the fields above cover. Cloned once here so
+    /// `ElementInfo` stays a plain owned value with no lifetime tied back to
+    /// the `Element` it was built from, matching every other field's own
+    /// tradeoff.
+    attrs: AttrMap,
+    /// Whether this is the document's root element (packet T1a, for `:root`
+    /// matching — see `Pseudo::Root`'s doc comment). Computed by the one
+    /// caller that has both a `NodeId` and `dom.root()` in hand
+    /// (`cascade::visit`), since `ElementInfo` itself has no notion of the
+    /// wider document.
+    is_root: bool,
 }
 
 impl ElementInfo {
-    pub fn from_element(name: &ElementName, attrs: &AttrMap) -> Self {
+    pub fn from_element(name: &ElementName, attrs: &AttrMap, is_root: bool) -> Self {
         let id = attrs.get("id").map(|s| s.trim().to_ascii_lowercase());
         let classes = attrs
             .get("class")
@@ -148,6 +183,8 @@ impl ElementInfo {
             id,
             classes,
             has_href,
+            attrs: attrs.clone(),
+            is_root,
         }
     }
 }
@@ -163,6 +200,14 @@ mod tests {
             id: id.map(|s| s.to_string()),
             classes: classes.iter().map(|s| s.to_string()).collect(),
             has_href,
+            // Neutral defaults (packet T1a): none of the pre-existing call
+            // sites of this helper care about attribute-selector matching or
+            // `:root`-ness, so every one of them keeps compiling and passing
+            // unchanged with an empty `AttrMap`/`is_root: false` here — the
+            // new tests below override these two fields explicitly via
+            // struct-update syntax where they matter.
+            attrs: AttrMap::new(),
+            is_root: false,
         }
     }
 
@@ -259,7 +304,7 @@ mod tests {
         attrs.set("ID", "Foo");
         attrs.set("class", "Bar Baz");
         attrs.set("HREF", "x");
-        let info = ElementInfo::from_element(&ElementName::new("A"), &attrs);
+        let info = ElementInfo::from_element(&ElementName::new("A"), &attrs, false);
         assert_eq!(info.name, "a");
         assert_eq!(info.id.as_deref(), Some("foo"));
         assert_eq!(info.classes, vec!["bar".to_string(), "baz".to_string()]);

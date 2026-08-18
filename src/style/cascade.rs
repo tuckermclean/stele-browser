@@ -11,7 +11,7 @@ use crate::style::computed::{
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
-use crate::style::value::{presentational_hints, BorderRaw, Declarations, RawLength, RawLengthAuto, RawLineHeight};
+use crate::style::value::{self, presentational_hints, BorderRaw, Declarations, Env, RawLength, RawLengthAuto, RawLineHeight};
 use crate::style::{parser, ComputedStyle, Stylesheet};
 use crate::surface::Color;
 
@@ -51,8 +51,15 @@ pub fn cascade(dom: &Dom, author_sheets: &[Stylesheet]) -> Vec<ComputedStyle> {
 /// children have been pushed -- pop that subtree's `ElementInfo` back off
 /// `ancestors` now that nothing left on the stack still needs it as an
 /// ancestor.
+///
+/// `parent_env` (packet T1a) threads the inherited custom-property
+/// environment down the walk alongside the parent's already-resolved
+/// `ComputedStyle` -- `Env` deliberately does NOT become a `ComputedStyle`
+/// field (see `Env`'s own doc comment for why: `ComputedStyle` is a frozen
+/// contract with layout/paint), so it has to ride along as its own bit of
+/// per-frame state instead.
 enum Frame {
-    Enter { id: NodeId, parent: Option<ComputedStyle> },
+    Enter { id: NodeId, parent: Option<ComputedStyle>, parent_env: Env },
     Exit,
 }
 
@@ -63,14 +70,14 @@ enum Frame {
 /// heap instead of the native call stack, so nesting depth cannot blow it.
 fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &mut [ComputedStyle]) {
     let mut ancestors: Vec<ElementInfo> = Vec::new();
-    let mut stack: Vec<Frame> = vec![Frame::Enter { id: root, parent: None }];
+    let mut stack: Vec<Frame> = vec![Frame::Enter { id: root, parent: None, parent_env: Env::default() }];
 
     while let Some(frame) = stack.pop() {
         match frame {
             Frame::Exit => {
                 ancestors.pop();
             }
-            Frame::Enter { id, parent } => match dom.node(id) {
+            Frame::Enter { id, parent, parent_env } => match dom.node(id) {
                 // Character data carries no rules of its own; it takes the
                 // parent's computed style wholesale (the inline engine reads
                 // font/color etc. straight off it).
@@ -80,7 +87,8 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                     }
                 }
                 Node::Element(el) => {
-                    let info = ElementInfo::from_element(&el.name, &el.attrs);
+                    let is_root = id == root;
+                    let info = ElementInfo::from_element(&el.name, &el.attrs, is_root);
                     // Vintage HTML presentational attributes (packet/
                     // presentational-attrs: <font color/size>, bgcolor,
                     // align=, <body text>) -- computed straight from the
@@ -100,7 +108,14 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                     if let Some(style_attr) = el.attrs.get("style") {
                         decls.overlay(&parser::parse_inline(style_attr));
                     }
-                    let style = resolve(&decls, parent.as_ref());
+                    // This element's custom-property environment (packet
+                    // T1a): the inherited chain (`parent_env`) overlaid with
+                    // this element's OWN `--name` declarations
+                    // (`decls.custom`) — built BEFORE `resolve`, since
+                    // `resolve` needs it to substitute any `var()`-bearing
+                    // `deferred` declarations this element itself carries.
+                    let env = parent_env.child(&decls.custom);
+                    let style = resolve(&decls, parent.as_ref(), &env);
                     out[id] = style.clone();
 
                     ancestors.push(info);
@@ -109,7 +124,7 @@ fn visit(dom: &Dom, root: NodeId, ua: &Stylesheet, author: &[Stylesheet], out: &
                     // visited) in source order, matching the old recursive
                     // walk's iteration order exactly.
                     for &child in el.children.iter().rev() {
-                        stack.push(Frame::Enter { id: child, parent: Some(style.clone()) });
+                        stack.push(Frame::Enter { id: child, parent: Some(style.clone()), parent_env: env.clone() });
                     }
                 }
             },
@@ -183,7 +198,30 @@ fn fold_matching_declarations(
 /// `em`/`%` on `font-size` resolve against the *parent's* font size; every
 /// other `em` resolves against *this node's own* resolved font size, per
 /// CSS (computed here first, so everything else can use it).
-fn resolve(d: &Declarations, parent: Option<&ComputedStyle>) -> ComputedStyle {
+fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> ComputedStyle {
+    // Deferred var()-bearing declarations (packet T1a): substitute each
+    // one's `var()` calls against this element's full custom-property
+    // environment (`env`, built by the caller — `cascade::visit` — from the
+    // inherited chain plus this element's own `--name` declarations), now
+    // that it's finally available (it couldn't be, at parse time). A
+    // successful substitution is applied to a LOCAL clone of `d` via
+    // `value::apply_property`, exactly as if it had been parsed eagerly —
+    // every macro/field below this point then sees it precisely like any
+    // other declaration. A failed substitution ("invalid at computed-value
+    // time", in CSS's own terms — an undefined custom property with no
+    // fallback, or a cyclic/pathologically deep chain — see `value::
+    // substitute_vars`'s own doc comment) simply leaves that field unset on
+    // this local `d`, so it falls through to the ordinary inherited/CSS-
+    // initial fallback exactly like a declaration that was never present at
+    // all — never a crash, never a garbage value.
+    let mut d = d.clone();
+    for (name, tokens) in d.deferred.clone() {
+        if let Some(substituted) = value::substitute_vars(&tokens, env, &[], 0) {
+            value::apply_property(&name, &substituted, &mut d);
+        }
+    }
+    let d = &d; // shadow back to `&Declarations` so every existing line below (which all read `d.field`) needs zero further changes
+
     let default = ComputedStyle::default();
     let parent_font_size = parent.map(|p| p.font_size).unwrap_or(default.font_size);
 
