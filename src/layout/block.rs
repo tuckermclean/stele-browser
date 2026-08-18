@@ -122,7 +122,7 @@ use taffy::prelude::{
 // from `taffy::prelude` (only flexbox/grid additions are) -- pull them from
 // the crate root, same seam the proving spike (spike/taffy-float-layout)
 // used.
-use taffy::{Clear as TClear, Float as TFloat};
+use taffy::{BoxSizing as TBoxSizing, Clear as TClear, Float as TFloat};
 
 use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
@@ -1481,6 +1481,11 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
 /// reaches this function (inline-level content is folded into a measure-
 /// function leaf, see this module's own doc comment), so it keeps handling
 /// its own narrower case exactly as before.
+///
+/// packet/acid1-content-box: `box_sizing` is set to `ContentBox` for
+/// floated boxes only -- see `float_box_sizing`'s own doc comment for why
+/// this is scoped to floats rather than applied unconditionally (the
+/// CSS-correct fix), and why that scoping is deliberate, not an oversight.
 fn base_style(cs: &ComputedStyle) -> TStyle {
     TStyle {
         size: TSize { width: map_dimension(cs.width), height: map_dimension(cs.height) },
@@ -1504,7 +1509,66 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
         },
         float: map_float(cs.float),
         clear: map_clear(cs.clear),
+        box_sizing: float_box_sizing(cs.float),
         ..Default::default()
+    }
+}
+
+/// `box_sizing` for a node, given its `float`. Real CSS's initial value for
+/// `box-sizing` is `content-box` (a declared `width`/`height` is the
+/// CONTENT size; padding/border add on top) -- but this engine has no
+/// `box-sizing` CSS property support at all (`grep -rn "box-sizing"
+/// src/style/` finds nothing), and taffy 0.13's OWN default disagrees:
+/// `taffy::Style::DEFAULT.box_sizing` is `BoxSizing::BorderBox` (a declared
+/// `width`/`height` INCLUDES padding/border, which get subtracted back out
+/// to find the content size) -- see `taffy::style::Style`'s own doc comment
+/// on the field. `base_style` never overrode that default before this
+/// packet, so EVERY node in this engine has always silently used
+/// `BorderBox` semantics, not CSS's real `ContentBox` default.
+///
+/// packet/acid1-content-box (re-applying packet/acid1-coherence's
+/// `b88f9cd`, which was correct but blocked on a separate float-stacking
+/// regression -- see this packet's PR description) found this via
+/// `fixtures/css1-float-5526c.html` (the W3C CSS1 Acid1 test, every element
+/// in it sets an explicit `width` AND non-zero `padding`/`border`, which is
+/// exactly the combination where `BorderBox` vs `ContentBox` produces
+/// different pixels): `dd{width:34em;padding:1em;border:1em}` rendered
+/// narrower inside than it should (its OWN border-box pinned to the
+/// declared 34em instead of growing to 34em-content + 2em padding + 2em
+/// border), which starved its floated `<li>`/`<blockquote>`/`<h1>` children
+/// of the row width they needed to wrap the way the reference rendering
+/// does.
+///
+/// The CSS-correct fix is unconditional: `ContentBox` for every node,
+/// always. That fix is NOT what this function does, because this packet's
+/// own brief caps its blast radius at `goldens/css1-float-5526c.png` alone
+/// -- and an unconditional fix does not stay inside that cap. A repo-wide
+/// audit (every fixture with a byte-compared PNG golden, cross-checked
+/// against its CSS for a `width`/`height` + `padding`/`border` combo on the
+/// same element) found THREE other existing goldens that combine them too:
+/// `fixtures/flex-polite.html`'s `aside{width:220px;padding:20px;
+/// border:2px}`, `fixtures/kitchen-sink.html`'s `.flexrow .fixed{width:
+/// 120px;border:1px;padding:8px}`, and `fixtures/grid.html`'s `.card{
+/// height:100px;border:1px;padding:10px}` (`grid.html` even *declares*
+/// `box-sizing:border-box` itself in its own `<style>` -- inert today since
+/// this engine doesn't parse the property at all, so an unconditional fix
+/// would flip `.card` from "accidentally matches its own stated
+/// `border-box` intent" to "actively contradicts it," not closer to
+/// correct). None of those three are floated (`aside` and `.fixed` are
+/// flex items; `.card` is a grid item), so scoping this fix to `float !=
+/// Float::None` closes the gap for exactly the code path this packet
+/// touches (`layout::block`'s taffy `float_layout` wiring, packet/
+/// block-floats) while leaving flex/grid sizing byte-identical to every
+/// currently-blessed golden that exercises them. Fixing `box_sizing` for
+/// flex/grid too -- and, properly, adding real `box-sizing` CSS parsing so
+/// authors can ask for either model -- is real, tracked, out-of-scope work
+/// for a future packet, not a limitation of taffy itself (taffy has
+/// supported per-node `box_sizing` since before this engine started using
+/// it; nothing here ever set the field).
+fn float_box_sizing(float: Float) -> TBoxSizing {
+    match float {
+        Float::None => TBoxSizing::BorderBox,
+        Float::Left | Float::Right => TBoxSizing::ContentBox,
     }
 }
 
