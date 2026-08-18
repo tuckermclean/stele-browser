@@ -110,11 +110,13 @@
 use std::cell::RefCell;
 
 use taffy::prelude::{
-    auto, length, percent, AlignItems as TAlignItems, AvailableSpace, Dimension as TDimension,
+    auto, fr, length, minmax, percent, repeat, AlignItems as TAlignItems, AvailableSpace, Dimension as TDimension,
     Display as TDisplay, FlexDirection as TFlexDirection, FlexWrap as TFlexWrap,
-    JustifyContent as TJustifyContent, LengthPercentage as TLengthPercentage,
-    LengthPercentageAuto as TLengthPercentageAuto, NodeId as TNodeId, Rect as TRect, Size as TSize, Style as TStyle,
-    TaffyTree,
+    GridTemplateComponent as TGridTemplateComponent, JustifyContent as TJustifyContent,
+    LengthPercentage as TLengthPercentage, LengthPercentageAuto as TLengthPercentageAuto,
+    MaxTrackSizingFunction as TMaxTrackSizingFunction, MinTrackSizingFunction as TMinTrackSizingFunction,
+    NodeId as TNodeId, Rect as TRect, RepetitionCount as TRepetitionCount, Size as TSize, Style as TStyle,
+    TaffyAuto, TaffyTree, TrackSizingFunction as TTrackSizingFunction,
 };
 // packet/block-floats: `float_layout`'s `Float`/`Clear` aren't re-exported
 // from `taffy::prelude` (only flexbox/grid additions are) -- pull them from
@@ -128,7 +130,8 @@ use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float,
-    JustifyContent, LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, TextAlign,
+    GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize, JustifyContent, LengthPercentage,
+    LengthPercentageAuto, Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -692,6 +695,12 @@ fn translate_any<'a>(
             let mut style = base_style(&node.style);
             style.display = map_display(node.style.display);
             apply_flex(&mut style, &node.style);
+            // packet/css-grid: unconditional, exactly like `apply_flex`
+            // right above -- `apply_grid` itself is a no-op whenever
+            // `cs.grid_template_columns`/`rows` are both empty (every
+            // non-grid container, unchanged behavior), see its own doc
+            // comment.
+            apply_grid(&mut style, &node.style);
             margin_override.apply(&mut style);
             // Past DEPTH_CAP, stop descending: an over-deep subtree becomes
             // an empty (childless) box rather than risking a stack
@@ -1044,9 +1053,14 @@ fn flatten_inline(node: &LayoutNode, out: &mut Vec<InlineRun>, depth: usize) {
 /// Translate a container's children, grouping maximal runs of inline-level
 /// children into single IFC leaves and translating everything else (block
 /// containers, replaced elements) as their own taffy nodes. `display: flex`
-/// containers skip grouping entirely — every child is its own flex item.
-/// `depth` is the depth at which `node`'s children themselves sit (already
-/// incremented by the caller); see [`DEPTH_CAP`].
+/// AND `display: grid` (packet/css-grid: a grid container needs the exact
+/// same "every child is its own item" treatment a flex container already
+/// gets — an un-grouped `Text`/inline run inside a grid container would
+/// otherwise get folded into one taffy leaf per module docs' default
+/// IFC-grouping rule below, instead of becoming its own placeable grid
+/// item) containers skip grouping entirely — every child is its own
+/// flex/grid item. `depth` is the depth at which `node`'s children
+/// themselves sit (already incremented by the caller); see [`DEPTH_CAP`].
 fn translate_container_children<'a>(
     node: &'a LayoutNode,
     taffy: &mut TaffyTree<NodeCtx<'a>>,
@@ -1054,7 +1068,7 @@ fn translate_container_children<'a>(
     table_budget: usize,
 ) -> Vec<Built<'a>> {
     let mut out = Vec::new();
-    if node.style.display == Display::Flex {
+    if matches!(node.style.display, Display::Flex | Display::Grid) {
         for child in &node.children {
             // CSS Flexbox (§4 "Flex Items"): "a child text node consisting
             // entirely of collapsible white space is not rendered, i.e. it
@@ -1067,17 +1081,22 @@ fn translate_container_children<'a>(
             // flex item that still counts toward `gap` on both sides,
             // silently doubling the visual gap between real items (found via
             // `fixtures/flex-polite.html`'s `<nav>` links: M5 flex-polite
-            // packet). A non-whitespace text node (real inline content
-            // directly inside a flex container, e.g. `<div style="display:
-            // flex">hello<span>world</span></div>`) is untouched — it still
-            // becomes its own flex item, matching the module docs' existing
-            // "every child is its own taffy child node" flex contract.
+            // packet). packet/css-grid: CSS Grid's own "Grid Items" section
+            // makes the identical carve-out for a whitespace-only text
+            // child, so this applies unchanged to a grid container's
+            // children too. A non-whitespace text node (real inline content
+            // directly inside a flex/grid container, e.g. `<div
+            // style="display: flex">hello<span>world</span></div>`) is
+            // untouched — it still becomes its own flex/grid item, matching
+            // the module docs' existing "every child is its own taffy child
+            // node" contract.
             if is_whitespace_only_text(child) {
                 continue;
             }
-            // Flex items never participate in margin collapsing (CSS
-            // Flexbox §4) — `MarginOverride::default()` (no-op) here keeps
-            // this branch's pre-existing behavior byte-for-byte.
+            // Flex/grid items never participate in margin collapsing (CSS
+            // Flexbox §4; CSS Grid §11 makes the identical carve-out) —
+            // `MarginOverride::default()` (no-op) here keeps this branch's
+            // pre-existing behavior byte-for-byte.
             out.push(translate_any(child, taffy, depth, table_budget, MarginOverride::default()));
         }
         return out;
@@ -1570,6 +1589,96 @@ fn apply_flex(style: &mut TStyle, cs: &ComputedStyle) {
     style.gap = TSize { width: TLengthPercentage::length(column_gap), height: TLengthPercentage::length(gap) };
 }
 
+/// packet/css-grid: wires `cs.grid_template_columns`/`.grid_template_rows`
+/// onto taffy's `Style.grid_template_columns`/`.grid_template_rows` (the
+/// `grid` cargo feature enabled in `Cargo.toml`). A no-op for any container
+/// that never declared either property (`cs.grid_template_columns`/`rows`
+/// both start `Vec::new()` -- `ComputedStyle::default`) -- taffy's own
+/// `Style::DEFAULT` already leaves both empty too, so calling this
+/// unconditionally for every container (`translate_any`'s `Container` arm,
+/// right after `apply_flex`) changes nothing for a non-grid container,
+/// exactly like `apply_flex` itself is already a no-op for one that never
+/// set `flex-*`. `gap` needs no separate wiring here -- `apply_flex`
+/// (called right before this) already sets `style.gap` unconditionally,
+/// and taffy's grid algorithm reads the SAME `Style.gap` field a flex
+/// container's does.
+fn apply_grid(style: &mut TStyle, cs: &ComputedStyle) {
+    if !cs.grid_template_columns.is_empty() {
+        style.grid_template_columns = cs.grid_template_columns.iter().map(map_grid_template_component).collect();
+    }
+    if !cs.grid_template_rows.is_empty() {
+        style.grid_template_rows = cs.grid_template_rows.iter().map(map_grid_template_component).collect();
+    }
+}
+
+/// Maps one Stele `GridTemplateComponent` (`src/style/computed.rs`) onto
+/// taffy's own `GridTemplateComponent` -- `Single` maps through
+/// [`map_grid_track`] directly, `Repeat` through the same plus taffy's own
+/// `repeat()` helper for the count/keyword. Taffy's `GridTemplateComponent`
+/// is generic over its named-line-identifier string type (`S:
+/// CheapCloneStr`, only used by named grid lines -- unparsed by this
+/// packet); `String` (the same type taffy's own `Style::grid_template_
+/// columns`/`.rows` field defaults to under the `std` feature this crate
+/// already builds with) is the only concretization ever needed here.
+fn map_grid_template_component(c: &GridTemplateComponent) -> TGridTemplateComponent<String> {
+    match c {
+        GridTemplateComponent::Single(track) => TGridTemplateComponent::Single(map_grid_track(track)),
+        GridTemplateComponent::Repeat(count, tracks) => {
+            let count = match count {
+                GridRepetitionCount::Count(n) => TRepetitionCount::Count(*n),
+                GridRepetitionCount::AutoFill => TRepetitionCount::AutoFill,
+                GridRepetitionCount::AutoFit => TRepetitionCount::AutoFit,
+            };
+            repeat(count, tracks.iter().map(map_grid_track).collect())
+        }
+    }
+}
+
+/// Maps one Stele `GridTrack` (`src/style/computed.rs`) onto taffy's
+/// `TrackSizingFunction`. `Bare` goes through [`map_bare_track_size`] (the
+/// generic `length`/`percent`/`fr` helpers construct a WHOLE
+/// `TrackSizingFunction` directly, so a bare `1fr` correctly becomes
+/// `minmax(auto, 1fr)` -- CSS Grid's own automatic-minimum rule for a bare
+/// `<flex>` track, see `GridTrack`'s own doc comment); `MinMax` goes
+/// through taffy's `minmax()` helper with each half mapped independently
+/// via [`map_grid_min`]/[`map_grid_max`] (an explicit `minmax()` has no
+/// automatic-minimum rule to apply -- the author wrote both halves).
+fn map_grid_track(track: &GridTrack) -> TTrackSizingFunction {
+    match track {
+        GridTrack::Bare(size) => map_bare_track_size(*size),
+        GridTrack::MinMax(min, max) => minmax(map_grid_min(*min), map_grid_max(*max)),
+    }
+}
+
+fn map_bare_track_size(size: GridTrackSize) -> TTrackSizingFunction {
+    match size {
+        GridTrackSize::Length(v) => length(v.max(0.0)),
+        GridTrackSize::Percent(p) => percent((p / 100.0).max(0.0)),
+        GridTrackSize::Fr(f) => fr(f64::from(f).max(0.0)),
+    }
+}
+
+/// `MinTrackSizingFunction` has no `fr` constructor (CSS Grid §7.2.3: `fr`
+/// is only valid as a track's MAXIMUM) -- a `minmax(<fr>, ...)` first
+/// argument is invalid CSS to begin with, so degrading it to `auto` here
+/// (rather than making this function fallible and invalidating the whole
+/// declaration over one malformed argument) is a safe, total default.
+fn map_grid_min(size: GridTrackSize) -> TMinTrackSizingFunction {
+    match size {
+        GridTrackSize::Length(v) => length(v.max(0.0)),
+        GridTrackSize::Percent(p) => percent((p / 100.0).max(0.0)),
+        GridTrackSize::Fr(_) => TMinTrackSizingFunction::AUTO,
+    }
+}
+
+fn map_grid_max(size: GridTrackSize) -> TMaxTrackSizingFunction {
+    match size {
+        GridTrackSize::Length(v) => length(v.max(0.0)),
+        GridTrackSize::Percent(p) => percent((p / 100.0).max(0.0)),
+        GridTrackSize::Fr(f) => fr(f64::from(f).max(0.0)),
+    }
+}
+
 fn map_display(d: Display) -> TDisplay {
     match d {
         Display::None => TDisplay::None,
@@ -1603,6 +1712,11 @@ fn map_display(d: Display) -> TDisplay {
         // ua.rs`) occupies the exact same position/size a `display: block`
         // `<li>` always has -- no layout shift for any existing list.
         Display::ListItem => TDisplay::Block,
+        // packet/css-grid: hands off to taffy's own grid algorithm (the
+        // `grid` cargo feature enabled in `Cargo.toml`) -- see
+        // `Display::Grid`'s own doc comment (`style/computed.rs`) for the
+        // full contract.
+        Display::Grid => TDisplay::Grid,
     }
 }
 
