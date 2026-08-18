@@ -44,6 +44,22 @@ pub enum Display {
     TableRow,
     TableCell,
     TableRowGroup,
+    /// `display: list-item` (freeze amendment, packet/display-list-item):
+    /// real CSS's own value for `<li>` (`src/style/ua.rs`'s `li { display:
+    /// list-item; }`), and the ONLY value `layout::box_tree::
+    /// build_list_container_node` now treats as "still list-item-shaped" for
+    /// marker synthesis (bullet/ordinal) + ordinal-counter advancement. This
+    /// replaces packet #58's stopgap `tag_is_li && display == Display::
+    /// Block` guard, which could not distinguish an ordinary `<li>` (UA
+    /// default, now `ListItem`) from `<li>` with author CSS `display: block`
+    /// re-asserted on purpose (both used to resolve to the identical
+    /// `Display::Block` — see `fixtures/evidence/css1-float-5526c.
+    /// diagnosis.md`, now resolved). For layout purposes a list-item box is
+    /// otherwise ORDINARY block flow — `layout::block::map_display` maps it
+    /// straight to `TDisplay::Block`, so `<li>` occupies the exact same
+    /// position/size a `Display::Block` box would; only marker emission
+    /// differs.
+    ListItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

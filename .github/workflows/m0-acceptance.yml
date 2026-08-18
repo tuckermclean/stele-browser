@@ -89,6 +89,31 @@ jobs:
           path: target/release/stele
           if-no-files-found: error
 
+      # Best-effort render gallery: renders every fixture in fixtures/*.html
+      # through the host binary just built above ("Upload host binary"
+      # already proves it exists by this point) and packages the PNGs, text
+      # dumps, and a self-contained index.html as a downloadable artifact —
+      # so a reviewer can SEE what a build renders without pulling and
+      # running the binary themselves. `if: always()` + tools/render-
+      # gallery.sh's own best-effort posture (a bad fixture is logged and
+      # skipped, never fatal) means this never gates the build — it runs
+      # even when the A3 accept.sh step above failed, and a single hostile
+      # fixture can't fail it either.
+      - name: Render gallery (all fixtures, best-effort)
+        if: always()
+        run: |
+          set -euxo pipefail
+          chmod +x tools/render-gallery.sh
+          ./tools/render-gallery.sh target/release/stele renders
+
+      - name: Upload renders gallery
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renders
+          path: renders/
+          if-no-files-found: warn
+
       # Host-target unit tests: the contract-tested logic (parser, cascade,
       # cookies, entity/line-break) runs natively here on the pinned nightly
       # (rust-toolchain.toml). Folded into this container job to avoid a second

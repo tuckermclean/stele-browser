@@ -811,6 +811,43 @@ else
   fi
 
   # ---------------------------------------------------------------------
+  # A3z -- packet/block-floats' own PNG golden: fixtures/css1-float-5526c.
+  # html, the W3C CSS1 §5.5.26 "display/box/float/clear test" (see
+  # fixtures/evidence/css1-float-5526c.diagnosis.md for the full diagnosis
+  # + `tests/css1_float_golden.rs`'s own doc comment for the structural-
+  # fidelity claim this golden makes: a narrow red `dt` column on the left,
+  # a white `dd` column on the right with a row of yellow `li` cards side
+  # by side -- not stacked -- plus the floated blockquote/h1, matching
+  # `fixtures/evidence/css1-float-5526c.reference.gif`'s Mondrian-grid
+  # layout to a pixel-structural (not byte-identical -- font rasterization
+  # and form-widget chrome are excused, same as every other CSS1-vintage
+  # fixture) degree. Same blessing discipline, same byte-equality
+  # rationale as every other PNG golden here (A3e/A3f/.../A3y) -- taffy's
+  # `float_layout` placement + Stele's own PNG encoder are both
+  # deterministic, so a correct render byte-matches its own golden exactly
+  # even though the golden itself was never claimed to byte-match the W3C
+  # reference GIF.
+  # ---------------------------------------------------------------------
+  GOLDEN_PNG_CSS1_FLOAT="goldens/css1-float-5526c.png"
+  FIXTURE_CSS1_FLOAT="fixtures/css1-float-5526c.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A3z: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_CSS1_FLOAT" /tmp/stele_a3z.png 2>/tmp/stele_a3z.err; then
+    bad "A3z: stele --headless --dump-png crashed on $FIXTURE_CSS1_FLOAT"
+    sed 's/^/    /' /tmp/stele_a3z.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a3z.png "$GOLDEN_PNG_CSS1_FLOAT"
+    pass "A3z: blessed css1-float-5526c PNG golden -> $GOLDEN_PNG_CSS1_FLOAT (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_CSS1_FLOAT" ]; then
+    bad "A3z: no golden at $GOLDEN_PNG_CSS1_FLOAT to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_CSS1_FLOAT" /tmp/stele_a3z.png; then
+    pass "A3z: PNG dump of $FIXTURE_CSS1_FLOAT matches golden"
+  else
+    bad "A3z: PNG dump of $FIXTURE_CSS1_FLOAT differs from $GOLDEN_PNG_CSS1_FLOAT"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_CSS1_FLOAT") actual=$(wc -c < /tmp/stele_a3z.png)"
+  fi
+
+  # ---------------------------------------------------------------------
   # A5 -- the M6 hardening packet's kitchen-sink coverage fixture
   # (fixtures/kitchen-sink.html, "the everything page": headings, inline
   # markup, lists, blockquote, pre, hr, br, a table with colspan/rowspan, a

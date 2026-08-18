@@ -116,13 +116,18 @@ use taffy::prelude::{
     LengthPercentageAuto as TLengthPercentageAuto, NodeId as TNodeId, Rect as TRect, Size as TSize, Style as TStyle,
     TaffyTree,
 };
+// packet/block-floats: `float_layout`'s `Float`/`Clear` aren't re-exported
+// from `taffy::prelude` (only flexbox/grid additions are) -- pull them from
+// the crate root, same seam the proving spike (spike/taffy-float-layout)
+// used.
+use taffy::{Clear as TClear, Float as TFloat};
 
 use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, Display, FlexDirection, FlexWrap, Float,
+    AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float,
     JustifyContent, LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
@@ -1440,7 +1445,23 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
 }
 
 /// The box-model + display-independent parts of a taffy `Style` shared by
-/// every node kind: size, margin, padding, border.
+/// every node kind: size, margin, padding, border, `float`/`clear`.
+///
+/// packet/block-floats: `float`/`clear` are display-independent too --
+/// they're honored by taffy's `block_layout` algorithm for ANY block-level
+/// box (the target `Display::Block` maps every block-level `display` value
+/// onto, `map_display` below), same as size/margin/padding/border, so they
+/// belong here rather than in a display-specific helper like `apply_flex`.
+/// This is the wiring the spike (spike/taffy-float-layout, PR #65) proved
+/// out: taffy's own block-level float placement (the `float_layout` cargo
+/// feature re-enabled in `Cargo.toml`) replaces what was a complete no-op
+/// for block-level boxes before this packet -- see
+/// `fixtures/evidence/css1-float-5526c.diagnosis.md` for the full
+/// diagnosis. The bespoke `layout::inline` float mechanism (floated
+/// *inline replaced* atoms, e.g. `<img align=left>`) is untouched: it never
+/// reaches this function (inline-level content is folded into a measure-
+/// function leaf, see this module's own doc comment), so it keeps handling
+/// its own narrower case exactly as before.
 fn base_style(cs: &ComputedStyle) -> TStyle {
     TStyle {
         size: TSize { width: map_dimension(cs.width), height: map_dimension(cs.height) },
@@ -1462,7 +1483,33 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
             top: TLengthPercentage::length(finite_nonneg(cs.border.top.width)),
             bottom: TLengthPercentage::length(finite_nonneg(cs.border.bottom.width)),
         },
+        float: map_float(cs.float),
+        clear: map_clear(cs.clear),
         ..Default::default()
+    }
+}
+
+/// Maps Stele's `Float` (`src/style/computed.rs`) onto taffy's `Float`
+/// (`float_layout` feature) -- the two enums are shape-identical
+/// (`None`/`Left`/`Right`), so this is a straight rename, not a semantic
+/// translation.
+fn map_float(float: Float) -> TFloat {
+    match float {
+        Float::None => TFloat::None,
+        Float::Left => TFloat::Left,
+        Float::Right => TFloat::Right,
+    }
+}
+
+/// Maps Stele's `Clear` (`src/style/computed.rs`) onto taffy's `Clear`
+/// (`float_layout` feature) -- shape-identical (`None`/`Left`/`Right`/
+/// `Both`), a straight rename.
+fn map_clear(clear: Clear) -> TClear {
+    match clear {
+        Clear::None => TClear::None,
+        Clear::Left => TClear::Left,
+        Clear::Right => TClear::Right,
+        Clear::Both => TClear::Both,
     }
 }
 
@@ -1547,6 +1594,15 @@ fn map_display(d: Display) -> TDisplay {
         Display::TableRow => TDisplay::Block,
         Display::TableCell => TDisplay::Block,
         Display::TableRowGroup => TDisplay::Block,
+        // packet/display-list-item: a `display: list-item` box is ordinary
+        // block flow for layout purposes -- CSS only special-cases it for
+        // marker generation (`layout::box_tree::build_list_container_node`
+        // owns that entirely; this function is never consulted for it).
+        // Mapping it to the SAME `TDisplay::Block` taffy maps `Display::
+        // Block` to means an `<li>` (now `list-item` by default, `style/
+        // ua.rs`) occupies the exact same position/size a `display: block`
+        // `<li>` always has -- no layout shift for any existing list.
+        Display::ListItem => TDisplay::Block,
     }
 }
 
@@ -1825,6 +1881,31 @@ mod tests {
             content: BoxContent::Replaced { intrinsic: Size { w: 10.0, h: 10.0 }, image: None },
             children: Vec::new(),
             interactive: None,
+        }
+    }
+
+    #[test]
+    fn list_item_display_lays_out_identically_to_block() {
+        // packet/display-list-item: `Display::ListItem` must be
+        // layout-equivalent to `Display::Block` -- `map_display` maps both
+        // to the SAME `TDisplay::Block` (see its own doc comment), and
+        // marker emission is entirely `layout::box_tree`'s concern (never
+        // consulted here). Swapping one `<li>`'s `display` between the two
+        // values, with otherwise-identical content, must not move or resize
+        // ANY fragment -- a real list's items must not shift position now
+        // that the UA default changed from `Block` to `ListItem`.
+        fn tree_with(li_display: Display) -> LayoutNode {
+            let li_style = ComputedStyle { display: li_display, ..ComputedStyle::default() };
+            let li = container(li_style, vec![text_node("item")]);
+            container(block_style(), vec![li])
+        }
+        let font = crate::text::BitmapFont::vga_8x16();
+        let viewport = Size { w: 400.0, h: 300.0 };
+        let block_fragments = layout_tree(&tree_with(Display::Block), viewport, &font);
+        let list_item_fragments = layout_tree(&tree_with(Display::ListItem), viewport, &font);
+        assert_eq!(block_fragments.len(), list_item_fragments.len(), "same shape must produce the same fragment count");
+        for (b, l) in block_fragments.iter().zip(list_item_fragments.iter()) {
+            assert_eq!(b.rect, l.rect, "Display::ListItem must lay out at the exact position/size Display::Block would");
         }
     }
 
