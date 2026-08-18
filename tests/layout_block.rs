@@ -130,9 +130,17 @@ fn nested_margin_padding_border_produce_expected_rects() {
     outer_style.padding = px_padding_all(1.0);
 
     // inner: margin 10px all round, padding 5px, border 3px, width auto
-    // (so it fills outer's content box minus its own margins), explicit
-    // border-box height of 40px (box-sizing is border-box, matching taffy's
-    // default — see block.rs module docs).
+    // (so it fills outer's content box minus its own margins -- unaffected
+    // by box-sizing either way, since box-sizing only ever reinterprets an
+    // EXPLICIT declared length, never an auto/stretch-fit width -- see
+    // `layout::block::box_sizing_for`'s own doc comment), explicit
+    // CONTENT-box height of 40px (packet/acid1-content-box: `ContentBox`
+    // is the real CSS default this engine now uses everywhere except
+    // table-internal display types and flex/grid, so a declared `height`
+    // means content height, padding/border add on top to reach the
+    // rendered border-box height -- this test predates that packet, when
+    // taffy's own `BorderBox` default meant the declared height WAS the
+    // border-box height instead).
     let mut inner_style = block_style();
     inner_style.margin = px_margin(10.0, 10.0, 10.0, 10.0);
     inner_style.padding = px_padding_all(5.0);
@@ -147,9 +155,17 @@ fn nested_margin_padding_border_produce_expected_rects() {
     let outer = boxes[0];
     assert_eq!(outer.rect.origin.x, 0.0);
     assert_eq!(outer.rect.origin.y, 0.0);
+    // packet/acid1-content-box: the root's auto-width stretch-fit to the
+    // viewport must stay exactly 300 regardless of box-sizing (see
+    // `layout::block::layout_tree`'s own doc comment on its root-width
+    // override forcing `BoxSizing::BorderBox` for exactly this reason) --
+    // this assertion catching a regression back to 302 (300 + this test's
+    // own 1px+1px outer padding, wrongly added on top) is the whole point
+    // of keeping it in this content-box-heavy test file.
     assert_eq!(outer.rect.size.w, 300.0, "root stretches to viewport width");
-    // height = padding-top(1) + inner margin-box height (10+40+10) + padding-bottom(1)
-    assert_eq!(outer.rect.size.h, 62.0);
+    // height = padding-top(1) + inner margin-box height (10 + inner's own
+    // content-box height(56, see below) + 10) + padding-bottom(1) = 78.
+    assert_eq!(outer.rect.size.h, 78.0);
 
     let inner = boxes[1];
     // origin = outer padding (1,1) + inner margin (10,10)
@@ -157,7 +173,9 @@ fn nested_margin_padding_border_produce_expected_rects() {
     assert_eq!(inner.rect.origin.y, 11.0);
     // width(auto) = outer content width (300 - 2*1=298) - inner margins (10+10) = 278
     assert_eq!(inner.rect.size.w, 278.0);
-    assert_eq!(inner.rect.size.h, 40.0);
+    // height: declared height:40 is now a CONTENT height (content-box) --
+    // border-box = 40 + padding(2*5=10) + border(2*3=6) = 56.
+    assert_eq!(inner.rect.size.h, 56.0);
 }
 
 #[test]

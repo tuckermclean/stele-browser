@@ -366,9 +366,31 @@ pub fn layout_tree<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -
     // filling the window) — but only when the caller gave us a positive
     // viewport width; a zero/degenerate viewport still computes (shrinking
     // to content) rather than panicking.
+    //
+    // packet/acid1-content-box: `box_sizing` is forced to `BorderBox` for
+    // this ONE synthetic assignment, regardless of `box_sizing_for`'s
+    // otherwise-CSS-correct `ContentBox` default (and regardless of
+    // whatever the page itself declared). `vw` is unambiguously a
+    // BORDER-BOX target -- "the root's rendered box fills the viewport,
+    // padding/border inward, content shrinking to accommodate" -- the same
+    // way a real browser's initial containing block works, and the same
+    // way a real CSS `width: auto` block stretch-fit ALREADY works
+    // regardless of `box-sizing` (that property only ever reinterprets an
+    // EXPLICIT declared length, never the auto/stretch-fit case -- see
+    // `box_sizing_for`'s own doc comment, which this comment complements
+    // rather than duplicates). Before this line existed, every node
+    // defaulted to taffy's own `BoxSizing::BorderBox`, so setting a bare
+    // `style.size.width` here was implicitly already correct; now that
+    // `ContentBox` is the real default, the SAME assignment would silently
+    // get reinterpreted as a CONTENT width, growing the root's border-box
+    // PAST the viewport by its own padding+border (caught by `tests/
+    // layout_block.rs`'s `nested_margin_padding_border_produce_expected_
+    // rects`: a 1px-padding-all-round root grew from the correct 300 to a
+    // wrong 302 -- exactly `2 * 1px` padding -- before this fix).
     if vw > 0.0 {
         if let Ok(mut style) = taffy.style(built.taffy_id()).cloned() {
             style.size.width = length(vw);
+            style.box_sizing = TBoxSizing::BorderBox;
             let _ = taffy.set_style(built.taffy_id(), style);
         }
     }
