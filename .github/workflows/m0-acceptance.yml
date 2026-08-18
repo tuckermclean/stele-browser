@@ -57,6 +57,30 @@ jobs:
           chmod +x accept.sh
           ./accept.sh --tty-only
 
+      # packet t1d-httpforever: this is the ONLY mechanism for blessing PNG
+      # goldens without a local build (charter/workflow constraint: goldens
+      # are never self-blessed off an uncompiled render — brief §10 — and
+      # this environment never runs `cargo build`/`test` locally at all, CI
+      # does). The `accept.sh --tty-only` step just above already ran a
+      # plain `cargo build --release` (its A3 section always rebuilds
+      # target/release/stele — see accept.sh's own header comment), so the
+      # host binary already exists here; this step just uploads it, it does
+      # NOT rebuild. `if: always()` is deliberate: a brand-new PNG golden
+      # check landing in the SAME PR as its own fixture has no golden to
+      # compare against yet, so `accept.sh --tty-only` above is EXPECTED to
+      # fail on that first push — but the host binary it built along the way
+      # must still reach this artifact so it can be downloaded, run once
+      # outside CI to bless the golden, and committed in a follow-up push
+      # (see fixtures/evidence/README.md's "httpforever" section for the
+      # fixture this exists for).
+      - name: Upload host binary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stele-host
+          path: target/release/stele
+          if-no-files-found: error
+
       - name: Build i486 release binary (canonical pipeline)
         run: |
           set -euxo pipefail
