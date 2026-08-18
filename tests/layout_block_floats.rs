@@ -289,3 +289,81 @@ fn nested_floats_resolve_against_inner_containing_block_width() {
         inner_a.origin.y
     );
 }
+
+/// packet/acid1-coherence: a floated box's declared `width` must be its
+/// CONTENT size, with padding/border adding on top to reach the rendered
+/// (border-box) width -- CSS's `box-sizing: content-box` initial value,
+/// which is the ONLY value this engine can mean (there is no `box-sizing`
+/// CSS property support at all, see `layout::block::float_box_sizing`'s own
+/// doc comment). Before this packet, `layout::block::base_style` never set
+/// taffy's `box_sizing` field at all, so every node silently fell back to
+/// taffy's OWN default (`BoxSizing::BorderBox`): the declared `width`
+/// pinned the BORDER-BOX size instead, so padding/border ate INTO the
+/// content area rather than adding beyond it.
+#[test]
+fn floated_box_with_padding_and_border_uses_content_box_sizing() {
+    let html = r#"
+        <div style="float:left;width:100px;height:50px;padding:10px;border:5px solid black;background-color:rgb(200,0,0);"></div>
+    "#;
+    let fragments = render(html, 300.0);
+    let outer = box_with_bg(&fragments, RED);
+    // content-box: border-box width = 100 (declared content width) + 20
+    // (padding, 2*10px) + 10 (border, 2*5px) = 130. The pre-fix
+    // (BorderBox-default) behavior would render this at exactly 100 --
+    // the declared `width` swallowing its own padding/border instead of
+    // growing past them.
+    assert_eq!(
+        outer.size.w, 130.0,
+        "floated box's rendered (border-box) width must add padding+border on top of the declared content width, not subtract them from it"
+    );
+}
+
+/// packet/acid1-coherence regression: this is `fixtures/css1-float-5526c.
+/// html`'s `dd{width:34em;padding:1em;border:1em}` containing floated
+/// `<li>`s shape, shrunk to round numbers. The OUTER floated box has an
+/// explicit `width` AND non-zero padding/border (like `dd`) -- before this
+/// packet's box_sizing fix, its rendered content width was narrower than
+/// its declared `width` (padding/border eating INTO it, not adding beyond
+/// it), which starved its floated children of row width they should have
+/// had: with the bug, the outer's content width computes to 100 - 2*10
+/// (padding) - 2*5 (border) = 70px, too narrow to fit even TWO 40px inner
+/// floats side by side (80 > 70) -- all three would stack one per row.
+/// Content-box sizing (this packet's fix) gives the outer its full declared
+/// 100px content width, wide enough for exactly two 40px floats per row
+/// (80 <= 100), so the third wraps onto a second row instead of every one
+/// stacking individually.
+#[test]
+fn nested_floats_wrap_against_padded_outer_floats_content_width() {
+    let html = r#"
+        <div style="float:left;width:100px;height:200px;padding:10px;border:5px solid black;background-color:rgb(200,0,0);">
+            <div style="float:left;width:40px;height:20px;background-color:rgb(0,200,0);"></div>
+            <div style="float:left;width:40px;height:20px;background-color:rgb(0,0,200);"></div>
+            <div style="float:left;width:40px;height:20px;background-color:rgb(255,255,0);"></div>
+        </div>
+    "#;
+    let fragments = render(html, 300.0);
+    let inner_a = box_with_bg(&fragments, GREEN);
+    let inner_b = box_with_bg(&fragments, BLUE);
+    let inner_c = box_with_bg(&fragments, YELLOW);
+
+    let ab_overlap =
+        inner_a.origin.y < inner_b.origin.y + inner_b.size.h && inner_b.origin.y < inner_a.origin.y + inner_a.size.h;
+    assert!(
+        ab_overlap,
+        "inner floats a (y={}) and b (y={}) must share the first row -- needs the outer's full 100px content width, not the pre-fix 70px",
+        inner_a.origin.y,
+        inner_b.origin.y
+    );
+    assert!(
+        inner_b.origin.x >= inner_a.origin.x + inner_a.size.w - 0.01,
+        "inner float b (x={}) must sit at/after inner float a's right edge ({})",
+        inner_b.origin.x,
+        inner_a.origin.x + inner_a.size.w
+    );
+    assert!(
+        inner_c.origin.y > inner_a.origin.y + 0.01,
+        "3rd inner float (y={}) must wrap onto a new row below the first row (y={}) -- two 40px floats fill the 100px content width, no room for a third",
+        inner_c.origin.y,
+        inner_a.origin.y
+    );
+}
