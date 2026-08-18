@@ -71,7 +71,9 @@
 //! parent/child adjoining, not sibling/sibling; implemented here regardless
 //! since taffy's native behavior needs overriding either way), and only
 //! whitespace-only text may sit between them in the DOM (real content, a
-//! float, or a flex item breaks the chain — see [`is_collapse_eligible_
+//! float, a flex item, or a table-internal display — `table`/`table-row`/
+//! `table-row-group`/`table-cell`, which belong to the TABLE formatting
+//! context, not block flow — breaks the chain; see [`is_collapse_eligible_
 //! block`]). Percentage margins are left alone (taffy's own native
 //! collapsing behavior applies, unmodified): resolving a percentage margin
 //! needs the containing block's width, which isn't known yet at this
@@ -732,23 +734,46 @@ impl MarginOverride {
 /// collapse with an adjoining sibling's (D6, CSS2.1 §8.3.1's "adjoining
 /// margins" — the sibling half only, see the module docs): not inline-level
 /// content (that's folded into an `Inline` taffy leaf, which has no margin
-/// of its own to collapse), and not floated (CSS2.1 §8.3.1 excludes floats
-/// from collapsing outright). This float check IS load-bearing, not merely
-/// defensive: taffy's own native `Display::Block` collapsing has no concept
-/// of `float` at all (this engine never communicates float status into
-/// taffy's `Style` for a block box — see `is_inline_ish`'s own doc comment
-/// on how float is handled today, bespoke-inline-only), so without this
-/// check and [`compute_sibling_margin_overrides`] explicitly overriding the
-/// pair to a summed (not collapsed) gap, taffy would collapse a floated
-/// sibling's margin with its neighbor's anyway, on its own initiative. Flex
-/// items are excluded implicitly: `compute_sibling_margin_overrides` is
-/// only ever invoked over a NON-flex container's children (see
+/// of its own to collapse), not floated (CSS2.1 §8.3.1 excludes floats
+/// from collapsing outright), and not a table-internal display (`table`,
+/// `table-row`, `table-row-group`, `table-cell`). This float check IS
+/// load-bearing, not merely defensive: taffy's own native `Display::Block`
+/// collapsing has no concept of `float` at all (this engine never
+/// communicates float status into taffy's `Style` for a block box — see
+/// `is_inline_ish`'s own doc comment on how float is handled today,
+/// bespoke-inline-only), so without this check and
+/// [`compute_sibling_margin_overrides`] explicitly overriding the pair to a
+/// summed (not collapsed) gap, taffy would collapse a floated sibling's
+/// margin with its neighbor's anyway, on its own initiative.
+///
+/// The table-display exclusion is similarly load-bearing (found via
+/// review, not just spec pedantry): CSS2.1 scopes ordinary sibling margin
+/// collapsing to boxes participating in a block formatting context — a
+/// table/table-row/table-row-group/table-cell participates in the TABLE
+/// formatting context instead, and never collapses margins with a sibling
+/// (in practice, tables mostly just don't have a meaningful margin on those
+/// internal boxes at all — CSS itself ignores `margin` on `table-cell`).
+/// Without this exclusion, an ordinary `<table>` element sitting next to
+/// another block sibling (e.g. a preceding `<h2>`) would be treated as an
+/// ordinary collapse-eligible box by this function, which is wrong even
+/// though it's usually a no-op in THIS engine today (a bare `<table>`'s own
+/// `margin-top` is `0` with no UA rule setting otherwise, and `max(x, 0) ==
+/// x` either way) — the exclusion is what makes that a documented
+/// non-issue rather than an accident.
+///
+/// Flex items are excluded implicitly: `compute_sibling_margin_overrides`
+/// is only ever invoked over a NON-flex container's children (see
 /// `translate_container_children`), so a flex item is never a candidate
 /// regardless of this function — consistent either way, since taffy's OWN
 /// flexbox algorithm never does margin collapsing at all (confirmed by
 /// `flex_column_item_margins_do_not_collapse` in `tests/layout_block.rs`).
 fn is_collapse_eligible_block(n: &LayoutNode) -> bool {
-    !is_inline_ish(n) && n.style.float == Float::None
+    !is_inline_ish(n)
+        && n.style.float == Float::None
+        && !matches!(
+            n.style.display,
+            Display::Table | Display::TableRow | Display::TableRowGroup | Display::TableCell
+        )
 }
 
 /// `true` for a zero-length `LengthPercentage` — used by

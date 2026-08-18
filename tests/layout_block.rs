@@ -303,6 +303,34 @@ fn floated_sibling_margins_do_not_collapse() {
 }
 
 #[test]
+fn table_row_sibling_margins_do_not_collapse() {
+    // Table-internal boxes (table/table-row/table-row-group/table-cell)
+    // participate in the TABLE formatting context, never ordinary block
+    // sibling collapsing (CSS2.1 -- and this engine's own real <table>
+    // pipeline never lays a row/cell out through the sibling collapse
+    // pre-pass at all, see translate_any's table-leaf branch) -- this
+    // covers the fallback path an orphan table-row/cell takes (outside a
+    // real <table>, translated as a plain stacked block -- see translate_
+    // any's own doc comment), which must still not collapse even though
+    // it otherwise looks like an ordinary block box to `is_inline_ish`.
+    let mut a_style = block_with_vertical_margin(10.0, 0.0, 20.0);
+    a_style.display = stele::style::computed::Display::TableRow;
+    let mut b_style = block_with_vertical_margin(10.0, 30.0, 0.0);
+    b_style.display = stele::style::computed::Display::TableRow;
+    let a = leaf_container(a_style);
+    let b = leaf_container(b_style);
+    let root = container(block_style(), vec![a, b]);
+    let fragments = layout(&root, Size { w: 200.0, h: 500.0 });
+    let boxes = box_fragments(&fragments);
+    let (a_box, b_box) = (boxes[1], boxes[2]);
+    assert_eq!(
+        b_box.rect.origin.y,
+        a_box.rect.origin.y + a_box.rect.size.h + 20.0 + 30.0,
+        "table-row siblings must not collapse their margins"
+    );
+}
+
+#[test]
 fn whitespace_only_text_between_block_siblings_does_not_break_collapsing() {
     // Ordinary hand-formatted HTML puts a whitespace-only text node (a
     // newline + indentation) between sibling block elements in the DOM;
