@@ -289,3 +289,66 @@ fn nested_floats_resolve_against_inner_containing_block_width() {
         inner_a.origin.y
     );
 }
+
+/// The exact shape `nested_floats_resolve_against_inner_containing_block_
+/// width` above deliberately sidesteps (see this module's own doc comment):
+/// the floated children are NOT direct children of the floated parent --
+/// there is an intermediate, ordinary (`float: none`) block WRAPPER between
+/// them, exactly like `fixtures/css1-float-5526c.html`'s `<dd>` (floated) >
+/// `<ul>` (plain block, no float/width/border/padding of its own) > `<li>`
+/// (floated) shape. The wrapper is unsized (`width: auto`) and has no
+/// border/padding/margin, so it stretches to fill the floated parent's full
+/// content width and contributes NO extra inset -- if block-level float
+/// placement is correct, this must place identically to the direct-child
+/// case above (same 150px inner containing block, same wrap-at-4th-float
+/// behavior). If it does NOT, the bug is specific to floats nested BENEATH
+/// a non-floated wrapper inside a floated container, not to nesting itself.
+#[test]
+fn nested_floats_beneath_a_plain_wrapper_still_wrap_at_inner_width() {
+    let html = r#"
+        <div style="float:left;width:150px;height:300px;background-color:rgb(200,0,0);">
+            <div>
+                <div style="float:left;width:40px;height:20px;background-color:rgb(0,200,0);"></div>
+                <div style="float:left;width:40px;height:20px;background-color:rgb(0,0,200);"></div>
+                <div style="float:left;width:40px;height:20px;background-color:rgb(255,255,0);"></div>
+                <div style="float:left;width:40px;height:20px;background-color:rgb(128,0,128);"></div>
+            </div>
+        </div>
+    "#;
+    let fragments = render(html, 300.0);
+
+    let outer = box_with_bg(&fragments, RED);
+    let inner_a = box_with_bg(&fragments, GREEN);
+    let inner_b = box_with_bg(&fragments, BLUE);
+    let inner_c = box_with_bg(&fragments, YELLOW);
+    let inner_d = box_with_bg(&fragments, Color::rgb(128, 0, 128));
+
+    for (name, inner) in [("a", inner_a), ("b", inner_b), ("c", inner_c), ("d", inner_d)] {
+        assert!(
+            inner.origin.x + inner.size.w <= outer.origin.x + outer.size.w + 0.01,
+            "inner float {name} (right edge={}) must stay within the outer floated block's own width (right edge={}) -- through a plain wrapper",
+            inner.origin.x + inner.size.w,
+            outer.origin.x + outer.size.w
+        );
+    }
+
+    let ab_overlap =
+        inner_a.origin.y < inner_b.origin.y + inner_b.size.h && inner_b.origin.y < inner_a.origin.y + inner_a.size.h;
+    assert!(ab_overlap, "inner floats a (y={}) and b (y={}) must be on the same row through a plain wrapper", inner_a.origin.y, inner_b.origin.y);
+    let bc_overlap =
+        inner_b.origin.y < inner_c.origin.y + inner_c.size.h && inner_c.origin.y < inner_b.origin.y + inner_b.size.h;
+    assert!(bc_overlap, "inner floats b (y={}) and c (y={}) must be on the same row through a plain wrapper", inner_b.origin.y, inner_c.origin.y);
+    assert!(
+        inner_b.origin.x >= inner_a.origin.x + inner_a.size.w - 0.01,
+        "inner float b (x={}) must sit at/after inner float a's right edge ({}) through a plain wrapper",
+        inner_b.origin.x,
+        inner_a.origin.x + inner_a.size.w
+    );
+
+    assert!(
+        inner_d.origin.y > inner_a.origin.y + 0.01,
+        "4th inner float (y={}) must wrap onto a new row below the first row (y={}) through a plain wrapper -- proves nesting beneath a non-floated wrapper still resolves against the 150px inner containing block",
+        inner_d.origin.y,
+        inner_a.origin.y
+    );
+}
