@@ -705,7 +705,11 @@ fn x11_row_stride(width: u32, bpp: u32, scanline_pad_bits: u32) -> u32 {
 fn crop_surface_rows(surface: &MemSurface, width: u32, win_height: u32, scroll_y: u32) -> Vec<u8> {
     let (sw, sh) = stele::surface::Surface::size(surface);
     let bytes = surface.bytes();
-    let mut out = vec![0u8; (width as usize) * (win_height as usize) * 4];
+    // Fill with opaque WHITE, not black: any window area past the rendered
+    // surface (a page shorter than the window, or narrower than its width)
+    // is the page canvas, which is white — a zero-fill made the whole area
+    // below a short page render as a black window.
+    let mut out = vec![0xffu8; (width as usize) * (win_height as usize) * 4];
     let dst_row_bytes = width as usize * 4;
     let src_row_bytes = sw as usize * 4;
     let copy_w_bytes = (width.min(sw) as usize) * 4;
@@ -1441,6 +1445,17 @@ mod tests {
     fn parse_args_defaults_when_empty() {
         let a = parse_args(&[]);
         assert_eq!(a, Args::default());
+    }
+
+    #[test]
+    fn crop_surface_rows_pads_below_content_with_white_not_black() {
+        // A 2x1 black surface cropped into a 2x3 window: row 0 is the surface,
+        // rows 1-2 are canvas padding, which must be WHITE (not a black fill).
+        let surf = MemSurface::new(2, 1, Color::BLACK);
+        let out = crop_surface_rows(&surf, 2, 3, 0);
+        assert_eq!(out.len(), 2 * 3 * 4);
+        assert_eq!(&out[0..8], &[0, 0, 0, 255, 0, 0, 0, 255], "row 0 is the black surface");
+        assert!(out[8..].iter().all(|&b| b == 0xff), "rows below content must be white canvas");
     }
 
     #[test]
