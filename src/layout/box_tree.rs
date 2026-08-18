@@ -1033,6 +1033,14 @@ fn alpha_ordinal(n: i64, upper: bool) -> String {
 //     `<button>` only, which can hold markup) its child text, else a
 //     default ("Submit" for submit/image/`<button>`, "Reset" for reset,
 //     "Button" for the `button` input type).
+//
+//     KNOWN BUG (T4/D4, red commit): this priority order invents a word the
+//     author never wrote whenever a control has neither `value` nor child
+//     text -- e.g. an icon-only `<button type=button aria-label="Theme">`
+//     (httpforever's theme/colour switcher) renders `[ Submit ]`, a
+//     fabricated label for a control that isn't even a submit button. The
+//     tests below encode the honest replacement contract; the fix lands in
+//     the paired green commit.
 //   - `<input type=hidden>`: no box, no text at all -- hidden really means
 //     invisible, even in a text-mode dump.
 //   - `<textarea>`: its own text content verbatim if short and single-line;
@@ -2331,23 +2339,74 @@ mod tests {
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         assert!(find_text(&root, "[ Go ]").is_some());
 
-        let d2 = dom::parser::parse(r#"<input type="submit">"#);
+        // T4 contract: a bare `<input type=submit>` with no author-supplied
+        // label falls back to the literal "Submit" -- HTML's own UA
+        // default for a genuine submit control -- but ONLY inside an
+        // enclosing `<form>` (see `resolve_bracket_label`'s doc comment).
+        let d2 = dom::parser::parse(r#"<form action="/s"><input type="submit"></form>"#);
         let styles2 = cascade::cascade(&d2, &[]);
         let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "[ Submit ]").is_some());
     }
 
     #[test]
-    fn reset_and_button_type_inputs_show_bracketed_labels() {
+    fn submit_input_outside_a_form_never_invents_submit() {
+        // Same bare `<input type=submit>`, but with no enclosing `<form>`
+        // to submit -- semantically no more a "Submit" button than a bare
+        // `type=button` one, so the literal default must NOT fire (the D4
+        // bug in a different costume: inventing a word the author never
+        // wrote, even one that "sounds right" for the element).
+        let d = dom::parser::parse(r#"<input type="submit">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "[ ]").is_some(), "no invented \"Submit\" outside a form");
+        assert!(find_text(&root, "[ Submit ]").is_none());
+    }
+
+    #[test]
+    fn reset_and_button_type_inputs_never_invent_a_default_label() {
+        // Neither `reset` nor `button` input types are ever the literal-
+        // "Submit" rung -- only a genuine submit control gets that. With
+        // nothing else to go on (no value/aria-label/title), both render
+        // an honest empty control instead of a fabricated word.
         let d = dom::parser::parse(r#"<input type="reset">"#);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
-        assert!(find_text(&root, "[ Reset ]").is_some());
+        assert!(find_text(&root, "[ ]").is_some(), "no invented \"Reset\" label");
 
         let d2 = dom::parser::parse(r#"<input type="button" value="Click">"#);
         let styles2 = cascade::cascade(&d2, &[]);
         let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
         assert!(find_text(&root2, "[ Click ]").is_some());
+
+        let d3 = dom::parser::parse(r#"<input type="button">"#);
+        let styles3 = cascade::cascade(&d3, &[]);
+        let root3 = build_box_tree(&d3, &styles3, &HashMap::new()).expect("root present");
+        assert!(find_text(&root3, "[ ]").is_some(), "value-less type=button is an empty control, NOT \"Button\"");
+    }
+
+    #[test]
+    fn input_label_honors_aria_label_and_title_rungs() {
+        // Rung (3): aria-label wins over the submit default -- this is the
+        // exact D4 shape (an icon-only control with no value/text, just an
+        // author-supplied accessible name).
+        let d = dom::parser::parse(r#"<form action="/s"><input type="submit" aria-label="Go now"></form>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "[ Go now ]").is_some());
+
+        // Rung (4): title wins over the submit default when there's no
+        // aria-label either.
+        let d2 = dom::parser::parse(r#"<form action="/s"><input type="submit" title="Proceed"></form>"#);
+        let styles2 = cascade::cascade(&d2, &[]);
+        let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
+        assert!(find_text(&root2, "[ Proceed ]").is_some());
+
+        // value (rung 2) still beats aria-label (rung 3) and title (rung 4).
+        let d3 = dom::parser::parse(r#"<input type="submit" value="Go" aria-label="Ignored" title="Also ignored">"#);
+        let styles3 = cascade::cascade(&d3, &[]);
+        let root3 = build_box_tree(&d3, &styles3, &HashMap::new()).expect("root present");
+        assert!(find_text(&root3, "[ Go ]").is_some());
     }
 
     #[test]
@@ -2361,21 +2420,72 @@ mod tests {
     }
 
     #[test]
-    fn button_element_shows_value_then_child_text_then_default() {
-        let d = dom::parser::parse(r#"<button>Send</button>"#);
+    fn button_element_text_beats_value_beats_default() {
+        // Rung (1): own text content beats EVERY other rung, including
+        // `value` -- this is the T4 reordering (the old rule had `value`
+        // win over child text; the new rule matches "the element's own
+        // text content ... wins" from the packet brief).
+        let d = dom::parser::parse(r#"<button value="X">Send</button>"#);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
-        assert!(find_text(&root, "[ Send ]").is_some());
+        assert!(find_text(&root, "[ Send ]").is_some(), "own text content beats the value attribute");
 
-        let d2 = dom::parser::parse(r#"<button value="X">Ignored</button>"#);
+        // Rung (2): with no text content, `value` wins.
+        let d2 = dom::parser::parse(r#"<button value="X"></button>"#);
         let styles2 = cascade::cascade(&d2, &[]);
         let root2 = build_box_tree(&d2, &styles2, &HashMap::new()).expect("root present");
-        assert!(find_text(&root2, "[ X ]").is_some(), "value attr takes priority over child text");
+        assert!(find_text(&root2, "[ X ]").is_some(), "value attr wins when there is no text content");
 
-        let d3 = dom::parser::parse(r#"<button></button>"#);
+        // Rung (5): the literal "Submit" default only fires for a
+        // submit-typed button (HTML's own default `type`) inside a `<form>`,
+        // with nothing else to go on.
+        let d3 = dom::parser::parse(r#"<form action="/s"><button></button></form>"#);
         let styles3 = cascade::cascade(&d3, &[]);
         let root3 = build_box_tree(&d3, &styles3, &HashMap::new()).expect("root present");
-        assert!(find_text(&root3, "[ Submit ]").is_some(), "default when no value/child text");
+        assert!(find_text(&root3, "[ Submit ]").is_some(), "default \"Submit\" only inside a form, with nothing else");
+
+        // Same empty `<button>`, no enclosing `<form>` this time -- D4's
+        // exact failure mode (an empty/unlabeled button rendering an
+        // invented "Submit") must not recur.
+        let d4 = dom::parser::parse(r#"<button></button>"#);
+        let styles4 = cascade::cascade(&d4, &[]);
+        let root4 = build_box_tree(&d4, &styles4, &HashMap::new()).expect("root present");
+        assert!(find_text(&root4, "[ ]").is_some(), "outside a form, an empty submit-typed button is honest, not \"Submit\"");
+        assert!(find_text(&root4, "[ Submit ]").is_none());
+    }
+
+    #[test]
+    fn icon_button_uses_aria_label_not_submit() {
+        // The exact D4 repro shape: httpforever's icon buttons
+        // (`<button type=button aria-label="Theme">`, no text content, no
+        // value) were rendering `[ Submit ]` -- a fabricated label for a
+        // control that isn't even a submit button (explicit
+        // `type=button`). Rung (3) (aria-label) must win, and the literal
+        // "Submit" default must never fire for a non-submit type at all.
+        let d = dom::parser::parse(r#"<button type="button" aria-label="Theme"><svg></svg></button>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "[ Theme ]").is_some());
+        assert!(find_text(&root, "[ Submit ]").is_none());
+    }
+
+    #[test]
+    fn button_type_button_with_nothing_renders_empty_not_submit() {
+        let d = dom::parser::parse(r#"<button type="button"></button>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "[ ]").is_some());
+        assert!(find_text(&root, "[ Submit ]").is_none());
+    }
+
+    #[test]
+    fn button_label_honors_title_rung() {
+        // Rung (4): title wins over the submit default when there's no
+        // text/value/aria-label.
+        let d = dom::parser::parse(r#"<form action="/s"><button type="submit" title="Proceed"></button></form>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        assert!(find_text(&root, "[ Proceed ]").is_some());
     }
 
     #[test]
