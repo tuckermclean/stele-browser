@@ -436,12 +436,23 @@ pub fn encode_put_image(drawable: u32, gc: u32, width: u16, height: u16, dst_x: 
 /// its own 4-byte pad) exceeds `max_request_length_words * 4` bytes — the
 /// server's advertised `maximum-request-length` (from [`SetupInfo`]).
 ///
+/// `dst_y_base` offsets every band's `dst-y` in the drawable — band `N`
+/// lands at drawable row `dst_y_base + <row offset within image_data>`, not
+/// row `0`. This lets a caller blit a cropped strip (e.g. a scroll's
+/// newly-revealed rows) at an arbitrary window row instead of always at the
+/// top; pass `0` to reproduce the original top-of-drawable behavior.
+///
 /// Total: `row_stride == 0` or `total_height == 0` produces no requests
 /// (nothing to send) rather than dividing by zero or looping forever; a
 /// `max_request_length_words` too small to fit even ONE row's header+data
 /// still makes forward progress (`rows_per_band` is floored at `1`) rather
 /// than looping without ever advancing `row`.
-pub fn put_image_requests(drawable: u32, gc: u32, width: u16, total_height: u16, depth: u8, image_data: &[u8], row_stride: usize, max_request_length_words: u32) -> Vec<Vec<u8>> {
+///
+/// TODO(packet/x11-perf): `dst_y_base` is currently IGNORED — every band
+/// still lands at row `0` + its own offset, same as before this parameter
+/// existed. Failing tests: `put_image_requests_dst_y_base_offsets_every_band`.
+#[allow(clippy::too_many_arguments)]
+pub fn put_image_requests(drawable: u32, gc: u32, width: u16, total_height: u16, depth: u8, image_data: &[u8], row_stride: usize, max_request_length_words: u32, _dst_y_base: i16) -> Vec<Vec<u8>> {
     if row_stride == 0 || total_height == 0 {
         return Vec::new();
     }
@@ -462,6 +473,25 @@ pub fn put_image_requests(drawable: u32, gc: u32, width: u16, total_height: u16,
         row += band_rows;
     }
     out
+}
+
+// =========================================================================
+// CopyArea
+// =========================================================================
+
+const OP_COPY_AREA: u8 = 62;
+
+/// Encode a `CopyArea` request (opcode 62): server-side copy of a
+/// `width x height` rectangle from `(src_x, src_y)` on `src_drawable` to
+/// `(dst_x, dst_y)` on `dst_drawable`, using `gc`. Fixed-size, 28 bytes
+/// (request length 7 words).
+///
+/// TODO(packet/x11-perf): not yet implemented. Failing tests:
+/// `encode_copy_area_produces_exact_bytes`,
+/// `encode_copy_area_negative_coordinates_round_trip`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_copy_area(_src_drawable: u32, _dst_drawable: u32, _gc: u32, _src_x: i16, _src_y: i16, _dst_x: i16, _dst_y: i16, _width: u16, _height: u16) -> Vec<u8> {
+    todo!("encode_copy_area: packet/x11-perf CopyArea encoder not yet implemented")
 }
 
 // =========================================================================
@@ -808,11 +838,28 @@ impl XConnection {
     /// into as many `PutImage` requests as the server's
     /// `maximum-request-length` demands (see [`put_image_requests`]).
     pub fn put_image(&mut self, drawable: u32, gc: u32, width: u16, height: u16, depth: u8, image_data: &[u8], row_stride: usize) -> Result<(), String> {
+        self.put_image_at(drawable, gc, width, height, depth, image_data, row_stride, 0)
+    }
+
+    /// Same as [`Self::put_image`], but the image lands at drawable row
+    /// `dst_y_base` instead of always `0` — used to blit a cropped scroll
+    /// strip at whatever window row it belongs at (see [`put_image_requests`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_image_at(&mut self, drawable: u32, gc: u32, width: u16, height: u16, depth: u8, image_data: &[u8], row_stride: usize, dst_y_base: i16) -> Result<(), String> {
         let max_len = self.setup.maximum_request_length;
-        for req in put_image_requests(drawable, gc, width, height, depth, image_data, row_stride, max_len) {
+        for req in put_image_requests(drawable, gc, width, height, depth, image_data, row_stride, max_len, dst_y_base) {
             self.send(&req)?;
         }
         Ok(())
+    }
+
+    /// Server-side `CopyArea`: copy a `width x height` rectangle from
+    /// `(src_x, src_y)` on `src_drawable` to `(dst_x, dst_y)` on
+    /// `dst_drawable`. Used to shift retained window content on a scroll
+    /// instead of re-sending it (see [`encode_copy_area`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_area(&mut self, src_drawable: u32, dst_drawable: u32, gc: u32, src_x: i16, src_y: i16, dst_x: i16, dst_y: i16, width: u16, height: u16) -> Result<(), String> {
+        self.send(&encode_copy_area(src_drawable, dst_drawable, gc, src_x, src_y, dst_x, dst_y, width, height))
     }
 
     /// `GetKeyboardMapping` for every keycode the server advertises
@@ -1265,7 +1312,7 @@ mod tests {
         let max_words = 15u32;
         let max_bytes = max_words as usize * 4;
 
-        let requests = put_image_requests(0x1, 0x2, 4, total_height, 24, &data, row_stride, max_words);
+        let requests = put_image_requests(0x1, 0x2, 4, total_height, 24, &data, row_stride, max_words, 0);
 
         assert!(requests.len() > 1, "expected banding into multiple requests");
 
@@ -1291,14 +1338,14 @@ mod tests {
     fn put_image_requests_single_band_when_it_fits() {
         let row_stride = 8usize;
         let data = vec![0xAAu8; row_stride * 4];
-        let requests = put_image_requests(0x1, 0x2, 2, 4, 24, &data, row_stride, 4096);
+        let requests = put_image_requests(0x1, 0x2, 2, 4, 24, &data, row_stride, 4096, 0);
         assert_eq!(requests.len(), 1);
     }
 
     #[test]
     fn put_image_requests_zero_stride_or_height_produces_no_requests() {
-        assert!(put_image_requests(1, 2, 4, 4, 24, &[0u8; 16], 0, 4096).is_empty());
-        assert!(put_image_requests(1, 2, 4, 0, 24, &[], 8, 4096).is_empty());
+        assert!(put_image_requests(1, 2, 4, 4, 24, &[0u8; 16], 0, 4096, 0).is_empty());
+        assert!(put_image_requests(1, 2, 4, 0, 24, &[], 8, 4096, 0).is_empty());
     }
 
     #[test]
@@ -1307,8 +1354,75 @@ mod tests {
         // terminate (rows_per_band floored at 1), not loop forever.
         let row_stride = 100usize;
         let data = vec![0u8; row_stride * 3];
-        let requests = put_image_requests(1, 2, 25, 3, 24, &data, row_stride, 1);
+        let requests = put_image_requests(1, 2, 25, 3, 24, &data, row_stride, 1, 0);
         assert_eq!(requests.len(), 3); // one row per request
+    }
+
+    #[test]
+    fn put_image_requests_dst_y_base_offsets_every_band() {
+        // Same banding shape as the "bands a large image" test above, but
+        // with a non-zero dst_y_base: every band's dst-y must land at
+        // `dst_y_base + <row offset within the image>`, not `<row offset>`
+        // alone -- this is what lets a scroll strip land partway down the
+        // window instead of always at the top.
+        let row_stride = 16usize;
+        let total_height = 10u16;
+        let data = vec![0u8; row_stride * total_height as usize];
+        let max_words = 15u32; // same budget as above: ~2 rows/band
+        let dst_y_base: i16 = 500;
+
+        let requests = put_image_requests(0x1, 0x2, 4, total_height, 24, &data, row_stride, max_words, dst_y_base);
+        assert!(requests.len() > 1, "expected banding into multiple requests");
+
+        let mut expected_dst_y = dst_y_base;
+        for req in &requests {
+            let dst_y = i16::from_le_bytes([req[18], req[19]]);
+            assert_eq!(dst_y, expected_dst_y);
+            let height = u16::from_le_bytes([req[14], req[15]]);
+            expected_dst_y += height as i16;
+        }
+    }
+
+    #[test]
+    fn put_image_requests_dst_y_base_zero_matches_old_top_of_drawable_behavior() {
+        let row_stride = 8usize;
+        let data = vec![0xAAu8; row_stride * 4];
+        let requests = put_image_requests(0x1, 0x2, 2, 4, 24, &data, row_stride, 4096, 0);
+        assert_eq!(requests.len(), 1);
+        let dst_y = i16::from_le_bytes([requests[0][18], requests[0][19]]);
+        assert_eq!(dst_y, 0);
+    }
+
+    // -------------------------------------------------------------- CopyArea
+
+    #[test]
+    fn encode_copy_area_produces_exact_bytes() {
+        let out = encode_copy_area(0x0040_0001, 0x0040_0001, 0x0040_0002, 0, 60, 0, 0, 1024, 708);
+
+        assert_eq!(out[0], 62); // opcode
+        assert_eq!(out[1], 0); // unused
+        assert_eq!(&out[2..4], &7u16.to_le_bytes()); // request length
+        assert_eq!(&out[4..8], &0x0040_0001u32.to_le_bytes()); // src-drawable
+        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes()); // dst-drawable
+        assert_eq!(&out[12..16], &0x0040_0002u32.to_le_bytes()); // gc
+        assert_eq!(&out[16..18], &0i16.to_le_bytes()); // src-x
+        assert_eq!(&out[18..20], &60i16.to_le_bytes()); // src-y
+        assert_eq!(&out[20..22], &0i16.to_le_bytes()); // dst-x
+        assert_eq!(&out[22..24], &0i16.to_le_bytes()); // dst-y
+        assert_eq!(&out[24..26], &1024u16.to_le_bytes()); // width
+        assert_eq!(&out[26..28], &708u16.to_le_bytes()); // height
+        assert_eq!(out.len(), 28);
+    }
+
+    #[test]
+    fn encode_copy_area_negative_coordinates_round_trip() {
+        // src/dst coordinates are signed per spec (a drawable can be copied
+        // from/to a point that's technically off-window); confirm negative
+        // values encode losslessly rather than being silently clamped.
+        let out = encode_copy_area(1, 2, 3, -5, -10, 7, 0, 1, 1);
+        assert_eq!(i16::from_le_bytes([out[16], out[17]]), -5);
+        assert_eq!(i16::from_le_bytes([out[18], out[19]]), -10);
+        assert_eq!(i16::from_le_bytes([out[20], out[21]]), 7);
     }
 
     // ------------------------------------------------------ GetKeyboardMapping
