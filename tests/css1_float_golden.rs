@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use stele::backend::raster;
 use stele::dom;
 use stele::layout::{self, box_tree::build_box_tree, Size};
-use stele::style::cascade;
+use stele::style::{self, cascade};
 use stele::surface::{Color, MemSurface};
 
 const CSS1_FLOAT_HTML: &str = include_str!("../fixtures/css1-float-5526c.html");
@@ -45,7 +45,16 @@ const VIEWPORT_WIDTH: u32 = 800;
 /// rs`'s own `render_png` helper).
 fn render_png(html: &str) -> Vec<u8> {
     let dom_tree = dom::parser::parse(html);
-    let styles = cascade::cascade(&dom_tree, &[]);
+    // The fixture's entire layout (float/width/height) lives in its inline
+    // `<style>` block, so the author sheets MUST be collected — exactly like
+    // `main.rs`'s `--dump-png` (from which the golden was blessed) and
+    // `kitchen_sink_golden.rs`. `png_golden.rs`'s empty-`&[]` shortcut only
+    // works for author-CSS-less fixtures; using it here rendered css1-float
+    // with UA defaults only (a stacked column at a different height), which
+    // is exactly why this golden mismatched before.
+    let author_sheets =
+        style::collect_author_sheets_for_viewport(&dom_tree, VIEWPORT_WIDTH as f32, style::ColorScheme::Light);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
     let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else {
         return raster::encode_png(&MemSurface::new(1, 1, Color::WHITE));
     };
