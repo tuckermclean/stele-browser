@@ -20,13 +20,18 @@
 //!   `Surface::draw_text`. Packet T1c: the run's INK color is not always
 //!   `style.color` verbatim — [`effective_background`] resolves what this
 //!   text visually sits over (the nearest containing opaque `Box`'s
-//!   `background_color`, or `canvas` if none), and `style::contrast::
-//!   repair_fg` repairs `style.color` against it when the pair would
+//!   `background_color`, `canvas` if none, or `None` when that box's
+//!   visible background is a real IMAGE this analysis can't sample — see
+//!   that function's own doc comment), and `style::contrast::repair_fg`
+//!   repairs `style.color` against a KNOWN background when the pair would
 //!   otherwise be illegible (e.g. white text over a background this
 //!   engine couldn't fully honor — a dropped gradient, an unhandled
-//!   `var()` chain). Every existing black-on-white fixture already clears
-//!   the repair floor, so this is a no-op for them (`repair_fg` returns
-//!   `fg` unchanged whenever it already reads).
+//!   `var()` chain). An INDETERMINATE (image) background is left entirely
+//!   untouched — repairing against a background this function can't
+//!   actually see would be a guess, not a fix. Every existing black-on-
+//!   white fixture already clears the repair floor, so this is a no-op
+//!   for them (`repair_fg` returns `fg` unchanged whenever it already
+//!   reads).
 //! - `FragmentKind::Image { image }`: `blit`s `image` into the fragment's
 //!   own rect (images packet, M4): `layout::block::emit` only produces this
 //!   fragment kind for a `Replaced` box whose `image` field is `Some` (a
@@ -82,8 +87,18 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &Hash
         match &fragment.kind {
             FragmentKind::Box { style } => paint_box(surface, &fragment.rect, style, bg_images),
             FragmentKind::Text { text, baseline, style } => {
-                let effective_bg = effective_background(fragments, i, canvas);
-                let ink = repair_fg(style.color, effective_bg);
+                // `None` (packet T1c amendment) means INDETERMINATE — the
+                // nearest containing box's visible background is a real
+                // IMAGE this function can't sample (see `effective_
+                // background`'s own doc comment) — and repairing against a
+                // background we can't actually assess is worse than not
+                // repairing at all: trust the author's declared color
+                // rather than risk "fixing" text that was already legible
+                // against the real (unseen) image.
+                let ink = match effective_background(fragments, i, canvas) {
+                    Some(bg) => repair_fg(style.color, bg),
+                    None => style.color,
+                };
                 paint_text(surface, &fragment.rect, text, *baseline, style, ink);
             }
             FragmentKind::Image { image } => {
@@ -93,60 +108,66 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &Hash
     }
 }
 
-/// Resolve the CSS `background-color` a `Text` fragment at `fragments
-/// [text_index]` visually sits over (packet T1c) — PURELY analytically over
-/// the paint-ordered fragment list itself, never by sampling real pixels
-/// (`Surface` has no pixel-read method, module docs) and never by looking
-/// at a background IMAGE's actual content (see the caveat below).
+/// Resolve the CSS background a `Text` fragment at `fragments[text_index]`
+/// visually sits over (packet T1c) — PURELY analytically over the paint-
+/// ordered fragment list itself, never by sampling real pixels (`Surface`
+/// has no pixel-read method, module docs).
 ///
 /// Scans every fragment BEFORE `text_index` (`fragments[..text_index]`,
 /// i.e. everything already painted UNDER this text by painter's-algorithm
-/// order — see `paint`'s own doc comment), NEAREST first (reverse order):
-/// the first `Box` fragment whose pixel rect geometrically CONTAINS the
-/// text fragment's own origin point AND whose `background_color.a != 0`
-/// wins. `canvas` is the fallback when no such box is found.
+/// order — see `paint`'s own doc comment), NEAREST first (reverse order).
+/// For the first `Box` fragment whose pixel rect geometrically CONTAINS the
+/// text fragment's own origin point:
 ///
-/// ## Caveats (deliberate simplifications, not bugs)
+/// - if it has a `background_image` set, the box's VISIBLE background is a
+///   real image this function has no way to sample or reason about (the
+///   decoded bytes live in `paint`'s separate `bg_images` map, not in
+///   `Fragment`/`ComputedStyle` at all, and image painting order is
+///   background-color THEN background-image ON TOP — `paint_box`'s own doc
+///   comment — so an image, when present, is what's actually visible,
+///   regardless of whatever `background_color` the box also carries)
+///   -> returns `None`: INDETERMINATE, not "no background". `paint`/
+///   `main.rs`'s `--audit-contrast` both treat `None` as "don't touch this
+///   run" rather than guessing.
+/// - else if `background_color.a != 0` -> returns `Some(background_color)`.
+/// - else (fully transparent, no image) -> keep scanning further back —
+///   this box paints nothing, so whatever is BEHIND it is what's actually
+///   visible.
 ///
-/// - This is geometric containment over a FLAT fragment list, not real DOM
-///   ancestry — an approximation the brief calls out explicitly. In valid
-///   painter's-algorithm output this is equivalent to ancestry (a box only
-///   ever geometrically contains its own descendants' content), but it
-///   means a fragment stream that violated that invariant could fool this
-///   function; scanning only `fragments[..text_index]` at least guarantees
-///   a box painted AFTER this text (which could never legitimately be its
-///   background) is never picked.
-/// - A box with ONLY `background-image` set (no `background-color` of its
-///   own) is treated as having NO background here: `ComputedStyle::
-///   background_color` defaults to `Color::TRANSPARENT` when a stylesheet
-///   sets only the image half of the `background` shorthand (`style::
-///   value::apply_property`'s `"background-image"`/`"background"` arms
-///   never touch `background_color`), and this function has no way to
-///   reason about a background IMAGE's actual pixel content — the decoded
-///   bytes live in `paint`'s separate `bg_images` map, not in `Fragment`/
-///   `ComputedStyle` at all. A text run painted over an image-only
-///   background therefore resolves its effective background to whatever
-///   sits BEHIND that box (or the canvas) — which can, in principle,
-///   disagree with the image's real average color (`fixtures/bg-image.html`
-///   is exactly this case: a white-on-tiled-image text run gets repaired
-///   against the white page canvas, not the tile). Documented, deliberate
-///   scope limit — a future packet could sample a representative color
-///   from the decoded image the same way this packet's gradient fallback
-///   picks a representative stop (`style::value::parse_gradient_first_
-///   color_stop`).
-pub fn effective_background(fragments: &[Fragment], text_index: usize, canvas: Color) -> Color {
+/// `Some(canvas)` is the result when no containing box is found at all
+/// (nothing between this text and the surface's own fill color).
+///
+/// ## Caveat (a deliberate simplification, not a bug)
+///
+/// This is geometric containment over a FLAT fragment list, not real DOM
+/// ancestry — an approximation the brief calls out explicitly. In valid
+/// painter's-algorithm output this is equivalent to ancestry (a box only
+/// ever geometrically contains its own descendants' content), but it means
+/// a fragment stream that violated that invariant could fool this
+/// function; scanning only `fragments[..text_index]` at least guarantees a
+/// box painted AFTER this text (which could never legitimately be its
+/// background) is never picked.
+pub fn effective_background(fragments: &[Fragment], text_index: usize, canvas: Color) -> Option<Color> {
     let Some(text_fragment) = fragments.get(text_index) else {
-        return canvas;
+        return Some(canvas);
     };
     let origin = text_fragment.rect.origin;
     for frag in fragments[..text_index].iter().rev() {
         if let FragmentKind::Box { style } = &frag.kind {
-            if style.background_color.a != 0 && rect_contains_point(&frag.rect, origin) {
-                return style.background_color;
+            if !rect_contains_point(&frag.rect, origin) {
+                continue;
             }
+            if style.background_image.is_some() {
+                return None; // indeterminate: a real image we can't sample
+            }
+            if style.background_color.a != 0 {
+                return Some(style.background_color);
+            }
+            // Fully transparent AND no image: this box paints nothing here
+            // -- keep scanning further back for whatever's actually behind it.
         }
     }
-    canvas
+    Some(canvas)
 }
 
 /// Whether `p` falls within `rect`'s half-open `[x, x+w) x [y, y+h)` span.
@@ -829,7 +850,7 @@ mod tests {
             interactive: None,
         });
         let eff = effective_background(&fragments, 2, Color::WHITE);
-        assert_eq!(eff, Color::rgb(20, 20, 20), "the innermost (nearer, later-painted) opaque box wins");
+        assert_eq!(eff, Some(Color::rgb(20, 20, 20)), "the innermost (nearer, later-painted) opaque box wins");
     }
 
     #[test]
@@ -844,7 +865,7 @@ mod tests {
             },
         ];
         let eff = effective_background(&fragments, 2, Color::WHITE);
-        assert_eq!(eff, Color::rgb(5, 5, 5), "a transparent box must not shadow the next opaque ancestor beneath it");
+        assert_eq!(eff, Some(Color::rgb(5, 5, 5)), "a transparent box must not shadow the next opaque ancestor beneath it");
     }
 
     #[test]
@@ -854,8 +875,12 @@ mod tests {
             kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
             interactive: None,
         }];
-        assert_eq!(effective_background(&fragments, 0, Color::WHITE), Color::WHITE);
-        assert_eq!(effective_background(&fragments, 0, Color::rgb(1, 2, 3)), Color::rgb(1, 2, 3), "must thread the caller's own canvas through, not hardcode white");
+        assert_eq!(effective_background(&fragments, 0, Color::WHITE), Some(Color::WHITE));
+        assert_eq!(
+            effective_background(&fragments, 0, Color::rgb(1, 2, 3)),
+            Some(Color::rgb(1, 2, 3)),
+            "must thread the caller's own canvas through, not hardcode white"
+        );
     }
 
     #[test]
@@ -869,7 +894,7 @@ mod tests {
             Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(1, 2, 3), BorderSide::default()) }, interactive: None },
         ];
         let eff = effective_background(&fragments, 0, Color::WHITE);
-        assert_eq!(eff, Color::WHITE, "a box painted AFTER this text must not count as its background");
+        assert_eq!(eff, Some(Color::WHITE), "a box painted AFTER this text must not count as its background");
     }
 
     #[test]
@@ -883,13 +908,53 @@ mod tests {
             },
         ];
         let eff = effective_background(&fragments, 1, Color::WHITE);
-        assert_eq!(eff, Color::WHITE, "a box that doesn't geometrically contain the text's own origin must not count");
+        assert_eq!(eff, Some(Color::WHITE), "a box that doesn't geometrically contain the text's own origin must not count");
     }
 
     #[test]
     fn effective_background_out_of_range_index_is_canvas_not_a_panic() {
         let fragments: Vec<Fragment> = Vec::new();
-        assert_eq!(effective_background(&fragments, 5, Color::WHITE), Color::WHITE);
+        assert_eq!(effective_background(&fragments, 5, Color::WHITE), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn effective_background_a_box_with_a_background_image_is_indeterminate() {
+        // packet T1c amendment: a box whose visible background is a real
+        // IMAGE (not just a flat color) is NOT resolvable by this purely
+        // analytical function -- `None` means "can't assess", distinct
+        // from both "opaque color" (`Some`) and "no box at all" (`Some
+        // (canvas)`). This is `fixtures/bg-image.html`'s exact `.tile`
+        // shape: `background-image` set, `background_color` left
+        // TRANSPARENT (the default -- only the image half of the
+        // shorthand was declared).
+        let image_box_style = ComputedStyle { background_color: Color::TRANSPARENT, background_image: Some("tile.png".into()), ..ComputedStyle::default() };
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box_style }, interactive: None },
+            Fragment {
+                rect: rect(3.0, 3.0, 4.0, 4.0),
+                kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+                interactive: None,
+            },
+        ];
+        assert_eq!(effective_background(&fragments, 1, Color::WHITE), None);
+    }
+
+    #[test]
+    fn effective_background_an_image_box_is_indeterminate_even_with_its_own_background_color_set() {
+        // Real CSS paints background-image ON TOP of background-color
+        // (`paint_box`'s own doc comment) -- so a box declaring BOTH is
+        // still indeterminate: the IMAGE is what's actually visible,
+        // regardless of whatever color sits behind it.
+        let image_box_style = ComputedStyle { background_color: Color::rgb(1, 2, 3), background_image: Some("tile.png".into()), ..ComputedStyle::default() };
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box_style }, interactive: None },
+            Fragment {
+                rect: rect(3.0, 3.0, 4.0, 4.0),
+                kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
+                interactive: None,
+            },
+        ];
+        assert_eq!(effective_background(&fragments, 1, Color::WHITE), None);
     }
 
     // ---------------------------------------------------- paint: contrast repair
@@ -959,5 +1024,34 @@ mod tests {
         // already-legible white-on-dark text passed through unrepaired.
         let count_white_ink = s.bytes().chunks(4).filter(|p| p == &[255, 255, 255, 255]).count();
         assert!(count_white_ink > 0, "white text already legible over a dark box must render unchanged");
+    }
+
+    /// packet T1c amendment: this is `fixtures/bg-image.html`'s exact
+    /// shape (`.tile`: `background-image` set, `background_color` left
+    /// TRANSPARENT) -- `effective_background` returns `None` (indeterminate,
+    /// not "no background") for it, and `paint` must trust the author's
+    /// declared white ink rather than repair against the canvas it can't
+    /// actually see behind a real image. Pins `goldens/bg-image.png`
+    /// staying byte-identical: repairing this run would be a REGRESSION
+    /// (the real tiled image is dark enough that white text is already
+    /// legible against it — this function just can't verify that itself).
+    #[test]
+    fn paint_leaves_white_text_over_a_background_image_only_box_unrepaired() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let image_box = ComputedStyle { background_color: Color::TRANSPARENT, background_image: Some("tile.png".into()), ..ComputedStyle::default() };
+        let text_style = ComputedStyle { color: Color::WHITE, font_size: 16.0, ..ComputedStyle::default() };
+        let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
+        bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [10, 10, 10, 255])));
+        let fragments = vec![
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box }, interactive: None },
+            Fragment {
+                rect: rect(0.0, 0.0, 16.0, 16.0),
+                kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
+                interactive: None,
+            },
+        ];
+        paint(&mut s, &fragments, &bg_images, Color::WHITE);
+        let count_white_ink = s.bytes().chunks(4).filter(|p| p == &[255, 255, 255, 255]).count();
+        assert!(count_white_ink > 0, "white text over an (unsampled) background-image box must NOT be repaired to black");
     }
 }

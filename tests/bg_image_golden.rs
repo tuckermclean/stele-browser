@@ -87,15 +87,6 @@ fn decode(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
 }
 
 #[test]
-#[ignore = "packet T1c: goldens/bg-image.png is stale, pending re-bless + visual countersign (brief §10) -- \
-the `.tile` box here sets `color: #ffffff` but only `background-image` (no `background-color` of its own), \
-so per `backend::raster::effective_background`'s documented caveat its effective background resolves to the \
-white page canvas, not the tile image it can't see -- the white text is now correctly repaired to black by \
-`style::contrast::repair_fg`. This is the intended, documented behavior change (see raster.rs/contrast.rs doc \
-comments), not a regression -- the implementing agent cannot run cargo locally to regenerate the golden PNG, \
-so this assertion is disabled rather than blindly re-blessed. To re-enable: run `stele --headless --dump-png \
-fixtures/bg-image.html /tmp/bg-image.png`, visually confirm the tiled image is still visible BEHIND now-black \
-text, `cp /tmp/bg-image.png goldens/bg-image.png`, and remove this #[ignore]."]
 fn bg_image_fixture_png_matches_golden_pixels() {
     let actual_bytes = render_bg_image_fixture(false);
     let (aw, ah, apx) = decode(&actual_bytes);

@@ -635,7 +635,11 @@ fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool) -> Resu
 /// empty `Vec` (`repair_fg`'s own doc comment proves at least one of
 /// black/white always clears `CONTRAST_MIN` against ANY background), so a
 /// nonempty result signals a REGRESSION in one of those two functions, not
-/// a legitimately-unrepairable page.
+/// a legitimately-unrepairable page. A run whose `effective_background` is
+/// `None` (INDETERMINATE — its nearest containing box's visible background
+/// is a real image this engine can't sample, see that function's own doc
+/// comment) is SKIPPED, not flagged: `paint` itself never touches such a
+/// run's color, so there's nothing repaired here to check either.
 ///
 /// Unlike `dump_png`/`dump_text` (always total, degrading to a blank
 /// render on any failure), a fetch failure here is a clean `Err` — there
@@ -681,7 +685,15 @@ fn audit_contrast(source: &str) -> Result<Vec<String>, String> {
         if text.is_empty() {
             continue;
         }
-        let effective_bg = raster::effective_background(&fragments, i, Color::WHITE);
+        // `None` (packet T1c amendment) means the nearest containing box's
+        // visible background is a real IMAGE this analysis can't sample —
+        // `paint` itself leaves such a run's color untouched (see
+        // `backend::raster::paint`'s own doc comment), so there is nothing
+        // repaired here to check either; skip it rather than flag a run
+        // this audit has no way to actually assess.
+        let Some(effective_bg) = raster::effective_background(&fragments, i, Color::WHITE) else {
+            continue;
+        };
         let repaired = style::contrast::repair_fg(text_style.color, effective_bg);
         let ratio = style::contrast::contrast_ratio(repaired, effective_bg);
         if ratio < style::contrast::CONTRAST_MIN {
@@ -2625,11 +2637,11 @@ mod tests {
     #[test]
     fn audit_contrast_reports_zero_violations_on_a_background_image_only_box() {
         // fixtures/bg-image.html's `.tile` sets `color: #ffffff` but only a
-        // `background-image` (no `background-color` of its own) -- per
-        // `raster::effective_background`'s own documented caveat, this
-        // means its effective background resolves to the page canvas
-        // (white), so `repair_fg` engages and turns the text black. The
-        // AUDIT checks the REPAIRED color, so this must still report clean.
+        // `background-image` (no `background-color` of its own) --
+        // `raster::effective_background` returns `None` (indeterminate: a
+        // real image it can't sample) for this run, and this audit skips
+        // any run it can't assess rather than flagging it -- so this must
+        // report clean, same as every other fixture.
         let violations = audit_contrast("fixtures/bg-image.html").expect("bg-image.html should render");
         assert!(violations.is_empty(), "expected no contrast violations, got: {violations:?}");
     }
