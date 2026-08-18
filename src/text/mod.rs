@@ -9,9 +9,16 @@
 //! advance widths, no complex-script shaping — the inline engine (P6) breaks
 //! lines given these advances. v0 is monospace (matches tty cells);
 //! double-width scripts and proportional fonts are later refinements.
+//!
+//! [`translit`] (packet t2-glyph-fallback) is the shared fb/tty seam that
+//! maps a character the atlas still can't render (after its Latin-1
+//! extension — see `glyphs`' own doc comment) to an ASCII stand-in, or
+//! drops it with a counted, documented default — see that module's own doc
+//! comment for the full resolution order.
 
 pub mod bitmap;
 pub(crate) mod glyphs;
+pub mod translit;
 
 pub use bitmap::BitmapFont;
 

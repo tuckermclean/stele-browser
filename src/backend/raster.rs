@@ -307,15 +307,28 @@ fn border_px(side: &BorderSide) -> Option<(u32, Color)> {
 /// color` directly here) because computing it needs the whole fragment
 /// slice (`effective_background`), which this single-fragment helper has
 /// no access to and shouldn't need to.
+///
+/// Packet t2-glyph-fallback: `text` is sanitized through
+/// `text::translit::resolve` BEFORE the `TextRun` is even built — every
+/// character `Surface::draw_text` (`MemSurface::draw_text`, `surface/
+/// mem.rs`) ever rasterizes a glyph bitmap for is therefore already
+/// atlas-renderable by construction (a real Latin-1/ASCII char, or an ASCII
+/// transliteration of one that wasn't), so that module needed no changes at
+/// all for this packet — see `text::translit`'s own module doc for the full
+/// resolution order, shared verbatim with `backend::tty::write_marker`.
 fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline: f32, style: &ComputedStyle, ink: Color) {
     if text.is_empty() {
+        return;
+    }
+    let sanitized = crate::text::translit::resolve(text);
+    if sanitized.is_empty() {
         return;
     }
     let x = to_i32(finite_or(rect.origin.x, 0.0));
     let top_y = finite_or(rect.origin.y, 0.0);
     let bl = finite_or(baseline, 0.0);
     let baseline_px = to_i32(top_y + bl);
-    let run = TextRun { text, x, baseline: baseline_px, size_px: style.font_size, color: ink };
+    let run = TextRun { text: &sanitized, x, baseline: baseline_px, size_px: style.font_size, color: ink };
     surface.draw_text(&run);
 }
 

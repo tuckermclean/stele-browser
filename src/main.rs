@@ -29,6 +29,7 @@ use stele::layout::box_tree::build_box_tree;
 use stele::layout::{self, Size};
 use stele::style::{self, cascade};
 use stele::surface::{Color, MemSurface};
+use stele::text::translit;
 
 /// Default terminal width in character cells for `--dump-text` when
 /// `--cols` isn't given.
@@ -326,21 +327,30 @@ fn plural(n: u32) -> &'static str {
     }
 }
 
-/// Render a [`StatsCounts`] snapshot as the one-line, deterministic summary
-/// `--stats` prints, e.g. `"stele --stats: 3 ignored declarations, 1
-/// ignored at-rule, 2 media blocks"` — the exact format named in the packet
-/// brief. `media_at_rules` is worded as "media blocks" (matching the brief's
-/// own example) rather than "media at-rules", since "block" is what a reader
-/// unfamiliar with CSS at-rule terminology will recognize from `@media { }`.
-fn format_stats_line(counts: StatsCounts) -> String {
+/// Render a [`StatsCounts`] snapshot plus `missing_glyphs` (packet
+/// t2-glyph-fallback) as the one-line, deterministic summary `--stats`
+/// prints, e.g. `"stele --stats: 3 ignored declarations, 1 ignored at-rule,
+/// 2 media blocks, 4 missing glyphs"`. The first three fields are the exact
+/// format named in the original M5 packet brief; `missing_glyphs` extends it
+/// (feeds a future Provenance pane) — the count of characters that fell
+/// through `text::translit::resolve`'s atlas + transliteration resolution to
+/// its skip-and-count default, across the SAME document `--dump-text`/
+/// `--dump-png` would actually render (see [`count_missing_glyphs`]'s own
+/// doc comment). `media_at_rules` is worded as "media blocks" (matching the
+/// brief's own example) rather than "media at-rules", since "block" is what
+/// a reader unfamiliar with CSS at-rule terminology will recognize from
+/// `@media { }`.
+fn format_stats_line(counts: StatsCounts, missing_glyphs: u32) -> String {
     format!(
-        "stele --stats: {} ignored declaration{}, {} ignored at-rule{}, {} media block{}",
+        "stele --stats: {} ignored declaration{}, {} ignored at-rule{}, {} media block{}, {} missing glyph{}",
         counts.ignored_declarations,
         plural(counts.ignored_declarations),
         counts.ignored_at_rules,
         plural(counts.ignored_at_rules),
         counts.media_at_rules,
         plural(counts.media_at_rules),
+        missing_glyphs,
+        plural(missing_glyphs),
     )
 }
 
@@ -379,7 +389,61 @@ fn print_stats(source: &str, viewport_width_px: f32) {
         }
         Err(_) => Vec::new(),
     };
-    eprintln!("{}", format_stats_line(aggregate_stats(&sheets)));
+    let missing_glyphs = count_missing_glyphs(&build_fragments_for_stats(source, viewport_width_px));
+    eprintln!("{}", format_stats_line(aggregate_stats(&sheets), missing_glyphs));
+}
+
+/// Build the SAME `layout::Fragment` list `dump_text_opts`/`dump_png_opts`
+/// would lay out for `source` at `viewport_width_px` — `--stats`'s own
+/// independent read for [`count_missing_glyphs`] (packet t2-glyph-fallback),
+/// same "separate pass, never threaded through the real render path" posture
+/// [`print_stats`]'s own doc comment already establishes for the CSS-refusal
+/// half of `--stats`. NOT the backend's own render step (`tty::render`/
+/// `raster::paint` are never called here) — only `layout::layout`'s
+/// fragments are needed, since [`count_missing_glyphs`] reads `Text`
+/// fragment strings directly.
+///
+/// Total, mirroring `dump_text_opts`/`dump_png_opts`'s own totality
+/// contract: a fetch failure, a frameset document (out of scope for this
+/// counter, same carve-out as `blank_png`'s own frameset note), or an
+/// empty/`display:none`-everything document all yield an empty `Vec` rather
+/// than panicking — `count_missing_glyphs` is already total over an empty
+/// slice (zero missing glyphs), so no separate error path is needed here.
+fn build_fragments_for_stats(source: &str, viewport_width_px: f32) -> Vec<layout::Fragment> {
+    let url = resolve_url(source);
+    let Ok(response) = fetch_response(&url) else { return Vec::new() };
+    let html = String::from_utf8_lossy(&response.body);
+    let dom_tree = dom::parser::parse(&html);
+    if frames::find_frameset(&dom_tree).is_some() {
+        return Vec::new();
+    }
+    let author_sheets =
+        stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, viewport_width_px, style::ColorScheme::Light);
+    let styles = cascade::cascade(&dom_tree, &author_sheets);
+    let Some(root) = build_box_tree(&dom_tree, &styles, &HashMap::new()) else { return Vec::new() };
+    let viewport = Size { w: viewport_width_px, h: HEADLESS_VIEWPORT_HEIGHT };
+    layout::layout(&root, viewport)
+}
+
+/// Count characters that fall through `text::translit::resolve`'s atlas +
+/// transliteration resolution (packet t2-glyph-fallback) to its
+/// skip-and-count default, across every `Text` fragment in `fragments` —
+/// the SAME per-char resolution `backend::tty::write_marker`/`backend::
+/// raster::paint_text` apply when actually rendering, run here purely for
+/// counting (the grid/surface `resolve`'s output would paint into is never
+/// materialized). Resets the shared thread-local counter first (`text::
+/// translit::reset_missing_glyph_count`) so an unrelated earlier call on
+/// this thread can never leak into this total — total over an empty slice
+/// (zero) and over any fragment slice, since `translit::resolve` itself is
+/// total over any `&str`.
+fn count_missing_glyphs(fragments: &[layout::Fragment]) -> u32 {
+    translit::reset_missing_glyph_count();
+    for f in fragments {
+        if let layout::FragmentKind::Text { text: fragment_text, .. } = &f.kind {
+            let _ = translit::resolve(fragment_text);
+        }
+    }
+    translit::missing_glyph_count()
 }
 
 /// Packet t1b-color-scheme: stamp `data-theme="<scheme>"` and
@@ -2655,18 +2719,21 @@ mod tests {
     #[test]
     fn format_stats_line_matches_the_documented_shape() {
         let counts = StatsCounts { ignored_declarations: 3, ignored_at_rules: 1, media_at_rules: 2 };
-        assert_eq!(format_stats_line(counts), "stele --stats: 3 ignored declarations, 1 ignored at-rule, 2 media blocks");
+        assert_eq!(
+            format_stats_line(counts, 4),
+            "stele --stats: 3 ignored declarations, 1 ignored at-rule, 2 media blocks, 4 missing glyphs"
+        );
     }
 
     #[test]
     fn format_stats_line_pluralizes_singular_and_plural_correctly() {
         assert_eq!(
-            format_stats_line(StatsCounts::default()),
-            "stele --stats: 0 ignored declarations, 0 ignored at-rules, 0 media blocks"
+            format_stats_line(StatsCounts::default(), 0),
+            "stele --stats: 0 ignored declarations, 0 ignored at-rules, 0 media blocks, 0 missing glyphs"
         );
         assert_eq!(
-            format_stats_line(StatsCounts { ignored_declarations: 1, ignored_at_rules: 1, media_at_rules: 1 }),
-            "stele --stats: 1 ignored declaration, 1 ignored at-rule, 1 media block"
+            format_stats_line(StatsCounts { ignored_declarations: 1, ignored_at_rules: 1, media_at_rules: 1 }, 1),
+            "stele --stats: 1 ignored declaration, 1 ignored at-rule, 1 media block, 1 missing glyph"
         );
     }
 
@@ -2682,7 +2749,10 @@ mod tests {
         assert_eq!(counts.ignored_declarations, 2);
         assert_eq!(counts.ignored_at_rules, 1);
         assert_eq!(counts.media_at_rules, 0);
-        assert_eq!(format_stats_line(counts), "stele --stats: 2 ignored declarations, 1 ignored at-rule, 0 media blocks");
+        assert_eq!(
+            format_stats_line(counts, 0),
+            "stele --stats: 2 ignored declarations, 1 ignored at-rule, 0 media blocks, 0 missing glyphs"
+        );
     }
 
     #[test]
@@ -2701,6 +2771,63 @@ mod tests {
         // "all zeros" claim is separately proven by the compiled-binary CLI
         // test in tests/stats_cli.rs.
         print_stats("fixtures/does-not-exist-nope.html", 640.0);
+    }
+
+    // -------------------------------------- missing-glyph counter (t2-glyph-fallback)
+
+    #[test]
+    fn count_missing_glyphs_is_zero_for_an_empty_fragment_slice() {
+        assert_eq!(count_missing_glyphs(&[]), 0);
+    }
+
+    #[test]
+    fn count_missing_glyphs_counts_across_multiple_text_fragments() {
+        use stele::layout::{Point, Rect, Size as LSize};
+        use stele::style::ComputedStyle;
+        let text_fragment = |s: &str| layout::Fragment {
+            rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 8.0, h: 16.0 } },
+            kind: layout::FragmentKind::Text { text: s.to_string(), baseline: 12.0, style: ComputedStyle::default() },
+            interactive: None,
+        };
+        // One emoji (missing) in the first fragment, an ASCII-only second
+        // fragment (nothing missing), a CJK pair (two missing) in the third.
+        let fragments = vec![text_fragment("hi \u{1F600}"), text_fragment("plain text"), text_fragment("\u{65E5}\u{672C}")];
+        assert_eq!(count_missing_glyphs(&fragments), 3);
+    }
+
+    #[test]
+    fn count_missing_glyphs_ignores_box_and_image_fragments() {
+        use stele::img::RgbaImage;
+        use stele::layout::{Point, Rect, Size as LSize};
+        use stele::style::ComputedStyle;
+        let fragments = vec![
+            layout::Fragment {
+                rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 10.0, h: 10.0 } },
+                kind: layout::FragmentKind::Box { style: ComputedStyle::default() },
+                interactive: None,
+            },
+            layout::Fragment {
+                rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 32.0, h: 32.0 } },
+                kind: layout::FragmentKind::Image { image: RgbaImage::new(1, 1) },
+                interactive: None,
+            },
+        ];
+        assert_eq!(count_missing_glyphs(&fragments), 0, "non-Text fragments carry no char content to count");
+    }
+
+    #[test]
+    fn build_fragments_for_stats_is_empty_on_a_fetch_failure_not_a_panic() {
+        assert!(build_fragments_for_stats("fixtures/does-not-exist-nope.html", 640.0).is_empty());
+    }
+
+    #[test]
+    fn stats_pipeline_reports_missing_glyphs_for_a_real_document() {
+        // fixtures/punctuation.html (packet t2-glyph-fallback) has genuinely
+        // unmappable characters by design (see that fixture's own comments)
+        // -- proves the wiring end to end, not just the pure counting helper.
+        let fragments = build_fragments_for_stats("fixtures/punctuation.html", 640.0);
+        assert!(!fragments.is_empty(), "fixture should lay out real content");
+        assert!(count_missing_glyphs(&fragments) > 0, "fixtures/punctuation.html should report at least one missing glyph");
     }
 
     // ------------------------------------------------- --audit-contrast (T1c)

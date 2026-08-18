@@ -698,13 +698,29 @@ fn set_grid_ch(rows: &mut [Vec<Cell>], row: usize, col: usize, ch: char, fg: Col
 /// draw from) leaves each cell's `fg` at whatever it already was (the grid
 /// default unless something upstream already colored it). Either way `bg`
 /// is left untouched — see module docs' "text keeps the box's bg" rule.
+///
+/// Packet t2-glyph-fallback: `text` is run through `text::translit::resolve`
+/// FIRST — every char this backend actually writes into a cell is either a
+/// real atlas-covered character, an ASCII transliteration of one that
+/// isn't, or (for a genuinely unrepresentable char) simply absent. This
+/// keeps a `--dump-text` golden and a `--dump-png` screenshot of the SAME
+/// document in agreement about what the document's punctuation reads as —
+/// see `text::translit`'s own module doc for the full resolution order and
+/// why this backend, which has no glyph RASTERIZER of its own, still needs
+/// it (the atlas is the single source of truth for "can Stele represent
+/// this character," not just a PNG-path concern). One consequence: the
+/// number of chars WRITTEN can differ from `text.chars().count()` (e.g. an
+/// ellipsis becomes three `.`s, an unmappable emoji becomes zero chars) —
+/// `col` advances by however many characters the SANITIZED string actually
+/// contains, same as a real terminal echoing whatever bytes it's given.
 fn write_marker(rows: &mut [Vec<Cell>], fragment: &Fragment, text: &str, fg: Option<Color>, cols: usize) {
     let row = cell_index(fragment.rect.origin.y, CELL_H);
     if row >= rows.len() {
         return;
     }
     let mut col = cell_index(fragment.rect.origin.x, CELL_W);
-    for ch in text.chars() {
+    let sanitized = crate::text::translit::resolve(text);
+    for ch in sanitized.chars() {
         if col >= cols {
             break;
         }
@@ -1460,12 +1476,38 @@ mod tests {
 
     #[test]
     fn multi_byte_utf8_is_placed_by_char_not_byte() {
-        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "é日x")];
+        // packet t2-glyph-fallback: '日' moved out of this fixture -- CJK is
+        // genuinely unmappable (no atlas glyph, no transliteration), so
+        // `write_marker`'s new `translit::resolve` pass now correctly DROPS
+        // it (see `write_marker_transliterates_and_skips_via_the_shared_
+        // translit_seam` below for that behavior in isolation). This test's
+        // own concern -- multi-byte UTF-8 placed by CHAR, not byte -- still
+        // needs two differently-byte-wide characters that both survive
+        // resolve(): 'é' is 2 UTF-8 bytes (Latin-1, atlas-covered,
+        // unchanged), '—' (em dash) is 3 UTF-8 bytes and transliterates to a
+        // single ASCII '-' -- a byte-indexed (rather than char-indexed) bug
+        // would misplace either.
+        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "é—x")];
         let grid = render(&fragments, 10);
         let row = grid.row_text(0);
         assert_eq!(row.chars().nth(0), Some('é'));
-        assert_eq!(row.chars().nth(1), Some('日'));
+        assert_eq!(row.chars().nth(1), Some('-'));
         assert_eq!(row.chars().nth(2), Some('x'));
+    }
+
+    // --------------------------------------- translit integration (t2)
+
+    #[test]
+    fn write_marker_transliterates_and_skips_via_the_shared_translit_seam() {
+        // packet t2-glyph-fallback: every Text fragment's string is run
+        // through `text::translit::resolve` before being written into grid
+        // cells -- an em dash transliterates to '-', and a genuinely
+        // unmappable CJK char is dropped entirely (not tofu, not the raw
+        // char) -- see `text::translit`'s own module doc for the full
+        // resolution order this backend and `backend::raster` both share.
+        let fragments = vec![text_fragment(0.0, 0.0, 80.0, 16.0, "a\u{2014}b\u{65E5}c")];
+        let grid = render(&fragments, 10);
+        assert_eq!(grid.row_text(0).trim_end(), "a-bc", "em dash transliterates to '-', CJK char is dropped entirely");
     }
 
     #[test]

@@ -66,7 +66,7 @@ fn stats_flag_prints_the_aggregated_line_to_stderr_and_leaves_stdout_unchanged()
     let stderr = String::from_utf8_lossy(&with_stats.stderr);
     assert_eq!(
         stderr.trim_end(),
-        "stele --stats: 2 ignored declarations, 1 ignored at-rule, 0 media blocks",
+        "stele --stats: 2 ignored declarations, 1 ignored at-rule, 0 media blocks, 0 missing glyphs",
         "unexpected --stats stderr line: {stderr:?}"
     );
     assert!(
@@ -91,7 +91,37 @@ fn stats_flag_with_no_author_css_prints_all_zeros() {
     assert!(out.status.success());
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(stderr.trim_end(), "stele --stats: 0 ignored declarations, 0 ignored at-rules, 0 media blocks");
+    assert_eq!(stderr.trim_end(), "stele --stats: 0 ignored declarations, 0 ignored at-rules, 0 media blocks, 0 missing glyphs");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn stats_flag_counts_missing_glyphs_for_unmappable_characters() {
+    // packet t2-glyph-fallback: a document with genuinely-unmappable
+    // characters (an emoji and a CJK pair -- neither atlas-covered nor
+    // transliterable, per `text::translit`'s documented resolution order)
+    // must report a nonzero missing-glyph count, while its ASCII-only
+    // sibling above reports zero -- proves the counter is wired through the
+    // real CLI, not just the pure library-level helpers `main.rs`'s own unit
+    // tests already cover.
+    let path = std::env::temp_dir().join(format!("stele-stats-cli-missing-glyphs-{}.html", std::process::id()));
+    std::fs::write(&path, "<p>emoji: \u{1F600} cjk: \u{65E5}\u{672C}</p>").expect("write scratch fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_stele"))
+        .args(["--headless", "--dump-text"])
+        .arg(&path)
+        .arg("--stats")
+        .output()
+        .expect("run stele --dump-text --stats");
+    assert!(out.status.success());
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.trim_end(),
+        "stele --stats: 0 ignored declarations, 0 ignored at-rules, 0 media blocks, 3 missing glyphs",
+        "unexpected --stats stderr line: {stderr:?}"
+    );
 
     let _ = std::fs::remove_file(&path);
 }

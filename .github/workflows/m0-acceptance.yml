@@ -36,21 +36,29 @@ jobs:
           echo "CROSS_COMPILE=$CROSS_COMPILE"
           command -v "${CROSS_COMPILE}gcc"
 
-      # Host-target unit tests: the contract-tested logic (parser, cascade,
-      # cookies, entity/line-break) runs natively here on the pinned nightly
-      # (rust-toolchain.toml). Folded into this container job to avoid a second
-      # image pull. Runs before the i486 cross build; a red test fails CI.
-      - name: Unit tests (host target)
-        run: |
-          set -euxo pipefail
-          cargo test --workspace --locked
-
       # A3 (tty golden): host-native, no qemu/i486 involvement, but IS
       # cargo-dependent — this job carries the pinned toolchain
       # (rust-toolchain.toml), the `accept` job below does not (qemu-user +
       # file only). `--tty-only` runs just this check under that pin,
       # reproducibly (no `+nightly`/floating-toolchain override — charter
       # C9). A1/A4 (the i486/qemu checks) stay in the `accept` job.
+      #
+      # packet t2-glyph-fallback: moved ahead of "Unit tests" below (was
+      # originally the other way around) — a stale golden anywhere in
+      # `cargo test --workspace` (an EXISTING `include_str!`/`include_bytes!`
+      # golden gone stale because a shared render path legitimately changed,
+      # not just a brand-new fixture with no golden yet) used to hard-block
+      # this whole job at the "Unit tests" step, which has no `if: always()`,
+      # which meant NEITHER this step NOR "Upload host binary" below ever
+      # ran — so the one artifact needed to bless that stale golden could
+      # never be produced. Building+uploading the host binary FIRST, unit
+      # tests SECOND (also `if: always()` now, see below), breaks that
+      # deadlock: this step's own `cargo build --release` (inside `accept.sh
+      # --tty-only`'s A3 section) always runs, so the binary always reaches
+      # the artifact, regardless of whether accept.sh's OWN checks (or the
+      # later unit-test step) pass. `cargo test` is still exactly as strict
+      # as before — it still runs and still fails the job on a red test —
+      # it just no longer gates whether the blessing tool exists.
       - name: Acceptance — A3 tty golden (host, pinned toolchain)
         run: |
           set -euxo pipefail
@@ -80,6 +88,21 @@ jobs:
           name: stele-host
           path: target/release/stele
           if-no-files-found: error
+
+      # Host-target unit tests: the contract-tested logic (parser, cascade,
+      # cookies, entity/line-break) runs natively here on the pinned nightly
+      # (rust-toolchain.toml). Folded into this container job to avoid a second
+      # image pull. `if: always()` (packet t2-glyph-fallback) for the same
+      # reason "Upload host binary" above already has it: this step must
+      # still run its real signal even when the PRECEDING accept.sh step
+      # failed (e.g. mid-blessing-dance, same as this job's own artifact
+      # step) — a red test still fails the job either way, this only
+      # decouples "did tests pass" from "is the blessing binary available".
+      - name: Unit tests (host target)
+        if: always()
+        run: |
+          set -euxo pipefail
+          cargo test --workspace --locked
 
       - name: Build i486 release binary (canonical pipeline)
         run: |

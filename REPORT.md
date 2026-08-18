@@ -106,6 +106,7 @@ in `JOURNAL.md`.
 | `jpeg-decoder` (0.3, no rayon) | JPEG decode | MIT / Apache-2.0 |
 | `gif` (0.13) | GIF decode | MIT / Apache-2.0 |
 | **font8x8_basic** (embedded atlas, `src/text/glyphs.rs`) | bitmap font | **Public Domain** (github.com/dhepper/font8x8) |
+| **font8x8_ext_latin** (Latin-1 supplement, `src/text/glyphs.rs`, packet t2-glyph-fallback) | bitmap font | **Public Domain** (github.com/dhepper/font8x8) |
 
 All else is `std`. HTTP, CSS, HTML parsing, the inline/table/float/frame
 layout, and the fb backend are bespoke and in-house.
@@ -126,9 +127,15 @@ layout, and the fb backend are bespoke and in-house.
 - **Cookie-jar file persistence** (charter C6) — the jar exists and is wired
   into HTTP; cross-invocation plain-file persistence is not wired.
 - **Rendering fidelity nits** — `<pre>` whitespace preserved (currently
-  collapsed); `&nbsp;` as a non-collapsing space (currently collapses); Unicode
-  glyphs beyond ASCII (bitmap font is ASCII; non-ASCII → tofu box); CMYK/16-bit
-  JPEG and APNG (Unsupported, fall back to alt).
+  collapsed); `&nbsp;` as a non-collapsing space (currently collapses);
+  CMYK/16-bit JPEG and APNG (Unsupported, fall back to alt). Unicode glyphs
+  beyond ASCII: **narrowed** by packet t2-glyph-fallback — the atlas now
+  covers Latin-1 (`U+00A0..=U+00FF`) directly, and General-Punctuation
+  characters a real page actually leans on (em/en dash, curly quotes,
+  ellipsis, bullet, `×`, `→` — see `text::translit`) are transliterated to
+  plain ASCII at render time instead of showing tofu. Anything still outside
+  BOTH (CJK, emoji, ...) is now dropped and counted (`--stats`'s
+  "N missing glyphs"), not tofu'd — see `text::translit`'s own module doc.
 - **Stretch (M7, untouched by design)** — Lua chair, X11 backend, Transcript
   pane, no-libc spike.
 
