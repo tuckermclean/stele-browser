@@ -8,10 +8,16 @@
 //! Scope calls (see the P7 report / DECISIONS ledger):
 //!   - Only `img` is treated as a replaced element in v0 (per the packet
 //!     brief). Its intrinsic size comes from `width`/`height` attributes
-//!     when present and parseable as a non-negative finite number; otherwise
-//!     it defaults to 0x0 — a documented placeholder, not a guess at a "real"
-//!     image size, since no image is decoded on this path (that's P9's fb
-//!     backend).
+//!     when present and parseable as a non-negative finite number; when
+//!     BOTH are absent/unparseable, [`replaced_intrinsic`] falls back to the
+//!     already-decoded image's real pixel dimensions (bugfix, packet/
+//!     fix-local-img-loading — see that function's doc comment: this was
+//!     written when P7 genuinely had no decoded pixels to fall back to, but
+//!     M4's images packet (#22) started threading real `RgbaImage`s through
+//!     the `images` map this module already receives, and the attrs-only
+//!     path never got updated to use them); only when NEITHER an attribute
+//!     NOR a decoded image is available does it fall back further to 0x0 —
+//!     a documented placeholder, not a guess at a "real" image size.
 //!   - The DOM walk is capped at [`DEPTH_CAP`] nesting levels, mirroring
 //!     `layout::block`'s own (private, unexported) cap of the same value: a
 //!     deeply-nested/hostile document (thousands of levels) would otherwise
@@ -43,9 +49,10 @@ use crate::surface::Color;
 const DEPTH_CAP: usize = 100;
 
 /// The intrinsic size given to an `<img>` with no parseable `width`/`height`
-/// attribute. Zero-by-zero rather than a guessed placeholder box: no image is
-/// decoded on this path (P9 wires real pixel data + real intrinsic sizing),
-/// so any nonzero default would be pure fiction reflected into layout.
+/// attribute AND no decoded image to fall back to (see [`replaced_intrinsic`]).
+/// Zero-by-zero rather than a guessed placeholder box: with truly nothing to
+/// go on (no attrs, no successful decode), any nonzero default would be pure
+/// fiction reflected into layout.
 const DEFAULT_IMG_INTRINSIC: Size = Size { w: 0.0, h: 0.0 };
 
 /// Build the frozen `LayoutNode` box tree from a parsed + cascaded DOM.
@@ -102,9 +109,10 @@ fn build_node<'a>(
             if is_replaced(el) {
                 let mut style = style;
                 apply_align_float_hint(el, &mut style);
+                let decoded = images.get(&id).cloned();
                 return Some(LayoutNode {
                     style,
-                    content: BoxContent::Replaced { intrinsic: img_intrinsic(el), image: images.get(&id).cloned() },
+                    content: BoxContent::Replaced { intrinsic: replaced_intrinsic(el, decoded.as_deref()), image: decoded },
                     children: Vec::new(),
                     interactive: None,
                 });
@@ -309,6 +317,46 @@ fn img_intrinsic(el: &Element) -> Size {
     let w = parse_nonneg(el.attrs.get("width")).unwrap_or(DEFAULT_IMG_INTRINSIC.w);
     let h = parse_nonneg(el.attrs.get("height")).unwrap_or(DEFAULT_IMG_INTRINSIC.h);
     Size { w, h }
+}
+
+/// A replaced element's (`<img>`'s) intrinsic size: [`img_intrinsic`]'s
+/// attrs-only size when EITHER `width` or `height` parsed to something
+/// nonzero (an explicit attribute always wins — an author sizing a large
+/// image down via HTML attributes must not have that overridden by the
+/// image's real pixel dimensions); otherwise, when `decoded` holds a
+/// successfully fetched+decoded [`RgbaImage`] (the `images` map `build_node`
+/// already looked this `NodeId` up in), that image's own real width/height;
+/// otherwise [`DEFAULT_IMG_INTRINSIC`] (0x0) — no attrs and no decode means
+/// truly nothing to size the box from.
+///
+/// Bugfix (packet/fix-local-img-loading): before this, an `<img>` with no
+/// `width`/`height` attributes got 0x0 unconditionally, even when `decoded`
+/// was `Some` — the box collapsed to nothing and `layout`/`raster::paint`
+/// had no nonzero rect to draw the (perfectly-decoded) image into, so it
+/// rendered as blank pixels despite the fetch+decode having fully succeeded.
+/// See the module doc comment's "Scope calls" bullet for why the old 0x0-
+/// always behavior was correct when P7 wrote it but stopped being correct
+/// once M4's images packet (#22) started decoding real pixels on this path.
+///
+/// Pre-existing ambiguity, not introduced here: `img_intrinsic` already
+/// can't distinguish an explicit `width="0"`/`height="0"` from an absent
+/// attribute (`parse_nonneg` accepts `0.0`, and `DEFAULT_IMG_INTRINSIC` IS
+/// `0.0`) — both collapse to the same `Size { w: 0.0, h: 0.0 }`. This
+/// function inherits that: a real (vanishingly rare, untested-in-any-
+/// fixture) `width="0" height="0"` author hint would fall back to the
+/// decoded size same as a genuinely absent attribute, rather than staying
+/// pinned at 0x0. Not a regression — the pre-fix code already couldn't tell
+/// the two cases apart either, it just always resolved the ambiguity to 0x0
+/// instead of to the decoded size.
+fn replaced_intrinsic(el: &Element, decoded: Option<&RgbaImage>) -> Size {
+    let attrs = img_intrinsic(el);
+    if attrs.w != DEFAULT_IMG_INTRINSIC.w || attrs.h != DEFAULT_IMG_INTRINSIC.h {
+        return attrs;
+    }
+    match decoded {
+        Some(image) => Size { w: image.width as f32, h: image.height as f32 },
+        None => attrs,
+    }
 }
 
 /// Map the real 1996 `<img align=left|right>` presentational HTML attribute
@@ -1565,6 +1613,88 @@ mod tests {
             BoxContent::Replaced { intrinsic, .. } => {
                 assert_eq!(intrinsic.w, 0.0);
                 assert_eq!(intrinsic.h, 0.0);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Bugfix (packet/fix-local-img-loading): an `<img>` with NO `width`/
+    /// `height` attributes used to get [`DEFAULT_IMG_INTRINSIC`] (0x0) even
+    /// when its `src` had already been fetched+decoded into a real
+    /// `RgbaImage` sitting right there in the `images` map this function
+    /// already reads (see the very next line for `image:`). That 0x0
+    /// intrinsic size collapses the `Replaced` box to nothing — the image
+    /// never gets a nonzero rect for `layout`/`raster::paint` to draw into,
+    /// so a perfectly-decoded local image renders as blank pixels. This is
+    /// real-world-reachable: `tools/render-gallery.sh`'s own generated
+    /// `<img src="basic.png" alt="... render" loading="lazy">` (no
+    /// `width`/`height` at all) is exactly this shape, which is why opening
+    /// its `index.html` in Stele showed every thumbnail blank.
+    ///
+    /// The module doc comment's old "no image is decoded on this path
+    /// (that's P9's fb backend)" rationale for the 0x0 default was true when
+    /// P7 (this file, #14) wrote it, but stopped being true once M4's images
+    /// packet (#22) started threading real decoded pixels through the very
+    /// `images: &HashMap<NodeId, Rc<RgbaImage>>` parameter `build_node`
+    /// already has in scope — `img_intrinsic(el)` (attrs-only) just never
+    /// got updated to consult it. The fix: when neither attribute parses
+    /// (both default to 0.0 — `img_element_without_dimensions_defaults_to_
+    /// zero_intrinsic` above still pins that case when NO decoded image is
+    /// available either), fall back to the decoded image's own real pixel
+    /// dimensions before falling back further to 0x0.
+    #[test]
+    fn img_element_without_dimensions_falls_back_to_the_decoded_images_real_intrinsic_size() {
+        let d = dom::parser::parse(r#"<img src="x.png">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let img_id = find(&d, "img").expect("img node present");
+
+        let decoded = Rc::new(RgbaImage { width: 7, height: 3, pixels: vec![9, 9, 9, 255].repeat(21) });
+        let mut images = HashMap::new();
+        images.insert(img_id, decoded);
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match img.content {
+            BoxContent::Replaced { intrinsic, .. } => {
+                assert_eq!(intrinsic.w, 7.0, "should fall back to the decoded image's real width, not 0");
+                assert_eq!(intrinsic.h, 3.0, "should fall back to the decoded image's real height, not 0");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// An explicit `width`/`height` attribute still wins over the decoded
+    /// image's real size (e.g. an author scaling a large image down via
+    /// HTML attributes) -- the fallback above only applies when NEITHER
+    /// attribute parses, never as an override.
+    #[test]
+    fn img_element_with_explicit_dimensions_ignores_the_decoded_images_real_size() {
+        let d = dom::parser::parse(r#"<img src="x.png" width="40" height="20">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let img_id = find(&d, "img").expect("img node present");
+
+        let decoded = Rc::new(RgbaImage { width: 7, height: 3, pixels: vec![9, 9, 9, 255].repeat(21) });
+        let mut images = HashMap::new();
+        images.insert(img_id, decoded);
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        fn find_img(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_img)
+        }
+        let img = find_img(&root).expect("img box present");
+        match img.content {
+            BoxContent::Replaced { intrinsic, .. } => {
+                assert_eq!(intrinsic.w, 40.0);
+                assert_eq!(intrinsic.h, 20.0);
             }
             _ => unreachable!(),
         }

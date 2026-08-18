@@ -3,7 +3,7 @@
 
 use std::io::Write;
 
-use stele::fetch::file::FileFetcher;
+use stele::fetch::file::{file_path, FileFetcher};
 use stele::fetch::{Fetch, FetchError, Method, Request, Url};
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -64,4 +64,40 @@ fn non_file_scheme_is_unsupported() {
         Err(FetchError::UnsupportedScheme(_)) => {}
         other => panic!("expected UnsupportedScheme, got {:?}", other),
     }
+}
+
+// -- `file_path` extraction (packet/fix-local-img-loading) -----------------
+//
+// Same "investigating a local <img> renders blank report" motivation as
+// `tests/fetch_url.rs`'s new `file://` resolution cases: pin down that
+// `file_path` extracts the right filesystem path from both a RELATIVE-
+// resolved and an ABSOLUTE `file://` URL, regardless of how many directory
+// segments are involved — the exact two shapes the report called out.
+
+#[test]
+fn file_path_extracts_a_simple_absolute_path() {
+    assert_eq!(file_path(&Url::new("file:///tmp/dir/doc.html")).unwrap(), "/tmp/dir/doc.html");
+}
+
+#[test]
+fn file_path_extracts_the_result_of_resolving_a_relative_img_src() {
+    let base = Url::new("file:///tmp/dir/doc.html");
+    let resolved = base.resolve("pic.png");
+    assert_eq!(resolved.as_str(), "file:///tmp/dir/pic.png");
+    assert_eq!(file_path(&resolved).unwrap(), "/tmp/dir/pic.png");
+}
+
+#[test]
+fn file_path_extracts_the_result_of_resolving_an_absolute_img_src() {
+    let base = Url::new("file:///tmp/dir/doc.html");
+    let resolved = base.resolve("file:///other/pic.png");
+    assert_eq!(resolved.as_str(), "file:///other/pic.png");
+    assert_eq!(file_path(&resolved).unwrap(), "/other/pic.png");
+}
+
+#[test]
+fn file_path_round_trips_a_deeper_multi_segment_directory() {
+    let base = Url::new("file:///tmp/a/b/c/doc.html");
+    let resolved = base.resolve("pic.png");
+    assert_eq!(file_path(&resolved).unwrap(), "/tmp/a/b/c/pic.png");
 }
