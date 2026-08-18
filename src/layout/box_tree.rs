@@ -948,7 +948,7 @@ fn build_list_container_node<'a>(
         // Display::Block` stopgap could not tell them apart (see
         // `fixtures/evidence/css1-float-5526c.diagnosis.md` for that
         // prior gap).
-        let is_item = tag_is_li && node.style.display == Display::Block;
+        let is_item = tag_is_li && node.style.display == Display::ListItem;
         if is_item {
             if let Some(marker) = marker_text(node.style.list_style_type, ordinal) {
                 node.children.insert(0, marker_node(&marker, &node.style));

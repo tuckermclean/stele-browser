@@ -74,7 +74,7 @@ ol { list-style-type: decimal; }
    contract this replaces (packet #58's `tag_is_li && display == Block`
    stopgap, which could not tell "author wrote block on purpose" apart from
    the UA default). */
-li { display: block; }
+li { display: list-item; }
 
 blockquote { margin: 1em 40px; }
 /* `<hr>` (packet/hr-rule): a void element with no content of its own -- a
