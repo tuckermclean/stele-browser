@@ -14,12 +14,18 @@
 //! Mirrors `tests/layout_floats.rs`'s own discipline: real pipeline, no
 //! pixel golden here (that's `tests/css1_float_golden.rs`, once blessed),
 //! `Fragment` rects asserted directly. Every fixture below is a bare list of
-//! `<div>`s as the ONLY body content (no intermediate width-narrower wrapper
-//! `<div>`) so each float's containing block is `<body>` itself (UA sheet
-//! default `body { margin: 8px; }`, `src/style/ua.rs:39`) -- this sidesteps
-//! a documented taffy 0.13 float_layout rough edge (`compute/block.rs`'s own
-//! "TODO: handle nested blocks with different widths" comment) that isn't
-//! exercised by `fixtures/css1-float-5526c.html` either (its own floated
+//! `<div>`s -- no `<html>`/`<body>` wrapper tags (matching this whole test
+//! suite's own fragment convention, e.g. `tests/layout_floats.rs`): `dom::
+//! parser::parse`'s root is always a SYNTHETIC `<html>` (`src/dom/parser.rs`
+//! docs), and with no explicit `<body>` tag in the source, no `<body>`
+//! ELEMENT is ever created, so the UA sheet's `body { margin: 8px; }`
+//! (`src/style/ua.rs:39`) never matches anything -- content sits flush
+//! against the (unstyled) synthetic `<html>` root's content edges, `(0,
+//! 0)`..`(viewport_w, ...)`. This also sidesteps a documented taffy 0.13
+//! float_layout rough edge (`compute/block.rs`'s own "TODO: handle nested
+//! blocks with different widths" comment) by never introducing an
+//! intermediate width-narrower wrapper `<div>` -- exactly how
+//! `fixtures/css1-float-5526c.html` itself is shaped too (its floated
 //! `dt`/`dd`/`li`/`blockquote`/`h1` are all DIRECT children of an unsized
 //! `<dl>`/`<ul>`, which themselves inherit their parent's full width, never
 //! narrower).
@@ -97,8 +103,10 @@ fn two_float_left_siblings_sit_side_by_side_not_stacked() {
     assert!(overlaps, "float A (y={}) and float B (y={}) must occupy overlapping vertical space", a.origin.y, b.origin.y);
 }
 
-/// A `float: right` block sits at its containing block's (here, `<body>`'s
-/// own content box, UA-sheet `margin: 8px` on every side) RIGHT edge.
+/// A `float: right` block sits at its containing block's (here, the
+/// synthetic `<html>` root's own content box -- see module docs for why no
+/// `<body>` element, and hence no UA-sheet `body` margin, is in play here)
+/// RIGHT edge.
 #[test]
 fn float_right_block_sits_at_containing_blocks_right_edge() {
     let html = r#"<div style="float:right;width:50px;height:20px;background-color:rgb(200,0,0);"></div>"#;
@@ -108,9 +116,9 @@ fn float_right_block_sits_at_containing_blocks_right_edge() {
     let r = box_with_bg(&fragments, RED);
     assert_eq!(r.size, Size { w: 50.0, h: 20.0 });
 
-    // body's own right content edge = viewport width - the UA sheet's 8px
-    // margin (src/style/ua.rs:39).
-    let body_right_edge = viewport_w - 8.0;
+    // The root's own right content edge -- no margin/padding in play (see
+    // module docs), so it's simply the viewport width.
+    let body_right_edge = viewport_w;
     assert!(
         (r.origin.x + r.size.w - body_right_edge).abs() < 0.5,
         "float:right's right edge ({}) must sit at body's own content-box right edge ({})",
@@ -170,6 +178,23 @@ fn clear_both_is_pushed_below_both_floats_bottom_edges() {
     let right_float = box_with_bg(&fragments, GREEN);
     let cleared = box_with_bg(&fragments, BLUE);
 
+    // First prove the two floats actually floated (occupy overlapping
+    // vertical space, side by side) rather than stacking normally -- a
+    // no-op float implementation would stack left_float then right_float
+    // then cleared strictly in document order, which would ALSO happen to
+    // satisfy the two clearance assertions below (vacuously: plain
+    // monotonic stacking already puts everything after everything else).
+    // This overlap check is what makes this a real red/green test rather
+    // than one that accidentally passes pre-fix.
+    let floats_overlap = left_float.origin.y < right_float.origin.y + right_float.size.h
+        && right_float.origin.y < left_float.origin.y + left_float.size.h;
+    assert!(
+        floats_overlap,
+        "the left (y={}) and right (y={}) floats must occupy overlapping vertical space (i.e. actually float, not stack)",
+        left_float.origin.y,
+        right_float.origin.y
+    );
+
     let left_bottom = left_float.origin.y + left_float.size.h;
     let right_bottom = right_float.origin.y + right_float.size.h;
     assert!(
@@ -189,12 +214,12 @@ fn clear_both_is_pushed_below_both_floats_bottom_edges() {
 /// Nested float contexts: a floated block containing further floated
 /// children resolves those INNER floats against the INNER containing
 /// block's width (the floated parent's own resolved content width), not
-/// the OUTER (viewport/body) containing block's width. Four 40px-wide
-/// inner floats (160px total) do not fit in the 150px-wide floated parent,
-/// so the 4th must wrap onto a new row -- if the inner floats were (wrongly)
-/// resolving against the outer body content width (300 - 16px margin =
-/// 284px, comfortably >= 160px) all four would fit on one row and none
-/// would wrap. A floated block always establishes its own new block
+/// the OUTER (viewport) containing block's width. Four 40px-wide inner
+/// floats (160px total) do not fit in the 150px-wide floated parent, so the
+/// 4th must wrap onto a new row -- if the inner floats were (wrongly)
+/// resolving against the outer 300px viewport width (comfortably >= 160px)
+/// all four would fit on one row and none would wrap. A floated block
+/// always establishes its own new block
 /// formatting context (CSS 2.1 §9.4 / taffy's `compute_block_layout`: a
 /// floated child is laid out via `perform_child_layout`, never
 /// `compute_block_child_layout`, so it always gets a FRESH root
@@ -231,6 +256,27 @@ fn nested_floats_resolve_against_inner_containing_block_width() {
             outer.origin.x + outer.size.w
         );
     }
+
+    // First prove a/b/c actually floated side by side (overlapping y, each
+    // starting at/after the previous one's right edge) -- a no-op float
+    // implementation stacks every inner div on its own row in document
+    // order, which would ALSO happen to satisfy the "4th wraps below the
+    // first" assertion below (vacuously: d is simply the last of four
+    // already-stacked rows). This is what makes the wrap assertion below a
+    // real red/green signal rather than one that accidentally passes
+    // pre-fix.
+    let ab_overlap =
+        inner_a.origin.y < inner_b.origin.y + inner_b.size.h && inner_b.origin.y < inner_a.origin.y + inner_a.size.h;
+    assert!(ab_overlap, "inner floats a (y={}) and b (y={}) must be on the same row (float, not stack)", inner_a.origin.y, inner_b.origin.y);
+    let bc_overlap =
+        inner_b.origin.y < inner_c.origin.y + inner_c.size.h && inner_c.origin.y < inner_b.origin.y + inner_b.size.h;
+    assert!(bc_overlap, "inner floats b (y={}) and c (y={}) must be on the same row (float, not stack)", inner_b.origin.y, inner_c.origin.y);
+    assert!(
+        inner_b.origin.x >= inner_a.origin.x + inner_a.size.w - 0.01,
+        "inner float b (x={}) must sit at/after inner float a's right edge ({})",
+        inner_b.origin.x,
+        inner_a.origin.x + inner_a.size.w
+    );
 
     // 4th inner float (160px of floats crammed into a 150px inner
     // containing block) must have wrapped onto a new row below the first
