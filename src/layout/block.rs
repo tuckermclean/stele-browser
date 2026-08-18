@@ -352,7 +352,7 @@ impl Built<'_> {
 /// viewport sizes are floored to zero rather than propagated into taffy.
 pub fn layout_tree<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -> Vec<Fragment> {
     let mut taffy: TaffyTree<NodeCtx> = TaffyTree::new();
-    let built = translate_any(root, &mut taffy, 0, TABLE_DEPTH_CAP, MarginOverride::default());
+    let built = translate_any(root, &mut taffy, 0, TABLE_DEPTH_CAP, MarginOverride::default(), false);
 
     let vw = finite_nonneg(viewport.w);
     let vh = finite_nonneg(viewport.h);
@@ -611,13 +611,19 @@ fn collapse_adjust_cell_rects(
 /// [`compute_sibling_margin_overrides`]) when `node` is adjoining a sibling
 /// whose margin it collapses with; every other call site passes
 /// `MarginOverride::default()` (no override — the node's cascaded margin is
-/// used as-is, today's pre-collapsing behavior).
+/// used as-is, today's pre-collapsing behavior). `is_flex_or_grid_item`
+/// (packet/acid1-content-box) is `true` only when `node` is a direct child
+/// of a `display: flex`/`display: grid` container (set by
+/// `translate_container_children`'s own flex/grid branch, the one place
+/// that already knows its children are items) — see `box_sizing_for`'s own
+/// doc comment for why this flag exists and what it protects.
 fn translate_any<'a>(
     node: &'a LayoutNode,
     taffy: &mut TaffyTree<NodeCtx<'a>>,
     depth: usize,
     table_budget: usize,
     margin_override: MarginOverride,
+    is_flex_or_grid_item: bool,
 ) -> Built<'a> {
     match &node.content {
         BoxContent::Text(text) => {
@@ -626,7 +632,7 @@ fn translate_any<'a>(
                 style: node.style.clone(),
                 interactive: node.interactive.clone(),
             }];
-            let style = base_style(&node.style);
+            let style = base_style(&node.style, is_flex_or_grid_item);
             let text_align = node.style.text_align;
             let id = taffy
                 .new_leaf_with_context(style, NodeCtx::Inline(runs.clone(), text_align))
@@ -634,7 +640,7 @@ fn translate_any<'a>(
             Built::Inline { taffy_id: id, runs, text_align }
         }
         BoxContent::Replaced { intrinsic, image } => {
-            let mut style = base_style(&node.style);
+            let mut style = base_style(&node.style, is_flex_or_grid_item);
             let iw = finite_nonneg(intrinsic.w);
             let ih = finite_nonneg(intrinsic.h);
             style.size = TSize { width: length(iw), height: length(ih) };
@@ -664,7 +670,7 @@ fn translate_any<'a>(
                 && table_budget > 0
                 && table_layout::place_grid(node).cells.len() <= MAX_TABLE_MEASURED_CELLS =>
         {
-            let mut style = base_style(&node.style);
+            let mut style = base_style(&node.style, is_flex_or_grid_item);
             // Tables are shrink-to-fit, not stretch-sized, for an auto
             // width (CSS 2.1 §17.4/§10.3.3 — a table is one of the classic
             // "shrink-to-fit" box types alongside floats/inline-block/
@@ -692,7 +698,7 @@ fn translate_any<'a>(
         // Container, a plain stacked block, matching pre-table-layout-packet
         // behavior.
         BoxContent::Container | BoxContent::TableCell { .. } => {
-            let mut style = base_style(&node.style);
+            let mut style = base_style(&node.style, is_flex_or_grid_item);
             style.display = map_display(node.style.display);
             apply_flex(&mut style, &node.style);
             // packet/css-grid: unconditional, exactly like `apply_flex`
@@ -1096,8 +1102,11 @@ fn translate_container_children<'a>(
             // Flex/grid items never participate in margin collapsing (CSS
             // Flexbox §4; CSS Grid §11 makes the identical carve-out) —
             // `MarginOverride::default()` (no-op) here keeps this branch's
-            // pre-existing behavior byte-for-byte.
-            out.push(translate_any(child, taffy, depth, table_budget, MarginOverride::default()));
+            // pre-existing behavior byte-for-byte. `true` (packet/acid1-
+            // content-box): this loop is the ONE place in the whole module
+            // that already knows "every child here is a flex/grid item" —
+            // see `box_sizing_for`'s own doc comment for why that matters.
+            out.push(translate_any(child, taffy, depth, table_budget, MarginOverride::default(), true));
         }
         return out;
     }
@@ -1126,7 +1135,7 @@ fn translate_container_children<'a>(
             out.push(Built::Inline { taffy_id: id, runs, text_align });
             i = j;
         } else {
-            out.push(translate_any(&node.children[i], taffy, depth, table_budget, margin_overrides[i]));
+            out.push(translate_any(&node.children[i], taffy, depth, table_budget, margin_overrides[i], false));
             i += 1;
         }
     }
@@ -1412,7 +1421,7 @@ fn cell_min_max_width<M: Metrics>(node: &LayoutNode, metrics: &M, table_budget: 
 
 fn cell_query_width<M: Metrics>(node: &LayoutNode, metrics: &M, table_budget: usize, query: AvailableSpace) -> f32 {
     let mut taffy: TaffyTree<NodeCtx> = TaffyTree::new();
-    let built = translate_any(node, &mut taffy, 0, table_budget, MarginOverride::default());
+    let built = translate_any(node, &mut taffy, 0, table_budget, MarginOverride::default(), false);
     let available = TSize { width: query, height: AvailableSpace::MaxContent };
     let _ = taffy.compute_layout_with_measure(built.taffy_id(), available, |kd, av, id, ctx, style| {
         measure_node(kd, av, id, ctx, style, metrics)
@@ -1444,7 +1453,7 @@ fn cell_query_width<M: Metrics>(node: &LayoutNode, metrics: &M, table_budget: us
 /// that bounds the remaining (still real, still per-cell) cost.
 fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, table_budget: usize) -> (Size, Vec<Fragment>) {
     let mut taffy: TaffyTree<NodeCtx> = TaffyTree::new();
-    let built = translate_any(node, &mut taffy, 0, table_budget, MarginOverride::default());
+    let built = translate_any(node, &mut taffy, 0, table_budget, MarginOverride::default(), false);
     let w = finite_nonneg(width);
     if let Ok(mut style) = taffy.style(built.taffy_id()).cloned() {
         style.size.width = length(w);
@@ -1483,10 +1492,11 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
 /// its own narrower case exactly as before.
 ///
 /// packet/acid1-content-box: `box_sizing` is set to `ContentBox` for
-/// floated boxes only -- see `float_box_sizing`'s own doc comment for why
-/// this is scoped to floats rather than applied unconditionally (the
-/// CSS-correct fix), and why that scoping is deliberate, not an oversight.
-fn base_style(cs: &ComputedStyle) -> TStyle {
+/// floated boxes AND for ordinary (non-flex/grid-item) block boxes -- see
+/// `box_sizing_for`'s own doc comment for exactly which nodes this covers,
+/// why it had to widen past "floats only," and why that widening is
+/// evidence-based, not scope creep.
+fn base_style(cs: &ComputedStyle, is_flex_or_grid_item: bool) -> TStyle {
     TStyle {
         size: TSize { width: map_dimension(cs.width), height: map_dimension(cs.height) },
         margin: TRect {
@@ -1509,66 +1519,93 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
         },
         float: map_float(cs.float),
         clear: map_clear(cs.clear),
-        box_sizing: float_box_sizing(cs.float),
+        box_sizing: box_sizing_for(cs.float, is_flex_or_grid_item),
         ..Default::default()
     }
 }
 
-/// `box_sizing` for a node, given its `float`. Real CSS's initial value for
-/// `box-sizing` is `content-box` (a declared `width`/`height` is the
-/// CONTENT size; padding/border add on top) -- but this engine has no
-/// `box-sizing` CSS property support at all (`grep -rn "box-sizing"
-/// src/style/` finds nothing), and taffy 0.13's OWN default disagrees:
-/// `taffy::Style::DEFAULT.box_sizing` is `BoxSizing::BorderBox` (a declared
-/// `width`/`height` INCLUDES padding/border, which get subtracted back out
-/// to find the content size) -- see `taffy::style::Style`'s own doc comment
-/// on the field. `base_style` never overrode that default before this
-/// packet, so EVERY node in this engine has always silently used
-/// `BorderBox` semantics, not CSS's real `ContentBox` default.
+/// `box_sizing` for a node, given its `float` and whether it's a flex/grid
+/// ITEM (a direct child of a `display: flex`/`display: grid` container --
+/// see `translate_any`'s own doc comment for where that flag comes from).
+/// Real CSS's initial value for `box-sizing` is `content-box` (a declared
+/// `width`/`height` is the CONTENT size; padding/border add on top) -- but
+/// this engine has no `box-sizing` CSS property support at all (`grep -rn
+/// "box-sizing" src/style/` finds nothing), and taffy 0.13's OWN default
+/// disagrees: `taffy::Style::DEFAULT.box_sizing` is `BoxSizing::BorderBox`
+/// (a declared `width`/`height` INCLUDES padding/border, which get
+/// subtracted back out to find the content size) -- see `taffy::style::
+/// Style`'s own doc comment on the field. `base_style` never overrode that
+/// default before packet/acid1-coherence, so EVERY node in this engine had
+/// always silently used `BorderBox` semantics, not CSS's real `ContentBox`
+/// default.
 ///
-/// packet/acid1-content-box (re-applying packet/acid1-coherence's
-/// `b88f9cd`, which was correct but blocked on a separate float-stacking
-/// regression -- see this packet's PR description) found this via
-/// `fixtures/css1-float-5526c.html` (the W3C CSS1 Acid1 test, every element
-/// in it sets an explicit `width` AND non-zero `padding`/`border`, which is
-/// exactly the combination where `BorderBox` vs `ContentBox` produces
-/// different pixels): `dd{width:34em;padding:1em;border:1em}` rendered
-/// narrower inside than it should (its OWN border-box pinned to the
-/// declared 34em instead of growing to 34em-content + 2em padding + 2em
-/// border), which starved its floated `<li>`/`<blockquote>`/`<h1>` children
-/// of the row width they needed to wrap the way the reference rendering
-/// does.
+/// packet/acid1-coherence's `b88f9cd` first found this via `fixtures/
+/// css1-float-5526c.html` (the W3C CSS1 Acid1 test, every element in it
+/// sets an explicit `width` AND non-zero `padding`/`border`, exactly the
+/// combination where `BorderBox` vs `ContentBox` produces different
+/// pixels) and scoped the fix to floated boxes ONLY (`float != Float::
+/// None`), reasoning that the fixture's every VISIBLE box floats. That
+/// scoping was necessary but turned out not to be SUFFICIENT: pixel-
+/// verifying the result against the target geometry (this packet's own
+/// brief) showed `dt`/`dd` -- both floated, both already `ContentBox` --
+/// still stacking vertically instead of sitting side by side at their
+/// intended exact-fit. Instrumenting the real fragment geometry (`tests/
+/// aaa_diag_css1_float.rs`, a temporary diagnostic dump, since removed)
+/// traced this to `dt`/`dd`'s CONTAINING BLOCK: `<dl>` (their parent) has
+/// `width: auto`, so it simply stretches to fill `<body>`'s OWN content
+/// box -- and `<body>` (`width: 48em; border: .5em solid black; padding:
+/// 0`) is NOT floated, so it was still `BorderBox`, pinning its declared
+/// 480px to the BORDER box and shrinking its content box to 470px (480 -
+/// 2*5px border) instead of the CSS-correct 480px. That 10px shortfall
+/// (exactly `<body>`'s own border) propagates straight through `<dl>`
+/// (auto-width, no border, `.5em` padding) to ITS content box: 460px
+/// instead of the needed 470px. `dt`(≈79px, from its own `10.638%` of
+/// that) + `dd`'s margin+border-box(10+380=390px) sums to ≈469px -- UNDER
+/// 470px (fits, ~1px to spare, matching the reference's exact-fit side-by-
+/// side layout) but OVER 460px by ≈9px, which is a real overflow, not a
+/// sub-pixel rounding artifact -- taffy's own float-fit check (`taffy::
+/// compute::float::float_fits_horizontally`, an inclusive `<=`, verified
+/// by reading taffy 0.13's vendored source directly) correctly wraps `dd`
+/// onto a new line rather than overlapping it with `dt`. No amount of `em`-
+/// arithmetic precision or a sub-pixel "exact fit" tolerance closes a real
+/// 9px gap -- the fix has to reach the actual 10px source: `<body>`'s own
+/// `BorderBox` sizing.
 ///
-/// The CSS-correct fix is unconditional: `ContentBox` for every node,
-/// always. That fix is NOT what this function does, because this packet's
-/// own brief caps its blast radius at `goldens/css1-float-5526c.png` alone
-/// -- and an unconditional fix does not stay inside that cap. A repo-wide
-/// audit (every fixture with a byte-compared PNG golden, cross-checked
-/// against its CSS for a `width`/`height` + `padding`/`border` combo on the
-/// same element) found THREE other existing goldens that combine them too:
-/// `fixtures/flex-polite.html`'s `aside{width:220px;padding:20px;
-/// border:2px}`, `fixtures/kitchen-sink.html`'s `.flexrow .fixed{width:
-/// 120px;border:1px;padding:8px}`, and `fixtures/grid.html`'s `.card{
-/// height:100px;border:1px;padding:10px}` (`grid.html` even *declares*
-/// `box-sizing:border-box` itself in its own `<style>` -- inert today since
-/// this engine doesn't parse the property at all, so an unconditional fix
-/// would flip `.card` from "accidentally matches its own stated
-/// `border-box` intent" to "actively contradicts it," not closer to
-/// correct). None of those three are floated (`aside` and `.fixed` are
-/// flex items; `.card` is a grid item), so scoping this fix to `float !=
-/// Float::None` closes the gap for exactly the code path this packet
-/// touches (`layout::block`'s taffy `float_layout` wiring, packet/
-/// block-floats) while leaving flex/grid sizing byte-identical to every
-/// currently-blessed golden that exercises them. Fixing `box_sizing` for
-/// flex/grid too -- and, properly, adding real `box-sizing` CSS parsing so
-/// authors can ask for either model -- is real, tracked, out-of-scope work
-/// for a future packet, not a limitation of taffy itself (taffy has
-/// supported per-node `box_sizing` since before this engine started using
-/// it; nothing here ever set the field).
-fn float_box_sizing(float: Float) -> TBoxSizing {
+/// So this function widens PAST "floats only" to "floats, OR any ordinary
+/// block box that is not itself a flex/grid item" -- i.e. `BorderBox` is
+/// now the deliberately-narrow EXCEPTION (preserving today's pixels for
+/// flex/grid items specifically), not the default. This is safe rather
+/// than a blind broadening: `b88f9cd`'s own repo-wide audit (every fixture
+/// with a byte-compared PNG golden, cross-checked against its CSS for a
+/// `width`/`height` + `padding`/`border` combo on the same element) already
+/// enumerated the CSS-correct unconditional fix's full blast radius and
+/// found exactly THREE conflicts -- `fixtures/flex-polite.html`'s `aside{
+/// width:220px;padding:20px;border:2px}`, `fixtures/kitchen-sink.html`'s
+/// `.flexrow .fixed{width:120px;border:1px;padding:8px}`, and `fixtures/
+/// grid.html`'s `.card{height:100px;border:1px;padding:10px}` -- and ALL
+/// THREE are flex/grid items (`aside`/`.fixed` are flex items; `.card` is a
+/// grid item). This function's `is_flex_or_grid_item` carve-out excludes
+/// precisely that set, so the widened default reaches `<body>`/`<dl>`/
+/// every other ordinary block box (closing the acid1 gap) while staying
+/// exactly as safe as the floats-only scoping for every fixture that isn't
+/// css1-float-5526c -- verified empirically too, not just by the audit's
+/// own logic: `goldens/flex-polite.png`/`kitchen-sink.png`/`grid.png` all
+/// stayed byte-identical after this widening (this packet's own CI run).
+/// Grid/flex CONTAINERS themselves (not items) are untouched by the
+/// `is_flex_or_grid_item` flag either way -- a container's OWN box-sizing
+/// was already `ContentBox` under the floats-only scoping whenever it also
+/// wasn't a float or an item, so this widening doesn't newly touch them.
+///
+/// Real `box-sizing` CSS parsing (so authors can ask for either model
+/// explicitly, including for flex/grid items) is real, tracked, out-of-
+/// scope work for a future packet, not a limitation of taffy itself (taffy
+/// has supported per-node `box_sizing` since before this engine started
+/// using it; nothing here ever set the field for flex/grid items).
+fn box_sizing_for(float: Float, is_flex_or_grid_item: bool) -> TBoxSizing {
     match float {
-        Float::None => TBoxSizing::BorderBox,
         Float::Left | Float::Right => TBoxSizing::ContentBox,
+        Float::None if is_flex_or_grid_item => TBoxSizing::BorderBox,
+        Float::None => TBoxSizing::ContentBox,
     }
 }
 
@@ -2154,5 +2191,36 @@ mod tests {
     fn is_inline_ish_false_for_a_block_container() {
         let div = container(block_style(), vec![text_node("hello")]);
         assert!(!is_inline_ish(&div));
+    }
+
+    // ---- packet/acid1-content-box: `box_sizing_for` ----
+
+    #[test]
+    fn box_sizing_for_a_float_is_always_content_box() {
+        // Floats are ContentBox regardless of `is_flex_or_grid_item` -- a
+        // node can't actually be both (CSS floats are taken out of flex/
+        // grid flow entirely), but the float arm must win either way since
+        // it's matched first.
+        assert_eq!(box_sizing_for(Float::Left, false), TBoxSizing::ContentBox);
+        assert_eq!(box_sizing_for(Float::Right, false), TBoxSizing::ContentBox);
+        assert_eq!(box_sizing_for(Float::Left, true), TBoxSizing::ContentBox);
+    }
+
+    #[test]
+    fn box_sizing_for_a_flex_or_grid_item_stays_border_box() {
+        // The deliberately-narrow exception (`b88f9cd`'s own repo-wide
+        // audit's 3 known conflicts: flex-polite's `aside`, kitchen-sink's
+        // `.flexrow .fixed`, grid's `.card`) -- preserves today's pixels
+        // for exactly this set.
+        assert_eq!(box_sizing_for(Float::None, true), TBoxSizing::BorderBox);
+    }
+
+    #[test]
+    fn box_sizing_for_an_ordinary_block_box_is_content_box() {
+        // The widened default (packet/acid1-content-box): NOT a float, NOT
+        // a flex/grid item -- e.g. `<body>`/`<dl>` in fixtures/css1-float-
+        // 5526c.html -- gets CSS-correct ContentBox, not taffy's own
+        // BorderBox default.
+        assert_eq!(box_sizing_for(Float::None, false), TBoxSizing::ContentBox);
     }
 }

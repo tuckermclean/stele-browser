@@ -13,8 +13,8 @@ use crate::style::computed::{
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
 use crate::style::value::{
-    self, presentational_hints, BorderRaw, Declarations, Env, RawGridRepetitionCount, RawGridTemplateComponent,
-    RawGridTrack, RawGridTrackSize, RawLength, RawLengthAuto, RawLineHeight,
+    self, presentational_hints, BorderRaw, Declarations, EdgesRaw, Env, RawGridRepetitionCount,
+    RawGridTemplateComponent, RawGridTrack, RawGridTrackSize, RawLength, RawLengthAuto, RawLineHeight,
 };
 use crate::style::{parser, ComputedStyle, Stylesheet};
 use crate::surface::Color;
@@ -294,7 +294,7 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
             bottom: resolve_lp(d.padding.bottom, font_size, default.padding.bottom),
             left: resolve_lp(d.padding.left, font_size, default.padding.left),
         },
-        border: resolve_border(d.border, d.border_top, font_size),
+        border: resolve_border(d.border, d.border_top, &d.border_width, d.border_style, d.border_color, font_size),
         // packet/table-spacing: non-inherited ("own") resolution -- see
         // `ComputedStyle::border_spacing_x/y`'s own doc comment for why.
         // `raw_to_px` is safe here because `value::apply_property`/
@@ -454,11 +454,60 @@ fn resolve_lp(v: Option<RawLength>, font_size: f32, default: LengthPercentage) -
 /// the only caller that ever sets `top` without `v`, so this is exercised
 /// today as "no `border` at all, `border-top` sets just the top side, the
 /// other three stay `BorderSide::default()`".
-fn resolve_border(v: Option<BorderRaw>, top: Option<BorderRaw>, font_size: f32) -> Edges<BorderSide> {
+///
+/// `width`/`style`/`color` (packet/acid1-content-box: `border-width`/
+/// `border-style`/`border-color`, `Declarations::border_width`'s own doc
+/// comment has the full "why") layer on top of `v`/`top` LAST, per side,
+/// touching only the sub-fields those longhands actually declared —
+/// `fixtures/css1-float-5526c.html`'s `blockquote` never sets `border`/
+/// `border-top` at all, so for it `v`/`top` resolve to four `BorderSide::
+/// default()`s (invisible) and these three longhands are the ONLY signal;
+/// but the override is written generically (works whether or not a `border`
+/// shorthand is also present) rather than special-cased to "no shorthand",
+/// so a future fixture mixing both keeps the real CSS longhand-wins-over-
+/// shorthand behavior `top` already established above. Every existing
+/// fixture leaves `width`/`style`/`color` at their all-`None` default, so
+/// this whole step is a no-op for them (`None.unwrap_or(existing)` on every
+/// sub-field) — zero golden churn.
+fn resolve_border(
+    v: Option<BorderRaw>,
+    top: Option<BorderRaw>,
+    width: &EdgesRaw<RawLength>,
+    style: Option<BorderStyle>,
+    color: Option<Color>,
+    font_size: f32,
+) -> Edges<BorderSide> {
     let base = Edges::all(resolve_border_side(v, font_size));
-    match top {
+    let with_top = match top {
         None => base,
         Some(t) => Edges { top: resolve_border_side(Some(t), font_size), ..base },
+    };
+    Edges {
+        top: apply_border_side_longhands(with_top.top, width.top, style, color, font_size),
+        right: apply_border_side_longhands(with_top.right, width.right, style, color, font_size),
+        bottom: apply_border_side_longhands(with_top.bottom, width.bottom, style, color, font_size),
+        left: apply_border_side_longhands(with_top.left, width.left, style, color, font_size),
+    }
+}
+
+/// Overrides `side`'s width/style/color with whichever of `width`/`style`/
+/// `color` the `border-width`/`border-style`/`border-color` longhands
+/// actually declared for this edge, leaving the rest of `side` (already
+/// resolved from the `border`/`border-top` shorthand, or `BorderSide::
+/// default()` if neither was declared) untouched. `None` for any of the
+/// three params is "this longhand wasn't declared", not "clear it" — same
+/// convention as every other `Option`-shaped cascade input in this module.
+fn apply_border_side_longhands(
+    side: BorderSide,
+    width: Option<RawLength>,
+    style: Option<BorderStyle>,
+    color: Option<Color>,
+    font_size: f32,
+) -> BorderSide {
+    BorderSide {
+        width: width.map(|w| raw_to_px(w, font_size)).unwrap_or(side.width),
+        style: style.unwrap_or(side.style),
+        color: color.unwrap_or(side.color),
     }
 }
 
@@ -630,6 +679,52 @@ mod tests {
         assert_eq!(top.color, Color::rgb(0x80, 0x80, 0x80));
         for side in [styles[div].border.right, styles[div].border.bottom, styles[div].border.left] {
             assert_eq!(side, BorderSide::default(), "non-top sides must stay unset");
+        }
+    }
+
+    #[test]
+    fn border_width_style_color_longhands_resolve_per_side_with_no_border_shorthand() {
+        // packet/acid1-content-box: `fixtures/css1-float-5526c.html`'s
+        // `blockquote` shape -- `border-width: 1em 1.5em 2em .5em;
+        // border-style: solid; border-color: black;`, no `border`/
+        // `border-top` shorthand declared at all. Before this packet, none
+        // of these three properties parsed (no `apply_property` arm), so
+        // `styles[div].border` stayed four `BorderSide::default()`s
+        // (invisible, width 0) regardless of this declaration.
+        let d = dom::parser::parse("<div>x</div>");
+        let sheet = parser::parse(
+            "html { font-size: 10px; } \
+             div { border-width: 1em 1.5em 2em .5em; border-style: solid; border-color: black; }",
+        );
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        let b = styles[div].border;
+        assert_eq!(b.top.width, 10.0, "top: 1em @ 10px font-size");
+        assert_eq!(b.right.width, 15.0, "right: 1.5em @ 10px font-size");
+        assert_eq!(b.bottom.width, 20.0, "bottom: 2em @ 10px font-size");
+        assert_eq!(b.left.width, 5.0, "left: .5em @ 10px font-size");
+        for side in [b.top, b.right, b.bottom, b.left] {
+            assert_eq!(side.style, BorderStyle::Solid);
+            assert_eq!(side.color, Color::BLACK);
+        }
+    }
+
+    #[test]
+    fn border_shorthand_alone_is_unaffected_by_the_new_longhand_fields() {
+        // Zero-golden-churn guardrail: an element that only ever uses the
+        // `border` shorthand (every OTHER fixture in this repo) must resolve
+        // identically now that `resolve_border` also consults `border-
+        // width`/`-style`/`-color` -- those three stay `None`/empty for it,
+        // so `apply_border_side_longhands` must be a strict no-op.
+        let d = dom::parser::parse("<div>x</div>");
+        let sheet = parser::parse("div { border: 2px solid red; }");
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        for side in [styles[div].border.top, styles[div].border.right, styles[div].border.bottom, styles[div].border.left]
+        {
+            assert_eq!(side.width, 2.0);
+            assert_eq!(side.style, BorderStyle::Solid);
+            assert_eq!(side.color, Color::rgb(255, 0, 0));
         }
     }
 

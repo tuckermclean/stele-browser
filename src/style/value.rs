@@ -163,6 +163,36 @@ pub(crate) struct Declarations {
     /// /`-left` (out of scope -- only `<hr>`'s UA rule needs a single-side
     /// border today); add them the same way if a future packet needs them.
     pub border_top: Option<BorderRaw>,
+    /// `border-width: <length>{1,4}` (packet/acid1-content-box:
+    /// `fixtures/css1-float-5526c.html`'s `blockquote` declares
+    /// `border-width: 1em 1.5em 2em .5em` as its OWN longhand, never a
+    /// `border` shorthand at all -- before this packet, `apply_property`
+    /// had no `"border-width"` arm, so this fell through to the catch-all
+    /// `_ => false` and the whole border silently never applied (`style`/
+    /// `width` both stayed the CSS-initial `none`/`0`). A per-edge
+    /// `EdgesRaw<RawLength>`, same 1-4-value TRBL grammar as `margin`/
+    /// `padding` above (`apply_edges_shorthand`), because — unlike
+    /// `border`/`border-top` (curated as ONE uniform width/style/color
+    /// triple per brief §4) — THIS fixture needs four genuinely different
+    /// widths on one element and there is no shorthand token in its CSS to
+    /// carry them. `cascade::resolve_border` layers this on top of
+    /// whatever `border`/`border-top` already resolved, side by side,
+    /// touching a side's width only when this field actually set it (never
+    /// a behavior change for the many existing fixtures that only ever use
+    /// the `border` shorthand).
+    pub border_width: EdgesRaw<RawLength>,
+    /// `border-style: <keyword>` (packet/acid1-content-box, sibling to
+    /// `border_width` above — same fixture, same gap). Curated to a single
+    /// uniform value (real CSS allows 1-4, but no fixture needs more than
+    /// one), reusing the border shorthand's own solid-vs-everything-else
+    /// mapping (`parse_border_raw`'s doc comment) so `none`/`dashed`/
+    /// `dotted`/... all collapse to `BorderStyle::None` exactly like they
+    /// do inside the `border`/`border-top` shorthand grammar.
+    pub border_style: Option<BorderStyle>,
+    /// `border-color: <color>` (packet/acid1-content-box, sibling to
+    /// `border_width`/`border_style` above). Single uniform value, same
+    /// scope note as `border_style`.
+    pub border_color: Option<Color>,
     /// `border-spacing: <length-x> <length-y>?` (packet/table-spacing,
     /// `ComputedStyle`'s own freeze-amendment doc comment has the full
     /// rationale). Two independent fields (not an `EdgesRaw`-style pair —
@@ -265,6 +295,8 @@ impl Declarations {
         ov!(height);
         ov!(border);
         ov!(border_top);
+        ov!(border_style);
+        ov!(border_color);
         ov!(border_spacing_x);
         ov!(border_spacing_y);
         ov!(border_collapse);
@@ -282,6 +314,7 @@ impl Declarations {
         ov!(column_gap);
         self.margin.overlay(&other.margin);
         self.padding.overlay(&other.padding);
+        self.border_width.overlay(&other.border_width);
         // `background_image` isn't `Copy` (see its field doc comment), so it
         // can't go through the `ov!` macro above -- same last-writer-wins
         // semantics, just spelled with an explicit `.clone()`.
@@ -1612,6 +1645,31 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             None => false,
         },
+        // packet/acid1-content-box: `border-width`/`border-style`/
+        // `border-color` as their OWN longhands (not folded into `border`/
+        // `border-top`'s shorthand grammar above) -- see `Declarations::
+        // border_width`'s own doc comment for why `fixtures/css1-float-
+        // 5526c.html`'s `blockquote` needs exactly this shape.
+        // `token_to_border_width`'s percent-rejecting conversion is reused
+        // here too (same reasoning as the `border-spacing` 1/2-value arm
+        // below): `border-width` has no percentage form in CSS either.
+        "border-width" => apply_edges_shorthand(tokens, &mut d.border_width, token_to_border_width),
+        "border-style" => match keyword(tokens).as_deref() {
+            Some("solid") => {
+                d.border_style = Some(BorderStyle::Solid);
+                true
+            }
+            // Curated set is solid-only (brief §4), matching `parse_border_
+            // raw`'s own style-keyword mapping exactly: every other named
+            // style is a real CSS keyword that resolves to "no visible
+            // border" here rather than being rejected outright.
+            Some("none" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset") => {
+                d.border_style = Some(BorderStyle::None);
+                true
+            }
+            _ => false,
+        },
+        "border-color" => parse_color(tokens).map(|c| d.border_color = Some(c)).is_some(),
         "float" => match keyword(tokens).as_deref() {
             Some("left") => {
                 d.float = Some(Float::Left);
@@ -2098,6 +2156,66 @@ mod tests {
         // itself (see `border_shorthand_...`'s sibling tests below).
         let mut d = Declarations::default();
         assert!(!apply_property("border-top", &toks("2px solid red garbage"), &mut d));
+        assert!(d.border_top.is_none());
+    }
+
+    // ---- packet/acid1-content-box: `border-width`/`border-style`/
+    // `border-color` longhands (fixtures/css1-float-5526c.html's
+    // `blockquote` uses exactly this triple, never the `border` shorthand)
+    // ----
+
+    #[test]
+    fn border_width_four_values_expand_top_right_bottom_left() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-width", &toks("1em 1.5em 2em .5em"), &mut d));
+        assert_eq!(d.border_width.top, Some(RawLength::Em(1.0)));
+        assert_eq!(d.border_width.right, Some(RawLength::Em(1.5)));
+        assert_eq!(d.border_width.bottom, Some(RawLength::Em(2.0)));
+        assert_eq!(d.border_width.left, Some(RawLength::Em(0.5)));
+    }
+
+    #[test]
+    fn border_width_rejects_percentage_like_the_border_shorthand_does() {
+        // `token_to_border_width` (shared with the `border` shorthand's own
+        // width sub-token) rejects `%` -- CSS has no percentage form for
+        // `border-width`. A single bad token invalidates the whole 1-4-value
+        // declaration, same as `apply_edges_shorthand`'s existing contract.
+        let mut d = Declarations::default();
+        assert!(!apply_property("border-width", &toks("10%"), &mut d));
+    }
+
+    #[test]
+    fn border_style_solid_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-style", &toks("solid"), &mut d));
+        assert_eq!(d.border_style, Some(BorderStyle::Solid));
+    }
+
+    #[test]
+    fn border_style_non_solid_keywords_map_to_none_not_rejected() {
+        // Matches `parse_border_raw`'s own curated mapping: `dashed`/
+        // `dotted`/... are recognized CSS keywords, just not ones this
+        // engine paints (brief §4, solid-only) -- so they resolve to "no
+        // visible border" rather than failing the whole declaration.
+        let mut d = Declarations::default();
+        assert!(apply_property("border-style", &toks("dashed"), &mut d));
+        assert_eq!(d.border_style, Some(BorderStyle::None));
+    }
+
+    #[test]
+    fn border_color_parses_a_named_or_hex_color() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-color", &toks("black"), &mut d));
+        assert_eq!(d.border_color, Some(Color::rgb(0, 0, 0)));
+    }
+
+    #[test]
+    fn border_width_style_color_longhands_do_not_touch_the_border_shorthand_field() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-width", &toks("1em 1.5em 2em .5em"), &mut d));
+        assert!(apply_property("border-style", &toks("solid"), &mut d));
+        assert!(apply_property("border-color", &toks("black"), &mut d));
+        assert!(d.border.is_none(), "border-width/-style/-color longhands must not also set the `border` shorthand field");
         assert!(d.border_top.is_none());
     }
 
