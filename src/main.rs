@@ -963,17 +963,30 @@ fn render_fb_opts(source: &str, no_bg_images: bool) -> Result<(), String> {
 // click-to-follow, which the painted pixels alone don't carry.
 // ---------------------------------------------------------------------------
 
-/// Render `url` (already resolved -- see `browser::History::current`) into
-/// a full-document `MemSurface` at `width` CSS px, alongside the
-/// `Fragment`s that produced it. Total: fetch/parse/layout failure is a
-/// clean `Err`, never a panic -- `run_x11` degrades to a blank page rather
-/// than propagating a panic into the event loop.
-fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fragment>), String> {
-    let response = fetch_response(url)?;
-    let html = String::from_utf8_lossy(&response.body);
-    let dom_tree = dom::parser::parse(&html);
+/// Cached per-navigation state `run_x11` holds alongside `surface`/
+/// `fragments`: the parsed DOM and the (possibly redirected) URL it was
+/// fetched from. A resize (`ConfigureNotify`) reflows from this cache via
+/// [`reflow_from_dom`] instead of re-fetching -- see that function's doc
+/// comment for the zero-network guarantee this exists to make structural.
+struct X11Session {
+    dom: dom::ast::Dom,
+    final_url: Url,
+}
 
-    if frames::find_frameset(&dom_tree).is_some() {
+/// Reflow an ALREADY-PARSED `dom` (fetched/parsed once by [`load_x11_page`]
+/// and cached in an [`X11Session`]) into a full-document `MemSurface` at
+/// `width` CSS px, alongside the `Fragment`s that produced it -- the
+/// width-dependent tail of the old `render_x11_page`
+/// (cascade/layout/paint), now reusable across a resize without re-fetching
+/// or re-parsing. Takes NO `Url` to fetch (only `final_url`, used to
+/// resolve relative stylesheet/image/background URLs against) -- so a
+/// `ConfigureNotify` resize can call this directly and the zero-network
+/// guarantee is structural, not just behavioral: there is no fetch call
+/// anywhere on this path for the compiler to type-check against. Total:
+/// layout failure is a clean `Err`, never a panic -- `run_x11` degrades to
+/// a blank page rather than propagating a panic into the event loop.
+fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fragment>), String> {
+    if frames::find_frameset(dom_tree).is_some() {
         return Err("frameset documents are not supported by --x11".to_string());
     }
 
@@ -981,10 +994,10 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
     // has no `--color-scheme` CLI flag to read at all (that flag is scoped
     // to the `--headless` dump paths); out of scope for this and the
     // t1b-color-scheme packet alike.
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
-    let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let images = stele::images::collect_images(&dom_tree, &response.final_url);
-    let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(dom_tree, final_url, width as f32, style::ColorScheme::Light);
+    let styles = cascade::cascade(dom_tree, &author_sheets);
+    let images = stele::images::collect_images(dom_tree, final_url);
+    let Some(root) = build_box_tree(dom_tree, &styles, &images) else {
         return Err("empty document (nothing to render)".to_string());
     };
 
@@ -1003,11 +1016,29 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
     }
     let height = if content_bottom.is_finite() && content_bottom > 0.0 { (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT) } else { 1 };
 
-    let bg_images = stele::bg_images::collect_bg_images(&styles, &response.final_url);
+    let bg_images = stele::bg_images::collect_bg_images(&styles, final_url);
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
     raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
     Ok((surface, fragments))
+}
+
+/// Fetch + parse `url` into a fresh [`X11Session`], then [`reflow_from_dom`]
+/// it at `width` CSS px. This is the ONLY path in `run_x11` that touches
+/// the network (initial load, link click, F5 reload) -- a resize
+/// (`ConfigureNotify`) never calls this; it calls `reflow_from_dom`
+/// directly against the already-cached `X11Session`. Total:
+/// fetch/parse/layout failure is a clean `Err`, never a panic -- `run_x11`
+/// degrades to a blank page rather than propagating a panic into the event
+/// loop.
+fn load_x11_page(url: &Url, width: u32) -> Result<(X11Session, MemSurface, Vec<layout::Fragment>), String> {
+    let response = fetch_response(url)?;
+    let html = String::from_utf8_lossy(&response.body);
+    let dom_tree = dom::parser::parse(&html);
+
+    let session = X11Session { dom: dom_tree, final_url: response.final_url };
+    let (surface, fragments) = reflow_from_dom(&session.dom, &session.final_url, width)?;
+    Ok((session, surface, fragments))
 }
 
 /// Window pixel width, the drawable's bits-per-pixel, and the format's
@@ -1270,7 +1301,7 @@ fn x11_scroll_to(
 /// intent classification/coalescing, pixel hit-test, scroll-repaint
 /// planning) already IS unit-tested, in `backend::x11` and this module's
 /// own [`scroll_blit`]; this function is thin glue over those plus
-/// [`render_x11_page`]/[`crop_surface_rows`]/[`x11_row_stride`]/
+/// [`load_x11_page`]/[`reflow_from_dom`]/[`crop_surface_rows`]/[`x11_row_stride`]/
 /// [`x11_full_redraw`]/[`x11_scroll_to`]/[`classify_x11_intent`]. Bounded/
 /// total throughout: every socket read goes through `XConnection`'s own
 /// fixed-size-buffer reads, and a page-load/reload/navigate failure prints
@@ -1336,11 +1367,11 @@ fn run_x11(source: &str) {
     let min_keycode = conn.setup.min_keycode;
 
     let mut scroll_y: u32 = 0;
-    let (mut surface, mut fragments) = match render_x11_page(history.current(), width) {
+    let (mut session, mut surface, mut fragments) = match load_x11_page(history.current(), width) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("stele: --x11: initial page load failed: {e}");
-            (MemSurface::new(width, 1, Color::WHITE), Vec::new())
+            (X11Session { dom: dom::parser::parse(""), final_url: history.current().clone() }, MemSurface::new(width, 1, Color::WHITE), Vec::new())
         }
     };
 
@@ -1398,8 +1429,9 @@ fn run_x11(source: &str) {
                     if let Some(href) = xproto::hit_test_pixel(&fragments, doc_x, doc_y) {
                         let new_url = history.current().resolve(&href);
                         history.navigate(new_url.clone());
-                        match render_x11_page(&new_url, width) {
-                            Ok((s, f)) => {
+                        match load_x11_page(&new_url, width) {
+                            Ok((sess, s, f)) => {
+                                session = sess;
                                 surface = s;
                                 fragments = f;
                                 scroll_y = 0;
@@ -1414,8 +1446,9 @@ fn run_x11(source: &str) {
                     }
                 }
                 xproto::XIntent::Reload => {
-                    match render_x11_page(history.current(), width) {
-                        Ok((s, f)) => {
+                    match load_x11_page(history.current(), width) {
+                        Ok((sess, s, f)) => {
+                            session = sess;
                             surface = s;
                             fragments = f;
                             scroll_y = 0;
@@ -1440,7 +1473,7 @@ fn run_x11(source: &str) {
                             0
                         }
                     };
-                    match render_x11_page(history.current(), width) {
+                    match reflow_from_dom(&session.dom, &session.final_url, width) {
                         Ok((s, f)) => {
                             surface = s;
                             fragments = f;
@@ -1544,7 +1577,7 @@ fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysym
 /// what the status line prints).
 fn build_page_from_dom(dom_tree: dom::Dom, final_url: &Url, cols: usize) -> browser::Page {
     let viewport_width = cols as f32 * 8.0;
-    // Not `--color-scheme`-aware — same rationale as `render_x11_page`'s
+    // Not `--color-scheme`-aware — same rationale as `reflow_from_dom`'s
     // identical note just above: the interactive shell has no
     // `--color-scheme` CLI flag to read (scoped to the `--headless` dump
     // paths only).
@@ -2041,6 +2074,21 @@ mod tests {
         assert_eq!(out.len(), 2 * 3 * 4);
         assert_eq!(&out[0..8], &[0, 0, 0, 255, 0, 0, 0, 255], "row 0 is the black surface");
         assert!(out[8..].iter().all(|&b| b == 0xff), "rows below content must be white canvas");
+    }
+
+    #[test]
+    fn reflow_from_dom_renders_without_fetching() {
+        // Parses the fixture's HTML directly (no fetch) and asserts
+        // `reflow_from_dom` produces fragments -- proving the resize path
+        // is fetch-free BY CONSTRUCTION: `reflow_from_dom` takes a parsed
+        // `Dom`, not a `Url`, so there is no fetch call on this path at all.
+        let html = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/basic.html")).unwrap();
+        let dom_tree = dom::parser::parse(&html);
+        let url = Url::new("file:///fixtures/basic.html");
+        let (surface, fragments) = reflow_from_dom(&dom_tree, &url, 800).expect("reflow renders");
+        assert!(!fragments.is_empty(), "basic.html must produce fragments");
+        let (w, _) = stele::surface::Surface::size(&surface);
+        assert_eq!(w, 800);
     }
 
     // ----------------------------------------------------------- scroll_blit
