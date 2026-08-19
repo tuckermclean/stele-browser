@@ -6,6 +6,7 @@
 pub mod cookies;
 pub mod file;
 pub mod http1;
+pub mod transport;
 pub mod url;
 
 /// A minimal URL. P3 decides bespoke-vs-crate for the real parser and may swap

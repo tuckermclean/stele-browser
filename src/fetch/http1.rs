@@ -22,6 +22,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use super::cookies::CookieJar;
+use super::transport::ByteStream;
 use super::{Fetch, FetchError, Method, Request, Response, Url};
 
 /// Maximum redirects followed before `FetchError::TooManyRedirects`.
@@ -152,12 +153,22 @@ pub(crate) fn send_one(
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
     let request_bytes = format_request(url, method, extra_headers, body, cookie_header, &host, port);
+    exchange(&mut stream, &request_bytes)
+}
+
+/// Transport-agnostic core: write the already-formatted request bytes, then
+/// read the framed response. Generic over `ByteStream` so PR 2's openssl
+/// child reuses it unchanged. Does NOT call `shutdown_write` (see the trait
+/// doc): PR 1 preserves the exact wire behavior `send_one` had before.
+pub(crate) fn exchange<S: ByteStream>(
+    stream: &mut S,
+    request_bytes: &[u8],
+) -> Result<RawResponse, FetchError> {
     stream
-        .write_all(&request_bytes)
+        .write_all(request_bytes)
         .map_err(|e| FetchError::Io(format!("write: {}", e)))?;
     stream.flush().map_err(|e| FetchError::Io(format!("flush: {}", e)))?;
-
-    read_response(&mut stream)
+    read_response(stream)
 }
 
 fn format_request(
@@ -235,7 +246,7 @@ fn format_request(
     bytes
 }
 
-pub(crate) fn read_response(stream: &mut TcpStream) -> Result<RawResponse, FetchError> {
+pub(crate) fn read_response<R: Read>(stream: &mut R) -> Result<RawResponse, FetchError> {
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 4096];
 
@@ -343,8 +354,8 @@ fn parse_status_and_headers(raw: &[u8]) -> Result<(u16, Vec<(String, String)>), 
     Ok((status, headers))
 }
 
-fn read_fixed_body(
-    stream: &mut TcpStream,
+fn read_fixed_body<R: Read>(
+    stream: &mut R,
     buf: &mut Vec<u8>,
     start: usize,
     len: usize,
@@ -364,7 +375,7 @@ fn read_fixed_body(
     Ok(buf[start..end].to_vec())
 }
 
-fn read_until_eof_body(stream: &mut TcpStream, buf: &mut Vec<u8>, start: usize) -> Result<Vec<u8>, FetchError> {
+fn read_until_eof_body<R: Read>(stream: &mut R, buf: &mut Vec<u8>, start: usize) -> Result<Vec<u8>, FetchError> {
     let mut tmp = [0u8; 4096];
     loop {
         let n = stream
@@ -385,7 +396,7 @@ fn read_until_eof_body(stream: &mut TcpStream, buf: &mut Vec<u8>, start: usize) 
 /// been consumed; more bytes are pulled from `stream` on demand. Every index
 /// used here is derived from a successful `find` within already-buffered
 /// bytes, so `pos <= buf.len()` holds throughout and no slice can panic.
-fn read_chunked_body(stream: &mut TcpStream, buf: &mut Vec<u8>, start: usize) -> Result<Vec<u8>, FetchError> {
+fn read_chunked_body<R: Read>(stream: &mut R, buf: &mut Vec<u8>, start: usize) -> Result<Vec<u8>, FetchError> {
     let mut pos = start;
     let mut out = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -434,8 +445,8 @@ fn read_chunked_body(stream: &mut TcpStream, buf: &mut Vec<u8>, start: usize) ->
 /// more from `stream` as needed; returns the index of the `\r` (so the line
 /// text is `buf[pos..line_end]` and the next position after it is
 /// `line_end + 2`).
-fn read_line_end(
-    stream: &mut TcpStream,
+fn read_line_end<R: Read>(
+    stream: &mut R,
     buf: &mut Vec<u8>,
     tmp: &mut [u8; 4096],
     pos: usize,
