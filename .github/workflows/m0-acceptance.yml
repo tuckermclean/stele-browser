@@ -141,9 +141,16 @@ jobs:
           mkdir -p /tmp/unwindshim
           ln -sf "$GCC_EH" /tmp/unwindshim/libunwind.a
           export RUSTFLAGS="-L /tmp/unwindshim ${RUSTFLAGS:-}"
+          # panic_immediate_abort (packet size-squeeze-floppy) strips std's
+          # formatted-panic-message machinery from the release binary — the
+          # 486 build already panic=abort's without unwinding, so the
+          # formatted message was dead weight; this is the size lever that
+          # keeps the i486 binary under the 1.44MB floppy ceiling (see
+          # accept.sh's own note on this flag, and .cargo/config.toml).
           cargo build --release \
             --target targets/i486-monolith-linux-musl.json \
             -Zbuild-std=std,panic_abort \
+            -Zbuild-std-features=panic_immediate_abort \
             -Zjson-target-spec
           BIN=target/i486-monolith-linux-musl/release/stele
           ls -l "$BIN"

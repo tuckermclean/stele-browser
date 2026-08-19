@@ -27,7 +27,13 @@
 #   cargo build --release \
 #     --target targets/i486-monolith-linux-musl.json \
 #     -Zbuild-std=std,panic_abort \
+#     -Zbuild-std-features=panic_immediate_abort \
 #     -Zjson-target-spec   # this nightly gates .json target specs behind it
+# panic_immediate_abort (packet size-squeeze-floppy) drops std's formatted-
+# panic-message machinery from the release binary — panic=abort never
+# unwinds to read that message anyway, so this is pure fat-trim, not a
+# behavior change. Release-only: never applies to A3's host build below
+# (no build-std there at all — see that section's own note).
 #
 # A3's host binary is a plain `cargo build --release` (default host target,
 # no `+nightly`/`+<toolchain>` override — that would bypass rust-toolchain.
