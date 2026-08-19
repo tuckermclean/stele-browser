@@ -963,6 +963,111 @@ else
     bad "A5b: PNG dump of $FIXTURE_KITCHEN_SINK differs from $GOLDEN_PNG_KITCHEN_SINK"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_KITCHEN_SINK") actual=$(wc -c < /tmp/stele_a5b.png)"
   fi
+
+  # ---------------------------------------------------------------------
+  # A5c-A5g -- Acid2 positioning packet (P1): five micro-fixtures, each
+  # isolating one `position` behavior (relative/absolute/fixed offsets,
+  # auto-inset static origin, and a skip-level relative-ancestor
+  # containing block). Same PNG-golden discipline as A5b/A3z: `--dump-png`
+  # byte-compared against a checked-in golden, PENDING (not FAIL-only)
+  # until the controller blesses each from a pixel-verified CI render --
+  # see brief §10 and task-3-brief.md's blessing step. These goldens do
+  # NOT exist yet as of this commit; that is expected.
+  # ---------------------------------------------------------------------
+  FIXTURE_POS_ABSOLUTE="fixtures/pos-absolute.html"
+  GOLDEN_PNG_POS_ABSOLUTE="goldens/pos-absolute.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5c: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_POS_ABSOLUTE" /tmp/stele_a5c.png 2>/tmp/stele_a5c.err; then
+    bad "A5c: stele --headless --dump-png crashed on $FIXTURE_POS_ABSOLUTE"
+    sed 's/^/    /' /tmp/stele_a5c.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5c.png "$GOLDEN_PNG_POS_ABSOLUTE"
+    pass "A5c: blessed pos-absolute PNG golden -> $GOLDEN_PNG_POS_ABSOLUTE (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_POS_ABSOLUTE" ]; then
+    bad "A5c: no golden at $GOLDEN_PNG_POS_ABSOLUTE to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_POS_ABSOLUTE" /tmp/stele_a5c.png; then
+    pass "A5c: PNG dump of $FIXTURE_POS_ABSOLUTE matches golden"
+  else
+    bad "A5c: PNG dump of $FIXTURE_POS_ABSOLUTE differs from $GOLDEN_PNG_POS_ABSOLUTE"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_POS_ABSOLUTE") actual=$(wc -c < /tmp/stele_a5c.png)"
+  fi
+
+  FIXTURE_POS_RELATIVE="fixtures/pos-relative.html"
+  GOLDEN_PNG_POS_RELATIVE="goldens/pos-relative.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5d: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_POS_RELATIVE" /tmp/stele_a5d.png 2>/tmp/stele_a5d.err; then
+    bad "A5d: stele --headless --dump-png crashed on $FIXTURE_POS_RELATIVE"
+    sed 's/^/    /' /tmp/stele_a5d.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5d.png "$GOLDEN_PNG_POS_RELATIVE"
+    pass "A5d: blessed pos-relative PNG golden -> $GOLDEN_PNG_POS_RELATIVE (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_POS_RELATIVE" ]; then
+    bad "A5d: no golden at $GOLDEN_PNG_POS_RELATIVE to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_POS_RELATIVE" /tmp/stele_a5d.png; then
+    pass "A5d: PNG dump of $FIXTURE_POS_RELATIVE matches golden"
+  else
+    bad "A5d: PNG dump of $FIXTURE_POS_RELATIVE differs from $GOLDEN_PNG_POS_RELATIVE"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_POS_RELATIVE") actual=$(wc -c < /tmp/stele_a5d.png)"
+  fi
+
+  FIXTURE_POS_FIXED="fixtures/pos-fixed.html"
+  GOLDEN_PNG_POS_FIXED="goldens/pos-fixed.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5e: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_POS_FIXED" /tmp/stele_a5e.png 2>/tmp/stele_a5e.err; then
+    bad "A5e: stele --headless --dump-png crashed on $FIXTURE_POS_FIXED"
+    sed 's/^/    /' /tmp/stele_a5e.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5e.png "$GOLDEN_PNG_POS_FIXED"
+    pass "A5e: blessed pos-fixed PNG golden -> $GOLDEN_PNG_POS_FIXED (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_POS_FIXED" ]; then
+    bad "A5e: no golden at $GOLDEN_PNG_POS_FIXED to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_POS_FIXED" /tmp/stele_a5e.png; then
+    pass "A5e: PNG dump of $FIXTURE_POS_FIXED matches golden"
+  else
+    bad "A5e: PNG dump of $FIXTURE_POS_FIXED differs from $GOLDEN_PNG_POS_FIXED"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_POS_FIXED") actual=$(wc -c < /tmp/stele_a5e.png)"
+  fi
+
+  FIXTURE_POS_AUTO_INSET="fixtures/pos-auto-inset.html"
+  GOLDEN_PNG_POS_AUTO_INSET="goldens/pos-auto-inset.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5f: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_POS_AUTO_INSET" /tmp/stele_a5f.png 2>/tmp/stele_a5f.err; then
+    bad "A5f: stele --headless --dump-png crashed on $FIXTURE_POS_AUTO_INSET"
+    sed 's/^/    /' /tmp/stele_a5f.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5f.png "$GOLDEN_PNG_POS_AUTO_INSET"
+    pass "A5f: blessed pos-auto-inset PNG golden -> $GOLDEN_PNG_POS_AUTO_INSET (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_POS_AUTO_INSET" ]; then
+    bad "A5f: no golden at $GOLDEN_PNG_POS_AUTO_INSET to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_POS_AUTO_INSET" /tmp/stele_a5f.png; then
+    pass "A5f: PNG dump of $FIXTURE_POS_AUTO_INSET matches golden"
+  else
+    bad "A5f: PNG dump of $FIXTURE_POS_AUTO_INSET differs from $GOLDEN_PNG_POS_AUTO_INSET"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_POS_AUTO_INSET") actual=$(wc -c < /tmp/stele_a5f.png)"
+  fi
+
+  FIXTURE_POS_NESTED="fixtures/pos-nested.html"
+  GOLDEN_PNG_POS_NESTED="goldens/pos-nested.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5g: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_POS_NESTED" /tmp/stele_a5g.png 2>/tmp/stele_a5g.err; then
+    bad "A5g: stele --headless --dump-png crashed on $FIXTURE_POS_NESTED"
+    sed 's/^/    /' /tmp/stele_a5g.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5g.png "$GOLDEN_PNG_POS_NESTED"
+    pass "A5g: blessed pos-nested PNG golden -> $GOLDEN_PNG_POS_NESTED (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_POS_NESTED" ]; then
+    bad "A5g: no golden at $GOLDEN_PNG_POS_NESTED to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_POS_NESTED" /tmp/stele_a5g.png; then
+    pass "A5g: PNG dump of $FIXTURE_POS_NESTED matches golden"
+  else
+    bad "A5g: PNG dump of $FIXTURE_POS_NESTED differs from $GOLDEN_PNG_POS_NESTED"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_POS_NESTED") actual=$(wc -c < /tmp/stele_a5g.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
