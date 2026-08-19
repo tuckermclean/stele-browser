@@ -1369,3 +1369,36 @@ Append-only running log. Newest at the bottom.
   net-zero delta vs `main` (T5 removed the whole-document surface path and added
   `RenderState`/`paint_at`; the win is runtime RAM, not binary size), comfortably under
   the 1.44 MB floppy.
+
+## 2026-08-19 — Acid2 Packet 1: CSS positioning (position + top/right/bottom/left)
+
+- **Landed** `position: static | relative | absolute | fixed` + `top`/`right`/`bottom`/`left`
+  offsets, plumbed through the existing style pipeline (`value.rs` parse → `cascade.rs` →
+  `computed.rs` `ComputedStyle.position`/`inset`) onto **taffy 0.13's native** `Position` +
+  `Style.inset` in `block.rs` `base_style` (`Static`/`Relative`→taffy `Relative`,
+  `Absolute`/`Fixed`→taffy `Absolute`). Taffy-native, Acid2-sufficient, YAGNI — see DECISIONS D55.
+- **Containing-block verification (the spec's named risk):** taffy resolves an absolute against
+  its direct parent; CSS 2.1 against the nearest positioned ancestor. Acid2's dominant shape —
+  a `relative` parent wrapping `absolute` children (CB == direct parent) — is handled natively,
+  **confirmed** by the `pos-nested` golden: the absolute child lands against its relative parent
+  (offset below the leading `<p>`), not the viewport. No skip-level-CB bespoke code was needed.
+- **Paint order:** CSS 2.1 paints positioned boxes after in-flow siblings regardless of source
+  order; `emit` walked children in document order (a positioned box declared early painted under
+  a later in-flow block — exposed by httpforever's `.switcher`). Fixed with a stable two-pass
+  partition (static subtrees first, then positioned) — steps 3–6 without z-index (stacking
+  contexts = Packet 2). Regressed zero existing goldens.
+- **Goldens:** five pixel-verified micro-fixtures (`pos-absolute`/`relative`/`fixed`/`auto-inset`/
+  `nested`) blessed from the CI render artifact; `httpforever.{light,dark}` re-blessed (positioning
+  now applies — the fixed `.switcher` leaves the flow, so the page is 30 px shorter and content
+  flows correctly).
+- **Deferred (DECISIONS D55, revisit when Acid2/a later packet needs them — no speculative build):**
+  (A) `fixed` anchors to the body content box, not the viewport root (off by the UA 8 px body
+  margin); (B) an auto-width absolutely/fixed-positioned flex container collapses to zero size
+  (httpforever's SVG-icon `.switcher` — a non-functional no-JS toggle — vanishes; explicitly-sized
+  positioned boxes work). Operator-approved bless-forward of the flow-correct httpforever render.
+- **Size:** the i486 binary is **1,266,844 bytes** (`stele-i486` artifact), **+8,192 B (+0.65 %)**
+  vs `main`'s 1,258,652 — one 8 KB page for the whole positioning feature; **85.9 % of the
+  1.44 MB floppy** (207,716 B headroom).
+- **Acid2 progress:** the Acid2 render moves off the flat 800×3976 px flow toward placed boxes.
+  Still ahead (Packets 2–7): z-index/stacking, generated content, `data:` URIs, min/max/overflow/
+  background-position, `<object>` fallback, then final assembly + the smiley golden.

@@ -3,6 +3,44 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Layout — CSS positioning (Acid2 Packet 1)
+
+### D55 — positioning rides taffy's native `Position`/`inset`; bespoke CB/sizing correction only when Acid2 exposes it
+Acid2 renders as an 800-px flow today because `position`/offsets are ignored;
+Packet 1 makes them real. **Options:** (a) build a bespoke CSS 2.1 positioning
+pass (nearest-positioned-ancestor containing-block resolution, out-of-flow
+sizing, paint order) from scratch; (b) plumb `position`/`top/right/bottom/left`
+onto taffy 0.13's native `Position::{Relative,Absolute}` + `Style.inset`,
+mapping `Static`→`Relative`(auto insets), `Relative`→`Relative`(+insets),
+`Absolute`/`Fixed`→`Absolute`(+insets), and add bespoke correction ONLY where a
+fixture proves taffy diverges. **Choice: (b)** — taffy-native, Acid2-sufficient,
+YAGNI (the test defines the dialect's growth). **Why:** reuses the proven layout
+substrate already driving block/flex/grid/tables; a `static` document maps to
+taffy `Relative`+auto-insets == prior behavior, so no existing golden moves
+except pages that actually use positioning. **Containing-block risk + result:**
+CSS 2.1 resolves an absolute against its nearest *positioned* ancestor; taffy
+against the direct parent. Acid2's dominant shape is a `relative` parent
+wrapping `absolute` children (CB == direct parent) — verified correct by the
+`pos-nested` golden (an absolute child lands against its relative parent, offset
+below the leading flow content, NOT the viewport). **Paint order:** CSS 2.1
+paints positioned boxes after in-flow siblings regardless of source order;
+taffy's `emit` walked children in document order, so a positioned box declared
+early painted under a later in-flow block (exposed by httpforever's `.switcher`).
+Fixed with a stable two-pass partition in `emit` (static subtrees first, then
+positioned) — CSS 2.1 painting steps 3–6 without z-index (true stacking contexts
+= Packet 2). **Deferred (revisit triggers — do not build speculatively):**
+  (A) `Fixed` anchors to its containing block (the body content box), not the
+      viewport root — off by the UA 8px body margin (`pos-fixed` lands at 752,8
+      not 760,0). Harmless with no scroll in the static render; add a root-CB
+      reparent/correction when Acid2 (assembled in Packet 7) or a real page needs
+      viewport-true fixed anchoring.
+  (B) An auto-width absolutely/fixed-positioned flex container of replaced
+      controls collapses to zero size (httpforever's `.switcher`, an SVG-icon
+      theme toggle, vanishes; explicitly-sized positioned boxes like `pos-fixed`
+      work). Auto-sized positioned containers are out of Packet 1 scope; add
+      shrink-to-fit sizing when Acid2 or a later packet needs it. (Operator-
+      approved bless-forward of the flow-correct httpforever render, 2026-08-19.)
+
 ## Rendering — X11 viewport-band painting (O(viewport) RAM, T5)
 
 ### D54 — `paint_viewport_band` paints the FULL fragment sequence at a y-offset, not a culled sub-slice
