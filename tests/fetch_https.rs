@@ -68,7 +68,7 @@ fn body_line_starting_with_Q_survives_the_quiet_trap() {
     // Without -quiet, an s_client body line starting with 'Q' closes the
     // connection. -quiet is on, so the 'Q' line must arrive intact.
     const Q_BODY: &[u8] =
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nQuit\nyes\n";
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nQuit\nyes\n";
     let certs = tls_certs_with("localhost", "IP:127.0.0.1", "qtrap");
     let port = spawn_tls_responder(&certs.leaf_cert, &certs.leaf_key, Q_BODY);
     let resp = get(&format!("https://127.0.0.1:{port}/"), &certs.ca_cert)

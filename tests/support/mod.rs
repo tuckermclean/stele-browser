@@ -453,80 +453,80 @@ fn free_port() -> u16 {
 /// test controls framing exactly (needed for the `Q\n` and stdin-EOF cases).
 ///
 /// Race-safety (readiness): `s_server` needs a moment to bind before a
-/// client can connect. Deliberately spawned WITHOUT `-quiet`, s_server prints
-/// "ACCEPT" to its stdout the instant it starts listening; this function
-/// blocks in the CALLING thread reading that stdout until it sees that
-/// banner (bounded: gives up after ~40 lines or EOF, in which case it just
-/// sleeps briefly instead) before spawning the background thread that serves
-/// the connection. This was verified against the system openssl directly
-/// (see task-7-report.md): the ACCEPT banner lands on stdout, not stderr,
-/// and only appears with `-quiet` OFF — so `-quiet` is dropped fixture-wide.
-/// The extra verbose session/cipher dump s_server then prints ahead of the
-/// real (decrypted) client request is harmless: the serving thread's
-/// `\r\n\r\n` scan finds the real header terminator wherever it lands in the
-/// accumulated buffer, noise or not (also verified directly).
+/// client can connect. A single background thread owns the child's stdout
+/// for the child's whole life: it reads for the "ACCEPT" readiness banner
+/// (s_server prints this the instant it starts listening) and signals a
+/// channel the moment it's seen, then keeps reading the SAME stream onward
+/// for the client's decrypted request, up through its `\r\n\r\n` terminator,
+/// before writing `response` to s_server's stdin and closing it. This
+/// function (the caller) blocks on `recv_timeout` — bounded to 5s — rather
+/// than an unbounded read, so a missing or differently-spelled banner (a
+/// different openssl build) costs a one-time delay, never a hang.
 pub fn spawn_tls_responder(cert: &PathBuf, key: &PathBuf, response: &'static [u8]) -> u16 {
     let port = free_port();
     let cert = cert.clone();
     let key = key.clone();
-
-    let mut child = Command::new("openssl")
-        .arg("s_server")
-        .args(["-accept", &port.to_string()])
-        .args(["-cert", cert.to_str().unwrap()])
-        .args(["-key", key.to_str().unwrap()])
-        .args(["-naccept", "1"]) // serve exactly one connection, then exit
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn openssl s_server");
-
-    let mut stdout = child.stdout.take().expect("s_server stdout is piped");
-
-    // Block until the ACCEPT readiness banner shows up, bounded so a missing
-    // or differently-spelled banner (a different openssl build) can't hang
-    // the test suite forever.
-    let mut seen = Vec::new();
-    let mut tmp = [0u8; 256];
-    let mut ready = false;
-    while seen.iter().filter(|&&b| b == b'\n').count() < 40 {
-        match stdout.read(&mut tmp) {
-            Ok(0) => break, // EOF before ACCEPT: openssl exited early
-            Ok(n) => {
-                seen.extend_from_slice(&tmp[..n]);
-                if find(&seen, b"ACCEPT").is_some() {
-                    ready = true;
-                    break;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        let mut child = match Command::new("openssl")
+            .arg("s_server")
+            .args(["-accept", &port.to_string()])
+            .args(["-cert", cert.to_str().unwrap()])
+            .args(["-key", key.to_str().unwrap()])
+            .args(["-naccept", "1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = ready_tx.send(());
+                return;
+            }
+        };
+        let mut stdout = match child.stdout.take() {
+            Some(o) => o,
+            None => {
+                let _ = ready_tx.send(());
+                return;
+            }
+        };
+        // One reader owns stdout: s_server prints a startup banner containing
+        // "ACCEPT" when it is listening, then (after a client connects) the
+        // decrypted request. Signal readiness on ACCEPT; keep reading until the
+        // request's \r\n\r\n, then write the canned response.
+        let mut seen: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let mut signalled = false;
+        loop {
+            match stdout.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    seen.extend_from_slice(&tmp[..n]);
+                    if !signalled && find(&seen, b"ACCEPT").is_some() {
+                        signalled = true;
+                        let _ = ready_tx.send(());
+                    }
+                    if find(&seen, b"\r\n\r\n").is_some() {
+                        break;
+                    }
                 }
             }
-            Err(_) => break,
         }
-    }
-    if !ready {
-        // No banner within the bound: fall back to a fixed beat so s_server
-        // has finished binding before the real client dials in.
-        thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    // Only after readiness: hand the connection off to a background thread
-    // that reads the client's (decrypted) request from s_server's stdout
-    // until the header terminator, then writes the canned response to
-    // s_server's stdin and closes it (closing stdin closes the TLS conn).
-    thread::spawn(move || {
-        while find(&seen, b"\r\n\r\n").is_none() {
-            let mut buf = [0u8; 1024];
-            match stdout.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
+        if !signalled {
+            let _ = ready_tx.send(());
         }
         if let Some(mut sin) = child.stdin.take() {
             let _ = sin.write_all(response);
             let _ = sin.flush();
+            // dropping sin closes s_server's stdin → it closes the TLS connection
         }
         let _ = child.wait();
     });
-
+    // Bounded readiness: return once s_server signals ACCEPT, or after 5s no
+    // matter what (a banner-text difference on some openssl build then just
+    // costs a one-time delay per fixture — never a hang).
+    let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
     port
 }
