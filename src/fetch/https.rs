@@ -51,7 +51,7 @@ pub(crate) fn resolve_ca_file() -> Result<String, FetchError> {
 /// these cannot verify safely, so https is UNAVAILABLE (fail closed).
 pub(crate) const REQUIRED_FLAGS: &[&str] = &[
     "-connect", "-servername", "-verify_return_error",
-    "-verify_hostname", "-CAfile", "-quiet", "-no_ign_eof",
+    "-verify_hostname", "-verify_ip", "-CAfile", "-quiet", "-no_ign_eof",
 ];
 
 /// The actual probe work (no cache) — spawns `openssl s_client -help` and
@@ -123,15 +123,23 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<OpensslStream, FetchError
     probe()?; // fail closed before we ever open a socket
     let ca = resolve_ca_file()?;
 
-    let child = Command::new("openssl")
+    let mut command = Command::new("openssl");
+    command
         .arg("s_client")
         .arg("-quiet") // no interactive mode (the `Q`-at-line-start trap)
         .arg("-no_ign_eof") // let our stdin EOF propagate a close (-quiet implies -ign_eof)
         .args(["-connect", &format!("{host}:{port}")])
         .args(["-servername", host])
         .arg("-verify_return_error") // a verify failure aborts, non-zero exit
-        .args(["-verify_hostname", host])
-        .args(["-CAfile", &ca])
+        .args(["-CAfile", &ca]);
+    // openssl verifies IP-literal peers with -verify_ip and DNS names with
+    // -verify_hostname; using the wrong one is a spurious hostname mismatch.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        command.args(["-verify_ip", host]);
+    } else {
+        command.args(["-verify_hostname", host]);
+    }
+    let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -321,7 +329,7 @@ mod tests {
         // probe_uncached (NOT the cached probe()) so it never pollutes the
         // OnceLock that connect() uses.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let help = "-connect -servername -verify_return_error -verify_hostname -CAfile -quiet"; // no -no_ign_eof
+        let help = "-connect -servername -verify_return_error -verify_hostname -verify_ip -CAfile -quiet"; // no -no_ign_eof
         let dir = stub_openssl_dir(help);
         let old = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{}", dir.display(), old));
