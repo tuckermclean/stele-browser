@@ -1322,7 +1322,7 @@ fn run_x11(source: &str) {
         };
 
         match event {
-            xproto::XEvent::Expose => {
+            xproto::XEvent::Expose { .. } => {
                 if !focus_set {
                     // Window is guaranteed viewable now (Expose only fires
                     // for a viewable window) -- see run_x11's doc comment

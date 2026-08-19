@@ -623,7 +623,7 @@ pub fn keysym_to_key(keysym: u32) -> Option<X11Key> {
 pub enum XEvent {
     KeyPress { keycode: u8, state: u16 },
     ButtonPress { button: u8, x: i16, y: i16 },
-    Expose,
+    Expose { x: u16, y: u16, w: u16, h: u16, count: u16 },
     ConfigureNotify { width: u16, height: u16 },
     Other,
 }
@@ -674,7 +674,13 @@ pub fn parse_event(buf: &[u8]) -> Option<XEvent> {
     match code {
         EVENT_CODE_KEY_PRESS => Some(XEvent::KeyPress { keycode: buf[1], state: get_u16_le(buf, 28)? }),
         EVENT_CODE_BUTTON_PRESS => Some(XEvent::ButtonPress { button: buf[1], x: get_u16_le(buf, 24)? as i16, y: get_u16_le(buf, 26)? as i16 }),
-        EVENT_CODE_EXPOSE => Some(XEvent::Expose),
+        EVENT_CODE_EXPOSE => Some(XEvent::Expose {
+            x: get_u16_le(buf, 8)?,
+            y: get_u16_le(buf, 10)?,
+            w: get_u16_le(buf, 12)?,
+            h: get_u16_le(buf, 14)?,
+            count: get_u16_le(buf, 16)?,
+        }),
         EVENT_CODE_CONFIGURE_NOTIFY => Some(XEvent::ConfigureNotify { width: get_u16_le(buf, 20)?, height: get_u16_le(buf, 22)? }),
         _ => Some(XEvent::Other),
     }
@@ -1269,7 +1275,7 @@ mod tests {
         assert_eq!(full[0], 1);
         assert_eq!(&full[32..36], &[0xaa, 0xbb, 0xcc, 0xdd]);
         // Both preceding events were queued (not swallowed / misread):
-        assert_eq!(pending.pop_front(), Some(XEvent::Expose));
+        assert_eq!(pending.pop_front(), Some(XEvent::Expose { x: 0, y: 0, w: 0, h: 0, count: 0 }));
         assert_eq!(pending.pop_front(), Some(XEvent::Other)); // MapNotify
         assert!(pending.is_empty());
     }
@@ -1550,7 +1556,23 @@ mod tests {
     #[test]
     fn parse_event_expose() {
         let buf = synth_event(12, 0, &[]);
-        assert_eq!(parse_event(&buf), Some(XEvent::Expose));
+        assert_eq!(parse_event(&buf), Some(XEvent::Expose { x: 0, y: 0, w: 0, h: 0, count: 0 }));
+    }
+
+    #[test]
+    fn parse_event_expose_carries_region_and_count() {
+        // Expose event (code 12): x@8, y@10, width@12, height@14, count@16.
+        let mut buf = [0u8; 32];
+        buf[0] = 12;
+        buf[8..10].copy_from_slice(&40u16.to_le_bytes());   // x
+        buf[10..12].copy_from_slice(&50u16.to_le_bytes());  // y
+        buf[12..14].copy_from_slice(&300u16.to_le_bytes()); // width
+        buf[14..16].copy_from_slice(&200u16.to_le_bytes()); // height
+        buf[16..18].copy_from_slice(&3u16.to_le_bytes());   // count
+        assert_eq!(
+            parse_event(&buf),
+            Some(XEvent::Expose { x: 40, y: 50, w: 300, h: 200, count: 3 })
+        );
     }
 
     #[test]
@@ -1562,7 +1584,7 @@ mod tests {
     #[test]
     fn parse_event_masks_off_the_send_event_bit() {
         let buf = synth_event(12 | 0x80, 0, &[]);
-        assert_eq!(parse_event(&buf), Some(XEvent::Expose));
+        assert_eq!(parse_event(&buf), Some(XEvent::Expose { x: 0, y: 0, w: 0, h: 0, count: 0 }));
     }
 
     #[test]
