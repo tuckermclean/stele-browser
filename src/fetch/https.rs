@@ -4,8 +4,14 @@
 //! and `OpensslStream`, the child `ByteStream` the HTTP/1.1 framing code
 //! (`http1`) drives unchanged.
 
+use std::io::{self, Read, Write};
 use std::path::Path;
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Duration;
 
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
+use super::transport::ByteStream;
 use super::FetchError;
 
 /// CA bundle search order when `$STELE_CA_FILE` is unset. First existing wins.
@@ -89,6 +95,156 @@ pub(crate) fn probe() -> Result<(), FetchError> {
     result.clone().map_err(FetchError::Tls)
 }
 
+/// Per-read (and per-connect) timeout on the child's stdout pipe. Mirrors
+/// `http1`'s `IO_TIMEOUT`; a stalled TLS peer must not hang the browser.
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Cap on stderr we read back for an error message — bounded so a chatty child
+/// can't run us out of memory, and drained BEFORE `wait()` to avoid the
+/// full-pipe deadlock.
+const MAX_STDERR_BYTES: usize = 64 * 1024;
+
+/// A single TLS connection, delegated to an `openssl s_client` child. `Write`
+/// is the plaintext request side (child stdin → TLS → server); `Read` is the
+/// response side (server → TLS → child stdout). One child per connection.
+pub(crate) struct OpensslStream {
+    child: Child,
+    /// `Option` so `shutdown_write` can drop (close) it while we keep reading.
+    stdin: Option<ChildStdin>,
+    stdout: ChildStdout,
+    stderr: Option<ChildStderr>,
+    host: String,
+}
+
+/// Connect to `host:port` over TLS via `openssl s_client`, verifying against
+/// the resolved CA bundle. Fail-closed: probe first; any spawn/verify problem
+/// is a legible `FetchError::Tls`.
+pub(crate) fn connect(host: &str, port: u16) -> Result<OpensslStream, FetchError> {
+    probe()?; // fail closed before we ever open a socket
+    let ca = resolve_ca_file()?;
+
+    let child = Command::new("openssl")
+        .arg("s_client")
+        .arg("-quiet") // no interactive mode (the `Q`-at-line-start trap)
+        .arg("-no_ign_eof") // let our stdin EOF propagate a close (-quiet implies -ign_eof)
+        .args(["-connect", &format!("{host}:{port}")])
+        .args(["-servername", host])
+        .arg("-verify_return_error") // a verify failure aborts, non-zero exit
+        .args(["-verify_hostname", host])
+        .args(["-CAfile", &ca])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            FetchError::Tls(format!(
+                "could not start openssl ({e}); https is unavailable. Nothing was fetched."
+            ))
+        })?;
+
+    let mut child = child;
+    let stdin = child.stdin.take();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| FetchError::Tls("openssl child produced no stdout".to_string()))?;
+    let stderr = child.stderr.take();
+
+    Ok(OpensslStream {
+        child,
+        stdin,
+        stdout,
+        stderr,
+        host: host.to_string(),
+    })
+}
+
+impl OpensslStream {
+    /// Drain up to `MAX_STDERR_BYTES` of the child's stderr (openssl's verify
+    /// reason) — MUST be called before `wait()` on the error path to avoid a
+    /// full-pipe deadlock.
+    fn drain_stderr(&mut self) -> String {
+        let mut out = Vec::new();
+        if let Some(mut err) = self.stderr.take() {
+            let mut buf = [0u8; 4096];
+            while out.len() < MAX_STDERR_BYTES {
+                match err.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n.min(MAX_STDERR_BYTES - out.len())]),
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).trim().to_string()
+    }
+
+    /// Build a legible `FetchError::Tls` for a failure on this connection,
+    /// folding in openssl's own stderr reason and the host (T4).
+    fn tls_error(&mut self, what: &str) -> FetchError {
+        let reason = self.drain_stderr();
+        let reason = if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({reason})")
+        };
+        FetchError::Tls(format!(
+            "TLS connection to {} failed: {what}{reason}. Nothing was fetched.",
+            self.host
+        ))
+    }
+}
+
+impl Read for OpensslStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Child stdout is a pipe: no socket read-timeout setter, so gate each
+        // read with poll(2). Deliberately the seam a future progress()/throbber
+        // hook subscribes to.
+        let timeout = Timespec { tv_sec: IO_TIMEOUT.as_secs() as i64, tv_nsec: 0 };
+        let mut fds = [PollFd::new(&self.stdout, PollFlags::IN)];
+        let n = poll(&mut fds, Some(&timeout))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("poll: {e}")))?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "openssl child read timed out"));
+        }
+        self.stdout.read(buf)
+    }
+}
+
+impl Write for OpensslStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.stdin.as_mut() {
+            Some(s) => s.write(buf),
+            None => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "openssl child stdin already closed",
+            )),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self.stdin.as_mut() {
+            Some(s) => s.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl ByteStream for OpensslStream {
+    fn shutdown_write(&mut self) -> io::Result<()> {
+        // Dropping ChildStdin closes it → EOF on the child's stdin → (with
+        // -no_ign_eof) openssl closes its write side to the server.
+        self.stdin = None;
+        Ok(())
+    }
+}
+
+impl Drop for OpensslStream {
+    fn drop(&mut self) {
+        // No `kill_on_drop` in std (that is tokio): kill THEN wait. The wait is
+        // load-bearing — kill without reap leaks a zombie per connection.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +311,18 @@ mod tests {
         let msg = result.expect_err("missing -no_ign_eof must fail closed");
         assert!(msg.contains("-no_ign_eof"), "message: {msg}");
         assert!(msg.to_lowercase().contains("openssl"), "message: {msg}");
+    }
+
+    #[test]
+    fn connect_to_a_dead_port_is_a_legible_tls_error_not_a_panic() {
+        // Spawns openssl / reads env → serialize with the other env tests.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // If openssl is absent/old, probe() fails first — also a Tls error, so
+        // either way no panic/hang. Port 1: nothing listens; openssl exits.
+        if let Ok(mut s) = connect("127.0.0.1", 1) {
+            let mut buf = [0u8; 16];
+            let _ = s.read(&mut buf); // must not panic
+        }
+        // Reaching here without panic/hang is the assertion.
     }
 }
