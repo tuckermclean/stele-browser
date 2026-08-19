@@ -1526,14 +1526,17 @@ fn run_x11(source: &str) {
                     // it ever becomes an XIntent -- nothing to re-check here.
                     width = w as u32;
                     height = h as u32;
-                    let _ = conn.free_pixmap(pixmap);
-                    pixmap = match conn.create_pixmap(window, depth, width as u16, height as u16) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("stele: --x11: recreate pixmap failed: {e}");
-                            0
+                    // Create the new back buffer BEFORE freeing the old one: if the
+                    // create fails, keep the old (wrong-sized but VALID) pixmap so the
+                    // window keeps presenting and a later resize retries — freeing
+                    // first would leave `pixmap` permanently unusable.
+                    match conn.create_pixmap(window, depth, width as u16, height as u16) {
+                        Ok(new_pixmap) => {
+                            let _ = conn.free_pixmap(pixmap);
+                            pixmap = new_pixmap;
                         }
-                    };
+                        Err(e) => eprintln!("stele: --x11: recreate pixmap failed, keeping old buffer: {e}"),
+                    }
                     match reflow_from_dom(&session.dom, &session.final_url, width) {
                         Ok((s, f)) => {
                             surface = s;

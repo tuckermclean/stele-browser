@@ -757,12 +757,12 @@ pub fn coalesce(intents: Vec<XIntent>) -> Vec<XIntent> {
             ) => {
                 let x0 = (*x).min(nx);
                 let y0 = (*y).min(ny);
-                let x1 = (*x + *w).max(nx + nw);
-                let y1 = (*y + *h).max(ny + nh);
+                let x1 = (*x).saturating_add(*w).max(nx.saturating_add(nw));
+                let y1 = (*y).saturating_add(*h).max(ny.saturating_add(nh));
                 *x = x0;
                 *y = y0;
-                *w = x1 - x0;
-                *h = y1 - y0;
+                *w = x1.saturating_sub(x0);
+                *h = y1.saturating_sub(y0);
             }
             (_, other) => out.push(other),
         }
@@ -1807,6 +1807,18 @@ mod tests {
         ];
         // Union bounding box: x 10..60, y 5..45 => x=10,y=5,w=50,h=40.
         assert_eq!(coalesce(batch), vec![XIntent::Expose { x: 10, y: 5, w: 50, h: 40 }]);
+    }
+
+    #[test]
+    fn coalesce_expose_union_saturates_on_huge_coords_no_panic() {
+        // A hostile/buggy server could send Expose coords whose x+w overflows
+        // u16; the union must saturate, not panic (totality).
+        let batch = vec![
+            XIntent::Expose { x: 60000, y: 60000, w: 60000, h: 60000 },
+            XIntent::Expose { x: 0, y: 0, w: 10, h: 10 },
+        ];
+        let out = coalesce(batch);
+        assert_eq!(out, vec![XIntent::Expose { x: 0, y: 0, w: 65535, h: 65535 }]);
     }
 
     #[test]
