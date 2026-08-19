@@ -1256,6 +1256,41 @@ fn x11_scroll_to(
     }
 }
 
+/// Session-accumulated debug counters for `run_x11`, printed to stderr on
+/// quit when `STELE_X11_STATS` is set (any value). Loop instrumentation
+/// only -- deliberately no dedicated unit test, same as `run_x11` itself.
+///
+/// `batches`/`events`/`scrolls`/`frames` are counted exactly, at the site
+/// where the thing actually happens. `copy_areas`/`put_image_bytes` are
+/// honest approximations taken at `run_x11`'s own call sites rather than
+/// threaded through [`x11_full_redraw`]/[`x11_scroll_to`] (which would mean
+/// changing their signatures just to carry a counter out): `copy_areas`
+/// only counts the one explicit `CopyArea` `run_x11` issues itself (the
+/// `Expose` present), and `put_image_bytes` approximates each
+/// [`x11_full_redraw`] call as one full-window `PutImage` of
+/// `width * height * 4` bytes (BGRA8, the fb encoder's most common case --
+/// it undercounts for lower bpp formats and doesn't count
+/// [`x11_scroll_to`]'s partial-strip `PutImage`s at all).
+#[derive(Default)]
+struct X11Stats {
+    /// Number of `drain_events` calls (one non-blocking poll-until-empty
+    /// batch each).
+    batches: u64,
+    /// Total raw `XEvent`s drained across all batches (pre-coalesce).
+    events: u64,
+    /// Number of times a scroll intent actually moved `scroll_y` and
+    /// triggered an [`x11_scroll_to`] repaint.
+    scrolls: u64,
+    /// Number of `CopyArea` ops `run_x11` issued directly (the `Expose`
+    /// present path only -- see struct doc).
+    copy_areas: u64,
+    /// Approximate total `PutImage` bytes over the session -- see struct
+    /// doc for the approximation.
+    put_image_bytes: u64,
+    /// Number of paint brackets (`begin_frame`/`end_frame` pairs).
+    frames: u64,
+}
+
 /// `stele --x11 <url>`: open a real X11 window (kdrive/Xfbdev, core
 /// protocol only — see `backend::x11`'s own doc comment for the wire
 /// details) and drive it interactively. Each loop iteration DRAINS every
@@ -1306,8 +1341,21 @@ fn x11_scroll_to(
 /// total throughout: every socket read goes through `XConnection`'s own
 /// fixed-size-buffer reads, and a page-load/reload/navigate failure prints
 /// to stderr and keeps the previous frame on screen rather than panicking.
+///
+/// Debug counters (`STELE_X11_STATS=1`): [`X11Stats`] is accumulated for the
+/// whole session and printed to stderr on quit. It's loop instrumentation
+/// only -- no dedicated unit test -- see the struct doc for what each field
+/// means and how it's counted.
 fn run_x11(source: &str) {
     use stele::backend::x11::{self as xproto, XConnection};
+
+    // Debug-only counters, gated on STELE_X11_STATS so a normal run pays
+    // nothing but the env lookup. See X11Stats's doc comment for the
+    // per-field counting rules (some fields are exact, some are honest
+    // approximations taken at the run_x11 call site rather than threaded
+    // through the paint helpers).
+    let x11_stats_enabled = std::env::var("STELE_X11_STATS").is_ok();
+    let mut stats = X11Stats::default();
 
     let mut history = browser::History::new(resolve_url(source));
 
@@ -1390,15 +1438,22 @@ fn run_x11(source: &str) {
     conn.begin_frame();
     x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
     let _ = conn.end_frame();
+    stats.frames += 1;
+    stats.put_image_bytes += width as u64 * height as u64 * 4;
 
     loop {
         let batch = match conn.drain_events() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("stele: --x11: connection closed: {e}");
+                if x11_stats_enabled {
+                    print_x11_stats(&stats);
+                }
                 break;
             }
         };
+        stats.batches += 1;
+        stats.events += batch.len() as u64;
 
         let intents: Vec<xproto::XIntent> = batch
             .iter()
@@ -1418,9 +1473,11 @@ fn run_x11(source: &str) {
                     let old = scroll_y;
                     scroll_y = ((old as i64 + d as i64).clamp(0, max_scroll as i64)) as u32;
                     if scroll_y != old {
+                        stats.scrolls += 1;
                         conn.begin_frame();
                         x11_scroll_to(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                         let _ = conn.end_frame();
+                        stats.frames += 1;
                     }
                 }
                 xproto::XIntent::Click { x, y } => {
@@ -1443,6 +1500,8 @@ fn run_x11(source: &str) {
                         conn.begin_frame();
                         x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                         let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
                     }
                 }
                 xproto::XIntent::Reload => {
@@ -1458,6 +1517,8 @@ fn run_x11(source: &str) {
                     conn.begin_frame();
                     x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                     let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.put_image_bytes += width as u64 * height as u64 * 4;
                 }
                 xproto::XIntent::Resize { w, h } => {
                     // classify_x11_intent already screens out a 0x0
@@ -1487,6 +1548,8 @@ fn run_x11(source: &str) {
                     conn.begin_frame();
                     x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                     let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.put_image_bytes += width as u64 * height as u64 * 4;
                 }
                 xproto::XIntent::Expose { x, y, w, h } => {
                     if !focus_set {
@@ -1506,13 +1569,29 @@ fn run_x11(source: &str) {
                         eprintln!("stele: --x11: Expose CopyArea failed: {e}");
                     }
                     let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.copy_areas += 1;
                 }
             }
         }
         if quit {
+            if x11_stats_enabled {
+                print_x11_stats(&stats);
+            }
             break;
         }
     }
+}
+
+/// Prints [`X11Stats`]'s one-line summary to stderr. Split out of
+/// [`run_x11`] purely so both quit paths (a clean `Quit` intent and the
+/// connection-closed error path) can share the same print without
+/// duplicating the format string.
+fn print_x11_stats(stats: &X11Stats) {
+    eprintln!(
+        "stele x11 stats: {} batches, {} events, {} scrolls, {} frames, {} copy_areas, {} put_image_bytes",
+        stats.batches, stats.events, stats.scrolls, stats.frames, stats.copy_areas, stats.put_image_bytes
+    );
 }
 
 /// Classify one raw [`xproto::XEvent`] into an [`xproto::XIntent`] for
