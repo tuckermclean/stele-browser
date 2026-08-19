@@ -985,7 +985,17 @@ struct X11Session {
 /// anywhere on this path for the compiler to type-check against. Total:
 /// layout failure is a clean `Err`, never a panic -- `run_x11` degrades to
 /// a blank page rather than propagating a panic into the event loop.
-fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fragment>), String> {
+/// The retained, O(1)-in-viewport render state for `--x11`: the fragment list
+/// (already produced by layout) plus the bg-image map and document height.
+/// Painting is DEFERRED to `paint_viewport_band` — no whole-document surface is
+/// ever allocated (the tall-page doctrine: interactive RAM is O(viewport)).
+struct RenderState {
+    fragments: Vec<layout::Fragment>,
+    bg_images: std::collections::HashMap<String, std::rc::Rc<stele::img::RgbaImage>>,
+    doc_height: u32,
+}
+
+fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Result<RenderState, String> {
     if frames::find_frameset(dom_tree).is_some() {
         return Err("frameset documents are not supported by --x11".to_string());
     }
@@ -1014,13 +1024,45 @@ fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Res
             content_bottom = content_bottom.max(y + h);
         }
     }
-    let height = if content_bottom.is_finite() && content_bottom > 0.0 { (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT) } else { 1 };
-
+    let doc_height = if content_bottom.is_finite() && content_bottom > 0.0 {
+        (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT)
+    } else {
+        1
+    };
     let bg_images = stele::bg_images::collect_bg_images(&styles, final_url);
+    Ok(RenderState { fragments, bg_images, doc_height })
+}
 
-    let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
-    Ok((surface, fragments))
+/// The fragments intersecting the page-y band `[band_page_y, band_page_y +
+/// band_h)`, cloned and translated into band-local coords (origin.y shifted up
+/// by `band_page_y`). Culling keeps painting O(visible), not O(document).
+fn visible_translated_fragments(fragments: &[layout::Fragment], band_page_y: u32, band_h: u32) -> Vec<layout::Fragment> {
+    let y0 = band_page_y as f32;
+    let y1 = (band_page_y + band_h) as f32;
+    fragments
+        .iter()
+        .filter(|f| {
+            let y = f.rect.origin.y;
+            let h = f.rect.size.h;
+            y.is_finite() && h.is_finite() && (y + h) > y0 && y < y1
+        })
+        .map(|f| {
+            let mut g = f.clone();
+            g.rect.origin.y -= y0;
+            g
+        })
+        .collect()
+}
+
+/// Paint only the page-y band `[band_page_y, band_page_y + band_h)` into a
+/// fresh `band_h`-tall surface (O(viewport) RAM). `raster::paint` is reused
+/// unchanged; `MemSurface` clips any straddling-fragment writes to the band.
+fn paint_viewport_band(state: &RenderState, width: u32, band_page_y: u32, band_h: u32) -> MemSurface {
+    let band_h = band_h.max(1);
+    let visible = visible_translated_fragments(&state.fragments, band_page_y, band_h);
+    let mut band = MemSurface::new(width, band_h, Color::WHITE);
+    raster::paint(&mut band, &visible, &state.bg_images, Color::WHITE);
+    band
 }
 
 /// Fetch + parse `url` into a fresh [`X11Session`], then [`reflow_from_dom`]
@@ -1031,14 +1073,14 @@ fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Res
 /// fetch/parse/layout failure is a clean `Err`, never a panic -- `run_x11`
 /// degrades to a blank page rather than propagating a panic into the event
 /// loop.
-fn load_x11_page(url: &Url, width: u32) -> Result<(X11Session, MemSurface, Vec<layout::Fragment>), String> {
+fn load_x11_page(url: &Url, width: u32) -> Result<(X11Session, RenderState), String> {
     let response = fetch_response(url)?;
     let html = String::from_utf8_lossy(&response.body);
     let dom_tree = dom::parser::parse(&html);
 
     let session = X11Session { dom: dom_tree, final_url: response.final_url };
-    let (surface, fragments) = reflow_from_dom(&session.dom, &session.final_url, width)?;
-    Ok((session, surface, fragments))
+    let state = reflow_from_dom(&session.dom, &session.final_url, width)?;
+    Ok((session, state))
 }
 
 /// Window pixel width, the drawable's bits-per-pixel, and the format's
@@ -1186,8 +1228,9 @@ const X11_LINE_SCROLL: u32 = 60;
 /// it's called from both `run_x11` and [`x11_scroll_to`]'s `Full`
 /// fallback.
 #[allow(clippy::too_many_arguments)]
-fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, surface: &MemSurface, pixmap: u32, window: u32, gc: u32, depth: u8, bpp: u32, scanline_pad: u32, width: u32, height: u32, scroll_y: u32) {
-    let cropped = crop_surface_rows(surface, width, height, scroll_y);
+fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, state: &RenderState, pixmap: u32, window: u32, gc: u32, depth: u8, bpp: u32, scanline_pad: u32, width: u32, height: u32, scroll_y: u32) {
+    let band = paint_viewport_band(state, width, scroll_y, height);
+    let cropped = crop_surface_rows(&band, width, height, 0);
     let stride = x11_row_stride(width, bpp, scanline_pad);
     let fb_info = fb::FbInfo { width, height, bpp, stride };
     match fb::convert_to_fb_bytes(&cropped, width, height, fb_info) {
@@ -1216,7 +1259,7 @@ fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, surface: &MemSur
 #[allow(clippy::too_many_arguments)]
 fn x11_scroll_to(
     conn: &mut stele::backend::x11::XConnection,
-    surface: &MemSurface,
+    state: &RenderState,
     pixmap: u32,
     window: u32,
     gc: u32,
@@ -1229,7 +1272,7 @@ fn x11_scroll_to(
     new_scroll_y: u32,
 ) {
     match scroll_blit(old_scroll_y, new_scroll_y, height) {
-        ScrollBlit::Full => x11_full_redraw(conn, surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y),
+        ScrollBlit::Full => x11_full_redraw(conn, state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y),
         ScrollBlit::Partial { copy_src_y, copy_dst_y, copy_h, strip_page_y, strip_dst_y, strip_h } => {
             if copy_h > 0 {
                 if let Err(e) = conn.copy_area(pixmap, pixmap, gc, 0, copy_src_y as i16, 0, copy_dst_y as i16, width as u16, copy_h as u16) {
@@ -1237,7 +1280,8 @@ fn x11_scroll_to(
                 }
             }
             if strip_h > 0 {
-                let cropped = crop_surface_rows(surface, width, strip_h, strip_page_y);
+                let band = paint_viewport_band(state, width, strip_page_y, strip_h);
+                let cropped = crop_surface_rows(&band, width, strip_h, 0);
                 let stride = x11_row_stride(width, bpp, scanline_pad);
                 let fb_info = fb::FbInfo { width, height: strip_h, bpp, stride };
                 match fb::convert_to_fb_bytes(&cropped, width, strip_h, fb_info) {
@@ -1415,11 +1459,14 @@ fn run_x11(source: &str) {
     let min_keycode = conn.setup.min_keycode;
 
     let mut scroll_y: u32 = 0;
-    let (mut session, mut surface, mut fragments) = match load_x11_page(history.current(), width) {
+    let (mut session, mut state) = match load_x11_page(history.current(), width) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("stele: --x11: initial page load failed: {e}");
-            (X11Session { dom: dom::parser::parse(""), final_url: history.current().clone() }, MemSurface::new(width, 1, Color::WHITE), Vec::new())
+            (
+                X11Session { dom: dom::parser::parse(""), final_url: history.current().clone() },
+                RenderState { fragments: Vec::new(), bg_images: std::collections::HashMap::new(), doc_height: 1 },
+            )
         }
     };
 
@@ -1436,7 +1483,7 @@ fn run_x11(source: &str) {
     };
 
     conn.begin_frame();
-    x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
     let _ = conn.end_frame();
     stats.frames += 1;
     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1468,14 +1515,13 @@ fn run_x11(source: &str) {
                     break;
                 }
                 xproto::XIntent::ScrollBy(d) => {
-                    let (_, doc_h) = stele::surface::Surface::size(&surface);
-                    let max_scroll = x11_max_scroll(doc_h, height);
+                    let max_scroll = x11_max_scroll(state.doc_height, height);
                     let old = scroll_y;
                     scroll_y = ((old as i64 + d as i64).clamp(0, max_scroll as i64)) as u32;
                     if scroll_y != old {
                         stats.scrolls += 1;
                         conn.begin_frame();
-                        x11_scroll_to(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
+                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
                         let _ = conn.end_frame();
                         stats.frames += 1;
                     }
@@ -1483,14 +1529,13 @@ fn run_x11(source: &str) {
                 xproto::XIntent::Click { x, y } => {
                     let doc_x = x.max(0) as f32;
                     let doc_y = y.max(0) as f32 + scroll_y as f32;
-                    if let Some(href) = xproto::hit_test_pixel(&fragments, doc_x, doc_y) {
+                    if let Some(href) = xproto::hit_test_pixel(&state.fragments, doc_x, doc_y) {
                         let new_url = history.current().resolve(&href);
                         history.navigate(new_url.clone());
                         match load_x11_page(&new_url, width) {
-                            Ok((sess, s, f)) => {
+                            Ok((sess, s)) => {
                                 session = sess;
-                                surface = s;
-                                fragments = f;
+                                state = s;
                                 scroll_y = 0;
                             }
                             Err(e) => eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}"),
@@ -1498,7 +1543,7 @@ fn run_x11(source: &str) {
                         // New content -- full repaint, same reasoning as
                         // ConfigureNotify below.
                         conn.begin_frame();
-                        x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1506,16 +1551,15 @@ fn run_x11(source: &str) {
                 }
                 xproto::XIntent::Reload => {
                     match load_x11_page(history.current(), width) {
-                        Ok((sess, s, f)) => {
+                        Ok((sess, s)) => {
                             session = sess;
-                            surface = s;
-                            fragments = f;
+                            state = s;
                             scroll_y = 0;
                         }
                         Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
                     }
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1538,18 +1582,16 @@ fn run_x11(source: &str) {
                         Err(e) => eprintln!("stele: --x11: recreate pixmap failed, keeping old buffer: {e}"),
                     }
                     match reflow_from_dom(&session.dom, &session.final_url, width) {
-                        Ok((s, f)) => {
-                            surface = s;
-                            fragments = f;
+                        Ok(s) => {
+                            state = s;
                         }
                         Err(e) => eprintln!("stele: --x11: reflow after resize failed: {e}"),
                     }
-                    let (_, doc_h) = stele::surface::Surface::size(&surface);
-                    scroll_y = scroll_y.min(x11_max_scroll(doc_h, height));
+                    scroll_y = scroll_y.min(x11_max_scroll(state.doc_height, height));
                     // Content (and the window geometry itself) changed --
                     // nothing on screen is safe to retain via CopyArea.
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2167,10 +2209,49 @@ mod tests {
         let html = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/basic.html")).unwrap();
         let dom_tree = dom::parser::parse(&html);
         let url = Url::new("file:///fixtures/basic.html");
-        let (surface, fragments) = reflow_from_dom(&dom_tree, &url, 800).expect("reflow renders");
-        assert!(!fragments.is_empty(), "basic.html must produce fragments");
-        let (w, _) = stele::surface::Surface::size(&surface);
-        assert_eq!(w, 800);
+        let state = reflow_from_dom(&dom_tree, &url, 800).expect("reflow renders");
+        assert!(!state.fragments.is_empty(), "basic.html must produce fragments");
+    }
+
+    #[test]
+    fn paint_viewport_band_allocates_a_viewport_sized_surface_not_the_document() {
+        // A very tall document scrolled far down must still paint into a
+        // band-HEIGHT surface (O(viewport)), never a document-height one.
+        let html = format!("<html><body>{}</body></html>", "<p>line</p>".repeat(4000));
+        let dom = stele::dom::parser::parse(&html);
+        let state = reflow_from_dom(&dom, &Url::new("file:///tall.html"), 800).expect("reflow");
+        assert!(state.doc_height > 5000, "the fixture must be genuinely tall (was {})", state.doc_height);
+        let band = paint_viewport_band(&state, 800, 4000, 768);
+        assert_eq!(stele::surface::Surface::size(&band), (800, 768), "band surface must be viewport-sized regardless of doc height");
+    }
+
+    #[test]
+    fn visible_translated_fragments_culls_out_of_band_and_translates() {
+        let html = format!("<html><body>{}</body></html>", "<p>line</p>".repeat(4000));
+        let dom = stele::dom::parser::parse(&html);
+        let state = reflow_from_dom(&dom, &Url::new("file:///tall.html"), 800).expect("reflow");
+        let total = state.fragments.len();
+        let band = visible_translated_fragments(&state.fragments, 2000, 768);
+        assert!(band.len() < total, "a band must contain fewer fragments than the whole doc");
+        assert!(!band.is_empty(), "a mid-document band must contain some fragments");
+        // Every returned fragment intersects the band, and its y is translated
+        // into band-local coords (so it lands within/near [0, 768)).
+        for f in &band {
+            let y = f.rect.origin.y;
+            let h = f.rect.size.h;
+            assert!(y + h > -1.0 && y < 768.0, "fragment y {y} h {h} not in band-local range");
+        }
+    }
+
+    #[test]
+    fn reflow_from_dom_returns_state_without_a_document_surface() {
+        // Structural O(viewport) guarantee: reflow no longer returns a MemSurface
+        // at all -- it returns render state; painting is deferred to band paints.
+        let html = "<html><body><p>hi</p></body></html>";
+        let dom = stele::dom::parser::parse(html);
+        let state = reflow_from_dom(&dom, &Url::new("file:///x.html"), 800).expect("reflow");
+        assert!(!state.fragments.is_empty());
+        assert!(state.doc_height >= 1);
     }
 
     // ----------------------------------------------------------- scroll_blit
