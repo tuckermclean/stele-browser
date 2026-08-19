@@ -298,9 +298,14 @@ impl IdAllocator {
 
 const OP_CREATE_WINDOW: u8 = 1;
 const OP_MAP_WINDOW: u8 = 8;
+const OP_CREATE_PIXMAP: u8 = 53;
+const OP_FREE_PIXMAP: u8 = 54;
 const OP_CREATE_GC: u8 = 55;
 const OP_PUT_IMAGE: u8 = 72;
 const OP_GET_KEYBOARD_MAPPING: u8 = 101;
+
+/// `CreateGC` value-mask bit for `graphics-exposures`.
+const GC_GRAPHICS_EXPOSURES_MASK: u32 = 0x0001_0000;
 
 /// `CWBackPixel` value-mask bit.
 pub const CW_BACK_PIXEL: u32 = 0x0000_0002;
@@ -376,17 +381,44 @@ pub fn encode_set_input_focus(window: u32) -> Vec<u8> {
     out
 }
 
-/// Encode a `CreateGC` request (opcode 55) with an empty value-mask — this
-/// client never needs anything but the drawable's defaults (`PutImage`
-/// ignores GC foreground/background entirely).
+/// Encode a `CreateGC` request (opcode 55) with graphics-exposures = FALSE:
+/// this client never wants NoExpose/GraphicsExpose events (it repaints
+/// damaged regions from its own server-side pixmap), and on non-retaining
+/// servers discarding GraphicsExpose after CopyArea shows scroll garbage.
 pub fn encode_create_gc(cid: u32, drawable: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16);
+    let mut out = Vec::with_capacity(20);
     out.push(OP_CREATE_GC);
-    out.push(0); // unused
-    out.extend_from_slice(&4u16.to_le_bytes());
+    out.push(0);
+    out.extend_from_slice(&5u16.to_le_bytes()); // length in 4-byte words
     out.extend_from_slice(&cid.to_le_bytes());
     out.extend_from_slice(&drawable.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // value-mask: none
+    out.extend_from_slice(&GC_GRAPHICS_EXPOSURES_MASK.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // FALSE
+    out
+}
+
+/// Encode a `CreatePixmap` request (opcode 53) — allocates a server-side
+/// pixmap of `depth` at `width`x`height`, rooted at `drawable` (used both
+/// for the double-buffer and for icon/backing-store data).
+pub fn encode_create_pixmap(pid: u32, drawable: u32, depth: u8, width: u16, height: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.push(OP_CREATE_PIXMAP);
+    out.push(depth);
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&pid.to_le_bytes());
+    out.extend_from_slice(&drawable.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out
+}
+
+/// Encode a `FreePixmap` request (opcode 54).
+pub fn encode_free_pixmap(pid: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    out.push(OP_FREE_PIXMAP);
+    out.push(0);
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&pid.to_le_bytes());
     out
 }
 
@@ -914,6 +946,16 @@ impl XConnection {
         Ok(cid)
     }
 
+    pub fn create_pixmap(&mut self, drawable: u32, depth: u8, width: u16, height: u16) -> Result<u32, String> {
+        let pid = self.ids.next();
+        self.send(&encode_create_pixmap(pid, drawable, depth, width, height))?;
+        Ok(pid)
+    }
+
+    pub fn free_pixmap(&mut self, pid: u32) -> Result<(), String> {
+        self.send(&encode_free_pixmap(pid))
+    }
+
     /// Blit `image_data` (a `ZPixmap` buffer at `depth`'s native layout,
     /// `row_stride` bytes/scanline) into `drawable` at `(0, 0)`, banding
     /// into as many `PutImage` requests as the server's
@@ -1369,14 +1411,37 @@ mod tests {
     }
 
     #[test]
-    fn encode_create_gc_produces_correct_bytes() {
+    fn encode_create_gc_disables_graphics_exposures() {
         let out = encode_create_gc(0x0040_0002, 0x0040_0001);
         assert_eq!(out[0], 55);
-        assert_eq!(&out[2..4], &4u16.to_le_bytes());
-        assert_eq!(&out[4..8], &0x0040_0002u32.to_le_bytes());
-        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes());
-        assert_eq!(&out[12..16], &0u32.to_le_bytes());
+        assert_eq!(&out[2..4], &5u16.to_le_bytes()); // request length = 5 words
+        assert_eq!(&out[4..8], &0x0040_0002u32.to_le_bytes()); // cid
+        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes()); // drawable
+        assert_eq!(&out[12..16], &0x0001_0000u32.to_le_bytes()); // value-mask: graphics-exposures
+        assert_eq!(&out[16..20], &0u32.to_le_bytes()); // value: FALSE
+        assert_eq!(out.len(), 20);
+    }
+
+    #[test]
+    fn encode_create_pixmap_produces_correct_bytes() {
+        let out = encode_create_pixmap(0x0040_0003, 0x0040_0001, 24, 1024, 768);
+        assert_eq!(out[0], 53);
+        assert_eq!(out[1], 24); // depth
+        assert_eq!(&out[2..4], &4u16.to_le_bytes()); // length = 4 words
+        assert_eq!(&out[4..8], &0x0040_0003u32.to_le_bytes()); // pid
+        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes()); // drawable
+        assert_eq!(&out[12..14], &1024u16.to_le_bytes()); // width
+        assert_eq!(&out[14..16], &768u16.to_le_bytes()); // height
         assert_eq!(out.len(), 16);
+    }
+
+    #[test]
+    fn encode_free_pixmap_produces_correct_bytes() {
+        let out = encode_free_pixmap(0x0040_0003);
+        assert_eq!(out[0], 54);
+        assert_eq!(&out[2..4], &2u16.to_le_bytes()); // length = 2 words
+        assert_eq!(&out[4..8], &0x0040_0003u32.to_le_bytes()); // pixmap
+        assert_eq!(out.len(), 8);
     }
 
     // ------------------------------------------------------------- PutImage
