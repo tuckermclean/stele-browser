@@ -2226,6 +2226,30 @@ mod tests {
         assert!(state.doc_height >= 1);
     }
 
+    #[test]
+    fn full_scroll_of_a_tall_document_only_ever_paints_viewport_bands() {
+        // 68k.news-scale stand-in: a very tall document.
+        let html = format!("<html><body>{}</body></html>", "<p>paragraph</p>".repeat(6000));
+        let dom = stele::dom::parser::parse(&html);
+        let state = reflow_from_dom(&dom, &Url::new("file:///tall.html"), 800).expect("reflow");
+        assert!(state.doc_height > 10_000, "fixture must be much taller than a viewport (was {})", state.doc_height);
+
+        let viewport_h = 768u32;
+        let max_scroll = state.doc_height.saturating_sub(viewport_h);
+        // Walk the whole document in viewport steps; every painted band must be
+        // exactly viewport-height -- the peak surface allocation is O(viewport),
+        // never the ~doc_height*width*4 the old whole-document MemSurface took.
+        let mut y = 0u32;
+        while y <= max_scroll {
+            let band = paint_viewport_band(&state, 800, y, viewport_h);
+            assert_eq!(stele::surface::Surface::size(&band), (800, viewport_h));
+            y += viewport_h;
+        }
+        // And the final clamped band.
+        let last = paint_viewport_band(&state, 800, max_scroll, viewport_h);
+        assert_eq!(stele::surface::Surface::size(&last), (800, viewport_h));
+    }
+
     // ----------------------------------------------------------- scroll_blit
 
     #[test]

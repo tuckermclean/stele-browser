@@ -1346,3 +1346,23 @@ Append-only running log. Newest at the bottom.
   numbers are fabricated in this entry. Run with `STELE_X11_STATS=1` to get the `--stats`-
   style counter line (batches/events/scrolls/frames/copy_areas/put_image_bytes) alongside
   the `strace` capture.
+
+## 2026-08-19 — X11 responsiveness PR 2: O(viewport) interactive RAM (packet/x11-viewport-ram, T5)
+
+- **T5 landed.** `--x11` retired the whole-document `MemSurface`; `reflow_from_dom` now
+  returns `RenderState` (`fragments`, `bg_images`, `doc_height`), and `paint_viewport_band`
+  paints only the visible band — via `raster::paint_at` at a negative offset (the full
+  fragment sequence, so `raster`'s cross-fragment gap-synthesis stays correct; `MemSurface`
+  clips off-band writes) — into a viewport-sized surface. Interactive RAM is now
+  O(viewport): a tall page (68k.news-scale) no longer allocates up to ~64 MB (the old
+  content-height × width × 4 clamp).
+- **Fence-tested:** `full_scroll_of_a_tall_document_only_ever_paints_viewport_bands`
+  builds a 6000-paragraph document (`doc_height` well past 10,000px), walks the WHOLE
+  document in 768px viewport steps calling `paint_viewport_band`, and asserts every band
+  — at every scroll position, including the final clamped one — is exactly
+  `(800, 768)`: proof the peak surface allocation is O(viewport), never O(document).
+  Reimplements the spec's "RSS fence" as an allocation-size assertion (no RSS harness
+  exists; this is a stronger, non-flaky proof of the same guarantee).
+- **Golden safety:** `raster::paint` still delegates to `paint_at(…, 0.0)` →
+  byte-identical output → A5 goldens unchanged.
+- **Size:** i486 size delta measured by the CI A2 line / `stele-i486` artifact.
