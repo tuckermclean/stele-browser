@@ -226,7 +226,7 @@ cert** created in the harness. Cases:
 
 - The **covenant grep**: a symbol/strings audit asserting **zero TLS implementation** in
   the binary (no TLS/crypto symbols linked).
-- The five tests above wired into the suite.
+- The six tests above wired into the suite.
 
 **Manual satisfaction check, journaled:** click a live https link on a polite site;
 screenshot the page and the Transcript line showing the provider
