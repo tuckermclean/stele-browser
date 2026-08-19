@@ -81,6 +81,11 @@ pub enum FetchError {
     TooManyRedirects,
     /// A scheme this build does not serve (e.g. https — the proxy's job).
     UnsupportedScheme(String),
+    /// A delegated-TLS (openssl child) failure: verification rejected the peer,
+    /// the openssl binary/flag was unavailable, or the child IO failed. The
+    /// string is a complete, user-facing sentence (rendered bare by
+    /// `err_to_string` — T4).
+    Tls(String),
 }
 
 /// Anything that can turn a `Request` into a `Response`. `http1` and `file`
@@ -109,6 +114,7 @@ pub fn fetch(request: &Request) -> Result<Response, FetchError> {
 /// is the `Debug` form the sites already showed via `format!("{e:?}")`.
 pub fn err_to_string(err: FetchError) -> String {
     match err {
+        FetchError::Tls(s) => s,
         FetchError::UnsupportedScheme(s) => format!("unsupported scheme: {s}"),
         other => format!("{other:?}"),
     }
@@ -149,5 +155,18 @@ mod dispatch_tests {
     fn err_to_string_debug_formats_other_errors() {
         let s = err_to_string(FetchError::Protocol("boom".to_string()));
         assert_eq!(s, "Protocol(\"boom\")");
+    }
+
+    #[test]
+    fn err_to_string_renders_tls_bare_for_legibility() {
+        // T4: a TLS failure becomes a user-facing document, so it must read as
+        // its own sentence, not a Debug-wrapped `Tls("...")`.
+        let s = err_to_string(FetchError::Tls(
+            "TLS verification failed for example.com: certificate has expired. Nothing was fetched.".to_string(),
+        ));
+        assert_eq!(
+            s,
+            "TLS verification failed for example.com: certificate has expired. Nothing was fetched."
+        );
     }
 }
