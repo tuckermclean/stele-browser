@@ -23,11 +23,30 @@
 #
 # The i486 binary (A1/A4) is expected pre-built at:
 #   target/i486-monolith-linux-musl/release/stele
-# Build it with the canonical pipeline (inside the monolith-builder image):
+# Build it with the canonical pipeline (inside the monolith-builder image;
+# the unwind shim in RUSTFLAGS below is the CI/local linker workaround —
+# see the "Build i486 release binary" CI step for its full derivation):
+#   export RUSTFLAGS="-L /tmp/unwindshim -Zunstable-options -Cpanic=immediate-abort"
 #   cargo build --release \
 #     --target targets/i486-monolith-linux-musl.json \
 #     -Zbuild-std=std,panic_abort \
 #     -Zjson-target-spec   # this nightly gates .json target specs behind it
+# -Cpanic=immediate-abort (packet size-squeeze-floppy) drops std's formatted-
+# panic-message machinery from the release binary — panic=abort never
+# unwinds to read that message anyway, so this is pure fat-trim, not a
+# behavior change. It's a RUSTC flag (`-C`), not a cargo flag — `cargo build
+# -C...` itself errors, so it travels via RUSTFLAGS, which also makes the
+# build-std core/std compile pick it up (required: immediate-abort must
+# apply to core, not just this crate). (NOTE: this used to be requested via
+# -Zbuild-std-features=panic_immediate_abort; the pinned nightly promoted
+# that to a real panic strategy selected via -Cpanic=immediate-abort
+# instead — see the compiler's own "panic_immediate_abort is now a real
+# panic strategy" error if this drifts again.) RUSTFLAGS here is scoped to
+# this one build invocation, never Cargo.toml's [profile.release] — that
+# profile is shared with the host unit-test build, which relies on normal
+# panic/assert + #[should_panic] behavior. Release-only: never applies to
+# A3's host build below (no build-std there at all — see that section's
+# own note).
 #
 # A3's host binary is a plain `cargo build --release` (default host target,
 # no `+nightly`/`+<toolchain>` override — that would bypass rust-toolchain.

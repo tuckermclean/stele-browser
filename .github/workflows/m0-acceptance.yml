@@ -140,7 +140,27 @@ jobs:
           echo "libgcc_eh.a -> $GCC_EH"
           mkdir -p /tmp/unwindshim
           ln -sf "$GCC_EH" /tmp/unwindshim/libunwind.a
-          export RUSTFLAGS="-L /tmp/unwindshim ${RUSTFLAGS:-}"
+          # -Cpanic=immediate-abort (packet size-squeeze-floppy) strips std's
+          # formatted-panic-message machinery from the release binary — the
+          # 486 build already panic=abort's without unwinding, so the
+          # formatted message was dead weight; this is the size lever that
+          # keeps the i486 binary under the 1.44MB floppy ceiling (see
+          # accept.sh's own note on this flag, and .cargo/config.toml).
+          # `-C` is a RUSTC flag, not a cargo flag -- `cargo build -C...`
+          # itself errors ("unexpected argument '-C' found"), so it must
+          # travel via RUSTFLAGS, same as the unwind-shim `-L` above; that
+          # also means the build-std core/std compile picks it up too,
+          # which is required (immediate-abort must apply to core, not just
+          # this crate). NOT `-Zbuild-std-features=panic_immediate_abort`
+          # (the pinned nightly promoted that to a real panic strategy
+          # selected via `-Cpanic=immediate-abort` instead), and NOT
+          # Cargo.toml's [profile.release] (shared with the host unit-test
+          # build, which needs normal panic/assert + #[should_panic]
+          # behavior) -- RUSTFLAGS here is scoped to this build invocation
+          # only. -Zbuild-std=std,panic_abort (cargo flag, stays on the
+          # command line) is still required to build core/std for this
+          # target at all.
+          export RUSTFLAGS="-L /tmp/unwindshim -Zunstable-options -Cpanic=immediate-abort ${RUSTFLAGS:-}"
           cargo build --release \
             --target targets/i486-monolith-linux-musl.json \
             -Zbuild-std=std,panic_abort \
