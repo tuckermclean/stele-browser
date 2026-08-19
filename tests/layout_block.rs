@@ -9,7 +9,7 @@ use stele::img::RgbaImage;
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
 use stele::style::computed::{
     BorderSide, BorderStyle, Dimension, Display, Edges, FlexDirection, Float, GridRepetitionCount,
-    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto,
+    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, Position,
 };
 use stele::style::ComputedStyle;
 
@@ -858,4 +858,51 @@ fn non_grid_block_and_flex_layout_is_unchanged_by_grid_support() {
     assert_eq!(flex_item1.rect.origin.x, 0.0);
     assert_eq!(flex_item2.rect.origin.x, 50.0 + 8.0);
     assert_eq!(flex_item1.rect.origin.y, flex_item2.rect.origin.y);
+}
+
+/// Acid2 P1 §3 paint-order fix: a `position: absolute` child declared BEFORE
+/// a static in-flow sibling must still be EMITTED (i.e. painted) after it --
+/// CSS 2.1's paint order puts positioned descendants above in-flow content
+/// regardless of source order. `children = [a_positioned, b_static]`; both
+/// overlap in space (the point of paint order mattering at all) and are
+/// distinguished by their unique declared sizes. Before the `emit` fix this
+/// fails because `Built::Container`'s child loop walked `children` in plain
+/// document order, so `a_positioned`'s Box fragment landed at a LOWER index
+/// than `b_static`'s.
+#[test]
+fn positioned_child_paints_after_static_sibling_regardless_of_source_order() {
+    let mut a_positioned = block_style();
+    a_positioned.position = Position::Absolute;
+    a_positioned.inset = Edges {
+        top: LengthPercentageAuto::Px(5.0),
+        left: LengthPercentageAuto::Px(5.0),
+        right: LengthPercentageAuto::Auto,
+        bottom: LengthPercentageAuto::Auto,
+    };
+    a_positioned.width = Dimension::Px(111.0);
+    a_positioned.height = Dimension::Px(22.0);
+
+    let mut b_static = block_style();
+    b_static.width = Dimension::Px(77.0);
+    b_static.height = Dimension::Px(33.0);
+
+    let root = container(block_style(), vec![leaf_container(a_positioned), leaf_container(b_static)]);
+    let fragments = layout(&root, Size { w: 300.0, h: 200.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 3, "root + a_positioned + b_static");
+
+    let a_index = boxes
+        .iter()
+        .position(|f| f.rect.size.w == 111.0 && f.rect.size.h == 22.0)
+        .expect("a_positioned's Box fragment must be present");
+    let b_index = boxes
+        .iter()
+        .position(|f| f.rect.size.w == 77.0 && f.rect.size.h == 33.0)
+        .expect("b_static's Box fragment must be present");
+
+    assert!(
+        b_index < a_index,
+        "static sibling must paint (be emitted) before the positioned child that precedes it in source order: \
+         b_static at index {b_index}, a_positioned at index {a_index}"
+    );
 }

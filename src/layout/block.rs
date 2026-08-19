@@ -1720,6 +1720,18 @@ fn map_position(p: Position) -> TPosition {
     }
 }
 
+/// A `Built` node's CSS `position` for paint-order partitioning in `emit`
+/// (design §3). `Inline` runs are never positioned blocks, so they count as
+/// `Static` (in-flow).
+fn built_position(b: &Built) -> Position {
+    match b {
+        Built::Container { style, .. }
+        | Built::Replaced { style, .. }
+        | Built::Table { style, .. } => style.position,
+        Built::Inline { .. } => Position::Static,
+    }
+}
+
 fn apply_flex(style: &mut TStyle, cs: &ComputedStyle) {
     style.flex_direction = match cs.flex_direction {
         FlexDirection::Row => TFlexDirection::Row,
@@ -1989,7 +2001,14 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: interactive.clone(),
             });
-            for child in children {
+            // Paint order (CSS 2.1 steps 3-6, no z-index yet -- that is
+            // Packet 2): in-flow (static) children first, then positioned
+            // (relative/absolute/fixed) children, stable within each group
+            // so same-group source order is preserved.
+            for child in children.iter().filter(|c| built_position(c) == Position::Static) {
+                emit(child, taffy, origin, metrics, out);
+            }
+            for child in children.iter().filter(|c| built_position(c) != Position::Static) {
                 emit(child, taffy, origin, metrics, out);
             }
         }
