@@ -264,10 +264,9 @@ fn resolve_url(raw: &str) -> Url {
 /// the full [`Response`] (not just the body) — `dump_png` needs
 /// `Response::final_url` (see its own doc comment: review finding,
 /// Important) to resolve document-relative `<img src>`s against the
-/// POST-redirect URL, not the request URL. Scheme dispatch lives in
-/// `fetch::fetch` (one table); every other scheme — including `https`,
-/// which this build does not yet serve — comes back a clean `Err`, never a
-/// panic.
+/// POST-redirect URL, not the request URL. `https` is served via the
+/// openssl-delegated transport; any genuinely unknown scheme is a clean
+/// `Err`, never a panic.
 fn fetch_response(url: &Url) -> Result<Response, String> {
     stele::fetch::fetch(&Request::get(url.clone())).map_err(stele::fetch::err_to_string)
 }

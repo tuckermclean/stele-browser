@@ -13,6 +13,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::thread;
 
 /// A running fixture server. Dropping this does not stop the background
@@ -358,4 +359,174 @@ pub fn spawn_raw(bytes: &'static [u8]) -> SocketAddr {
         }
     });
     addr
+}
+
+// ---------------------------------------------------------------------------
+// TLS fixture (PR 2 / Task 7): a generated test CA + leaf, served over a real
+// TLS connection by the system `openssl s_server`. Everything here stays on
+// loopback — no external network, per house law.
+// ---------------------------------------------------------------------------
+
+/// Paths to a freshly-generated test CA + a leaf cert/key for 127.0.0.1.
+pub struct TlsCerts {
+    pub dir: PathBuf,
+    pub ca_cert: PathBuf,
+    pub leaf_cert: PathBuf,
+    pub leaf_key: PathBuf,
+    /// A DIFFERENT, unrelated CA — used for the "untrusted" case.
+    pub other_ca: PathBuf,
+}
+
+/// Generate a test CA + a leaf (and a second, unrelated CA) with the system
+/// openssl. Deterministic path (no rand/Date in tests); regenerated each run.
+/// `cn`/`san` let a caller make a hostname-mismatch cert.
+pub fn tls_certs_with(cn: &str, san: &str, tag: &str) -> TlsCerts {
+    let dir = std::env::temp_dir().join(format!("stele-tls-{tag}"));
+    let _ = std::fs::create_dir_all(&dir);
+    let p = |n: &str| dir.join(n);
+
+    let run = |args: &[&str]| {
+        let ok = Command::new("openssl")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run openssl for test certs")
+            .success();
+        assert!(ok, "openssl {args:?} failed");
+    };
+
+    // Test CA.
+    run(&[
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", p("ca.key").to_str().unwrap(),
+        "-out", p("ca.pem").to_str().unwrap(),
+        "-days", "2", "-subj", "/CN=Stele Test CA",
+    ]);
+    // A second, unrelated CA (nothing is signed by it → the "untrusted" bundle).
+    run(&[
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", p("other-ca.key").to_str().unwrap(),
+        "-out", p("other-ca.pem").to_str().unwrap(),
+        "-days", "2", "-subj", "/CN=Other CA",
+    ]);
+    // Leaf key + CSR.
+    run(&[
+        "req", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", p("leaf.key").to_str().unwrap(),
+        "-out", p("leaf.csr").to_str().unwrap(),
+        "-subj", &format!("/CN={cn}"),
+    ]);
+    // Sign the leaf with the test CA, adding the SAN.
+    let ext = dir.join("leaf.ext");
+    std::fs::write(&ext, format!("subjectAltName={san}\n")).unwrap();
+    run(&[
+        "x509", "-req",
+        "-in", p("leaf.csr").to_str().unwrap(),
+        "-CA", p("ca.pem").to_str().unwrap(),
+        "-CAkey", p("ca.key").to_str().unwrap(),
+        "-CAcreateserial",
+        "-out", p("leaf.pem").to_str().unwrap(),
+        "-days", "2", "-extfile", ext.to_str().unwrap(),
+    ]);
+
+    TlsCerts {
+        dir: dir.clone(),
+        ca_cert: p("ca.pem"),
+        leaf_cert: p("leaf.pem"),
+        leaf_key: p("leaf.key"),
+        other_ca: p("other-ca.pem"),
+    }
+}
+
+/// Grab a free loopback port (bind :0, read it, drop the listener). A small
+/// race window before s_server binds it, acceptable for tests (and mitigated
+/// by the ACCEPT-banner wait in `spawn_tls_responder` below).
+fn free_port() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").expect("bind for free port");
+    l.local_addr().unwrap().port()
+}
+
+/// Spawn `openssl s_server` to accept ONE TLS connection with `cert`/`key`,
+/// send `response` verbatim once it sees the client's request, then close.
+/// Returns the port. `response` is the full HTTP/1.1 response bytes — the
+/// test controls framing exactly (needed for the `Q\n` and stdin-EOF cases).
+///
+/// Race-safety (readiness): `s_server` needs a moment to bind before a
+/// client can connect. A single background thread owns the child's stdout
+/// for the child's whole life: it reads for the "ACCEPT" readiness banner
+/// (s_server prints this the instant it starts listening) and signals a
+/// channel the moment it's seen, then keeps reading the SAME stream onward
+/// for the client's decrypted request, up through its `\r\n\r\n` terminator,
+/// before writing `response` to s_server's stdin and closing it. This
+/// function (the caller) blocks on `recv_timeout` — bounded to 5s — rather
+/// than an unbounded read, so a missing or differently-spelled banner (a
+/// different openssl build) costs a one-time delay, never a hang.
+pub fn spawn_tls_responder(cert: &PathBuf, key: &PathBuf, response: &'static [u8]) -> u16 {
+    let port = free_port();
+    let cert = cert.clone();
+    let key = key.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        let mut child = match Command::new("openssl")
+            .arg("s_server")
+            .args(["-accept", &port.to_string()])
+            .args(["-cert", cert.to_str().unwrap()])
+            .args(["-key", key.to_str().unwrap()])
+            .args(["-naccept", "1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = ready_tx.send(());
+                return;
+            }
+        };
+        let mut stdout = match child.stdout.take() {
+            Some(o) => o,
+            None => {
+                let _ = ready_tx.send(());
+                return;
+            }
+        };
+        // One reader owns stdout: s_server prints a startup banner containing
+        // "ACCEPT" when it is listening, then (after a client connects) the
+        // decrypted request. Signal readiness on ACCEPT; keep reading until the
+        // request's \r\n\r\n, then write the canned response.
+        let mut seen: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let mut signalled = false;
+        loop {
+            match stdout.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    seen.extend_from_slice(&tmp[..n]);
+                    if !signalled && find(&seen, b"ACCEPT").is_some() {
+                        signalled = true;
+                        let _ = ready_tx.send(());
+                    }
+                    if find(&seen, b"\r\n\r\n").is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        if !signalled {
+            let _ = ready_tx.send(());
+        }
+        if let Some(mut sin) = child.stdin.take() {
+            let _ = sin.write_all(response);
+            let _ = sin.flush();
+            // dropping sin closes s_server's stdin → it closes the TLS connection
+        }
+        let _ = child.wait();
+    });
+    // Bounded readiness: return once s_server signals ACCEPT, or after 5s no
+    // matter what (a banner-text difference on some openssl build then just
+    // costs a one-time delay per fixture — never a hang).
+    let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
+    port
 }

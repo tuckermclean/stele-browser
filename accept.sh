@@ -160,6 +160,42 @@ elif [ -f "$BIN" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# A6a (covenant, sub-check of the TLS-delegation packet): TLS is DELEGATED —
+# the binary must contain zero embedded cryptography. openssl runs as a
+# CHILD; its NAME may appear in our error strings, but no TLS/crypto
+# implementation symbols may be linked in. Distinct from the reserved A6
+# (cargo-audit-clean vendored deps + the no-`script`-variant covenant grep
+# over src/dom/ast.rs, per the build brief) — same letter, different concern,
+# so this one is A6a (mirrors the A3a/A5a-style sub-label convention used
+# elsewhere in this file).
+# ---------------------------------------------------------------------------
+check_a6a_covenant() {
+  if [ ! -f "$BIN" ]; then
+    bad "A6a: binary not found at $BIN"
+    return
+  fi
+  # Symbols that would betray an embedded TLS/crypto stack (rustls, ring,
+  # openssl-sys, boringssl, embedded-tls). The word "openssl" alone is allowed
+  # (our error text); these are library-internal symbols that never appear
+  # unless a crypto crate is linked. ring::'s alternative is scoped to its
+  # actual crypto submodules (not a bare `ring::` substring) — a bare
+  # substring false-positives on unrelated debug-info symbols like
+  # `alloc::string::String` (which contains "ring::" as a substring).
+  if strings -a "$BIN" | grep -Eiq 'rustls|ring::(aead|rand|digest|hmac|hkdf|signature|agreement|pbkdf2|error)|boringssl|libcrypto|SSL_CTX_new|EVP_|X509_verify|embedded_tls'; then
+    bad "A6a: covenant broken — TLS/crypto implementation symbols found in $BIN"
+    strings -a "$BIN" | grep -Ei 'rustls|ring::(aead|rand|digest|hmac|hkdf|signature|agreement|pbkdf2|error)|boringssl|libcrypto|SSL_CTX_new|EVP_|X509_verify|embedded_tls' | head | sed 's/^/    /'
+  else
+    pass "A6a: covenant intact — no embedded TLS/crypto symbols in the binary"
+  fi
+}
+
+if [ "$TTY_ONLY" = 1 ]; then
+  :
+elif [ -f "$BIN" ]; then
+  check_a6a_covenant
+fi
+
+# ---------------------------------------------------------------------------
 # A3 — fixture golden renders. The tty-dump half is LIVE as of P7/M2: a
 # host-native (no qemu — --dump-text has no 486-specific instructions; A4
 # already exhaustively probes that) run of `stele --headless --dump-text`

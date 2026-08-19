@@ -159,15 +159,18 @@ fn status_307_preserves_method_and_body() {
 }
 
 #[test]
-fn https_scheme_is_always_unsupported() {
+fn https_scheme_is_dispatched_not_unsupported() {
+    // PR 2: https is served via the openssl child, so it is no longer rejected
+    // as UnsupportedScheme. Loopback port 1 (nothing listening) keeps this off
+    // the external network — it fails at the TLS/connect layer, not at dispatch.
     let mut client = Http1Client::new();
-    let result = client.fetch(&Request::get(Url::new("https://example.invalid/")));
-    match result {
-        Err(FetchError::UnsupportedScheme(scheme)) => {
-            assert_eq!(scheme.to_ascii_lowercase(), "https");
-        }
-        other => panic!("expected UnsupportedScheme, got {:?}", other),
-    }
+    let err = client
+        .fetch(&Request::get(Url::new("https://127.0.0.1:1/")))
+        .expect_err("connect to a dead port must fail");
+    assert!(
+        !matches!(err, FetchError::UnsupportedScheme(_)),
+        "https must be dispatched to the TLS transport now, got {err:?}"
+    );
 }
 
 #[test]

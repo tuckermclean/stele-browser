@@ -1269,3 +1269,35 @@ Append-only running log. Newest at the bottom.
   scheme + 443, fail-closed flag probe, `STELE_CA_FILE` + default-path CA probe, legible
   TLS-failure error document, charter C2 amendment + first `DECISIONS.md` transport entry,
   and the `openssl s_server` fixture suite + covenant grep (zero TLS symbols in the binary).
+
+## 2026-08-19 — HTTPS PR 2: delegated `openssl s_client` TLS + A6 covenant grep (packet/https-openssl)
+
+- **Second of two packets.** TLS is DELEGATED — `openssl` runs as a CHILD process; the
+  binary embeds **zero cryptography**. Charter C2 amendment + `DECISIONS.md` D53 record
+  the decision.
+- **What landed:** `src/fetch/https.rs` — `OpensslStream`, a child-process `ByteStream`
+  wrapping `openssl s_client`'s stdin/stdout; a fail-closed flag probe (refuses to fetch
+  `https://` if the required verification flags aren't supported by the local `openssl`);
+  `STELE_CA_FILE` + default-path CA probe for locating a trust store. `https` is wired into
+  the per-hop transport switch (`fetch::fetch`'s scheme table from PR 1). `FetchError::Tls`
+  renders as a legible document through `error_page` (T4) rather than a raw process error.
+  A cross-scheme redirect (https→http or http→https) prints a downgrade/upgrade notice.
+- **openssl invocation:** `s_client -quiet -connect H:443 -servername H
+  -verify_return_error -CAfile <ca>`, plus `-verify_ip <ip>` for IP-literal hosts or
+  `-verify_hostname <host>` for named hosts. NOTE: we deliberately do **not** pass
+  `-no_ign_eof` — `-quiet` already implies `-ign_eof`, which keeps the TLS connection open
+  after we close our end of stdin so the response is read to completion. Passing
+  `-no_ign_eof` closed the connection prematurely and lost the tail of the response — a
+  real trap during development, not a hypothetical one.
+- **Tests:** `tests/fetch_https.rs` drives a real `openssl s_server` fixture against a
+  generated test CA (no external network involved) — trusted render, untrusted-cert →
+  `Tls` error, hostname mismatch → `Tls` error, the `Q`-line `-quiet` trap, close-delimited
+  response termination, plus the cookie `Secure` attribute pin.
+- **Covenant:** `accept.sh` adds `check_a6_covenant`, run in the full acceptance flow
+  (guarded the same way as A2, not under `--tty-only`, which has no built binary) —
+  `strings -a "$BIN" | grep -Eiq 'rustls|ring::|boringssl|libcrypto|SSL_CTX_new|EVP_|
+  X509_verify|embedded_tls'` must find nothing. The literal word "openssl" is allowed
+  (it appears in our own legible error text); only implementation symbols fail the check.
+  Size impact is expected to be negligible — `OpensslStream` is std process/IO plumbing
+  only, no crypto crate linked — measured by the A2 line / `stele-i486` CI artifact, not
+  asserted here as a specific byte count.

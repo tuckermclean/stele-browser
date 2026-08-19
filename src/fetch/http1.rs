@@ -2,8 +2,9 @@
 //!
 //! DECISIONS.md records the bespoke-vs-`httparse` call for this packet: we
 //! hand-roll HTTP/1.1 parsing, std-only, to keep P3 zero-dependency ahead of
-//! the crate-vendoring apparatus (landing before P4). `https://` is always
-//! `FetchError::UnsupportedScheme` — no TLS, ever (charter: the proxy's job).
+//! the crate-vendoring apparatus (landing before P4). `https://` is served by
+//! delegating TLS to an `openssl s_client` child (see `fetch::https`) — zero
+//! cryptography embedded (charter C2 amendment / DECISIONS D53).
 //! Blocking IO only (brief §9); no async runtime anywhere in this program.
 //! gzip (`Content-Encoding`) is deferred to a later packet per DECISIONS.md:
 //! we advertise `Accept-Encoding: identity` only, and the fixture server
@@ -61,7 +62,7 @@ impl Fetch for Http1Client {
 
         for hop in 0..=MAX_REDIRECTS {
             let scheme = url.scheme();
-            if scheme != "http" {
+            if scheme != "http" && scheme != "https" {
                 return Err(FetchError::UnsupportedScheme(scheme));
             }
 
@@ -86,6 +87,13 @@ impl Fetch for Http1Client {
                         FetchError::Protocol("redirect response missing Location header".to_string())
                     })?;
                 let next_url = url.resolve(&location);
+
+                if scheme == "https" && next_url.scheme() == "http" {
+                    eprintln!(
+                        "stele: security downgrade — following an https→http redirect to {}",
+                        next_url.as_str()
+                    );
+                }
 
                 match raw.status {
                     303 => {
@@ -145,29 +153,49 @@ pub(crate) fn send_one(
     if host.is_empty() {
         return Err(FetchError::Protocol("URL has no host".to_string()));
     }
-    let port = url.port(80);
-
-    let mut stream = TcpStream::connect((host.as_str(), port))
-        .map_err(|e| FetchError::Io(format!("connect {}:{}: {}", host, port, e)))?;
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    let scheme = url.scheme();
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let port = url.port(default_port);
 
     let request_bytes = format_request(url, method, extra_headers, body, cookie_header, &host, port);
-    exchange(&mut stream, &request_bytes)
+
+    if scheme == "https" {
+        // Delegated TLS: the openssl child is just another ByteStream. Close its
+        // stdin after writing (half_close = true); with -quiet's implied -ign_eof
+        // this does NOT close the connection — s_client keeps reading the response
+        // to completion. On failure, recover openssl's own reason (T4).
+        let mut stream = super::https::connect(&host, port)?;
+        match exchange(&mut stream, &request_bytes, true) {
+            Ok(r) => Ok(r),
+            Err(e) => Err(stream.tls_error_or(e)),
+        }
+    } else {
+        let mut stream = TcpStream::connect((host.as_str(), port))
+            .map_err(|e| FetchError::Io(format!("connect {}:{}: {}", host, port, e)))?;
+        let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+        // half_close = false: preserve http's exact PR-1 wire behavior.
+        exchange(&mut stream, &request_bytes, false)
+    }
 }
 
-/// Transport-agnostic core: write the already-formatted request bytes, then
-/// read the framed response. Generic over `ByteStream` so PR 2's openssl
-/// child reuses it unchanged. Does NOT call `shutdown_write` (see the trait
-/// doc): PR 1 preserves the exact wire behavior `send_one` had before.
+/// Transport-agnostic core: write the formatted request, optionally half-close
+/// the write side (close the openssl child's stdin; harmless under -quiet's
+/// implied -ign_eof — the connection stays open to read the response), then read
+/// the framed response. `half_close = false` preserves
+/// http's exact PR-1 wire behavior (no FIN-after-request).
 pub(crate) fn exchange<S: ByteStream>(
     stream: &mut S,
     request_bytes: &[u8],
+    half_close: bool,
 ) -> Result<RawResponse, FetchError> {
     stream
         .write_all(request_bytes)
         .map_err(|e| FetchError::Io(format!("write: {}", e)))?;
     stream.flush().map_err(|e| FetchError::Io(format!("flush: {}", e)))?;
+    if half_close {
+        let _ = stream.shutdown_write();
+    }
     read_response(stream)
 }
 
@@ -196,7 +224,8 @@ fn format_request(
 
     let mut out = String::new();
     out.push_str(&format!("{} {} HTTP/1.1\r\n", method_str, path));
-    let host_header = if port == 80 { host.to_string() } else { format!("{}:{}", host, port) };
+    let default_port = if url.scheme() == "https" { 443 } else { 80 };
+    let host_header = if port == default_port { host.to_string() } else { format!("{}:{}", host, port) };
     out.push_str(&format!("Host: {}\r\n", host_header));
     out.push_str("User-Agent: Stele/0.1\r\n");
     out.push_str("Accept: */*\r\n");
