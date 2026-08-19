@@ -189,14 +189,13 @@ impl OpensslStream {
                 return fallback;
             }
         }
-        // The child closed stdout (it exited/failed) — safe to reap and read its
-        // stderr. A non-zero exit means the failure was at the TLS layer even if
-        // -quiet trimmed the stderr reason.
+        // Drain stderr BEFORE wait() — a child blocked writing a full stderr
+        // pipe would otherwise deadlock the reap (drain_stderr's invariant).
+        let reason = self.drain_stderr();
         let status_failed = match self.child.wait() {
             Ok(s) => !s.success(),
             Err(_) => true,
         };
-        let reason = self.drain_stderr();
         if status_failed || !reason.is_empty() {
             let detail = if reason.is_empty() {
                 "verification or handshake failed".to_string()

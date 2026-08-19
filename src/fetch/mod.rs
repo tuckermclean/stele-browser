@@ -1,6 +1,7 @@
 //! Fetching: the `Request`/`Response` interface P3 (Wave 1) implements over
 //! plain TCP + httparse (`http1`), `file://` (`file`), and the cookie jar
-//! (`cookies`). No TLS ever — the proxy owns modernity (charter). No async —
+//! (`cookies`). TLS is DELEGATED to the user's openssl child (`https`), never
+//! embedded (charter C2/D53). No async —
 //! blocking IO is correct for a single-threaded program (brief §9).
 
 pub mod cookies;
