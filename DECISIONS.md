@@ -3,6 +3,29 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Networking — HTTPS transport
+
+### D53 — HTTPS transport: delegated `openssl s_client`, not embedded TLS
+The charter said "TLS: none in v1" and left direct-TLS (rustls/embedded-tls)
+as a later optional feature — a third path it didn't foresee. **Options:**
+(a) embed a Rust TLS stack (rustls/embedded-tls); (b) proxy-only
+(monolith-surf terminates TLS, Stele stays http-only); (c) delegate to the
+user's system `openssl s_client`, exec'd as a child, plaintext over pipes.
+**Choice: (c)** — https is served by spawning `openssl s_client -quiet
+-no_ign_eof -connect H:443 -servername H -verify_return_error
+-verify_hostname H -CAfile <ca>` and framing HTTP/1.1 over its stdio,
+reusing the PR-1 `ByteStream` seam. **Why:** the floppy budget and the
+covenant both — embedding TLS adds hundreds of KB of cryptography to audit
+and age inside a 1.44 MB binary; (c) adds zero crypto bytes, since the
+security-critical code is the user's own, already-patched openssl.
+Verification is mandatory (`-verify_return_error`/`-verify_hostname`) and
+fail-closed: a missing binary or flag makes https UNAVAILABLE with a
+legible error, never a silent unverified connection. `-quiet` and
+`-no_ign_eof` are correctness (interactive-mode `Q`-close trap; stdin-EOF
+propagation) and are pinned by tests. Revisit: a no_std TLS stack that fits
+the floppy budget lands, OR we must run where no system openssl exists
+(then proxy-only, option b, is the fallback — not embedding).
+
 ## M5 — External `<link>` CSS
 
 ### D35 — external stylesheets fetched driver-level, unified doc order with `<style>`

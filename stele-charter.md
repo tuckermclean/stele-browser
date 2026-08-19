@@ -154,7 +154,10 @@ maturity-vetting time), fontdue (glyphs), embedded-graphics (fb 2D),
 bumpalo (DOM arena), rustix (syscalls), heapless where it helps.
 TLS: none in v1 — monolith-surf owns modernity; direct-TLS is a later
 optional feature (rustls/embedded-tls have no_std stories) that must
-never become a default dependency.
+never become a default dependency. TLS is DELEGATED, never embedded —
+zero bytes of cryptography in the binary; on Linux the provider is the
+user's own openssl, exec'd as a child (s_client), verified and
+fail-closed.
 
 Bespoke (the soul, written in-house, ~the third you'd insist on owning
 anyway):
