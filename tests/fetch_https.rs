@@ -78,9 +78,9 @@ fn body_line_starting_with_Q_survives_the_quiet_trap() {
 
 #[test]
 fn close_delimited_response_terminates_via_stdin_eof() {
-    // No Content-Length, no chunked: body is delimited by connection close.
-    // Our shutdown_write (stdin EOF, -no_ign_eof) + server close must let the
-    // read complete rather than hang to the timeout.
+    // No Content-Length, no chunked: the body is delimited by connection close.
+    // The fixture writes the response then closes the server side, so the
+    // close-delimited read terminates cleanly.
     const CLOSE_DELIMITED: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nclosed-body";
     let certs = tls_certs_with("localhost", "IP:127.0.0.1", "closeeof");

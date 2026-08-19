@@ -54,11 +54,37 @@ pub(crate) const REQUIRED_FLAGS: &[&str] = &[
     "-verify_hostname", "-verify_ip", "-CAfile", "-quiet",
 ];
 
-/// The actual probe work (no cache) — spawns `openssl s_client -help` and
-/// checks every required flag. Returned as `Result<(), String>` so tests can
-/// call it directly and deterministically (no `OnceLock` interference).
+/// Bounded openssl-availability probe: runs the actual check on a helper thread
+/// and gives up after 10s, so a hung or broken `openssl` on PATH can't wedge
+/// the browser on first https use (this is the one spot in the module without
+/// the poll/IO_TIMEOUT guard the live transport uses).
 fn probe_uncached() -> Result<(), String> {
-    let output = std::process::Command::new("openssl").arg("s_client").arg("-help").output();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_openssl_probe());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(result) => result,
+        Err(_) => Err(
+            "openssl did not respond to `s_client -help` within 10s; https is \
+             unavailable. Install a working OpenSSL, or use the monolith-surf \
+             proxy. Nothing was fetched."
+                .to_string(),
+        ),
+    }
+}
+
+/// The actual `openssl s_client -help` invocation. stdin is /dev/null so a
+/// misbehaving binary can't block on our terminal; help text lands on stderr
+/// and the exit is non-zero — both are captured and accepted.
+fn run_openssl_probe() -> Result<(), String> {
+    let output = Command::new("openssl")
+        .arg("s_client")
+        .arg("-help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
     let output = match output {
         Ok(o) => o,
         Err(e) => {
@@ -68,7 +94,6 @@ fn probe_uncached() -> Result<(), String> {
             ));
         }
     };
-    // `s_client -help` prints usage to stderr and exits nonzero; accept either.
     let help = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

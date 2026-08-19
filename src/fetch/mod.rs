@@ -81,7 +81,8 @@ pub enum FetchError {
     Protocol(String),
     /// More than the allowed number of redirects.
     TooManyRedirects,
-    /// A scheme this build does not serve (e.g. https — the proxy's job).
+    /// A scheme this build does not serve (e.g. gopher). Note: https IS served
+    /// now, via the openssl-delegated transport, and fails as `Tls`, not this.
     UnsupportedScheme(String),
     /// A delegated-TLS (openssl child) failure: verification rejected the peer,
     /// the openssl binary/flag was unavailable, or the child IO failed. The

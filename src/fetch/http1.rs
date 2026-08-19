@@ -2,8 +2,9 @@
 //!
 //! DECISIONS.md records the bespoke-vs-`httparse` call for this packet: we
 //! hand-roll HTTP/1.1 parsing, std-only, to keep P3 zero-dependency ahead of
-//! the crate-vendoring apparatus (landing before P4). `https://` is always
-//! `FetchError::UnsupportedScheme` — no TLS, ever (charter: the proxy's job).
+//! the crate-vendoring apparatus (landing before P4). `https://` is served by
+//! delegating TLS to an `openssl s_client` child (see `fetch::https`) — zero
+//! cryptography embedded (charter C2 amendment / DECISIONS D53).
 //! Blocking IO only (brief §9); no async runtime anywhere in this program.
 //! gzip (`Content-Encoding`) is deferred to a later packet per DECISIONS.md:
 //! we advertise `Accept-Encoding: identity` only, and the fixture server
