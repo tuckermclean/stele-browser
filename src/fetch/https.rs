@@ -51,7 +51,7 @@ pub(crate) fn resolve_ca_file() -> Result<String, FetchError> {
 /// these cannot verify safely, so https is UNAVAILABLE (fail closed).
 pub(crate) const REQUIRED_FLAGS: &[&str] = &[
     "-connect", "-servername", "-verify_return_error",
-    "-verify_hostname", "-verify_ip", "-CAfile", "-quiet", "-no_ign_eof",
+    "-verify_hostname", "-verify_ip", "-CAfile", "-quiet",
 ];
 
 /// The actual probe work (no cache) — spawns `openssl s_client -help` and
@@ -126,8 +126,10 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<OpensslStream, FetchError
     let mut command = Command::new("openssl");
     command
         .arg("s_client")
-        .arg("-quiet") // no interactive mode (the `Q`-at-line-start trap)
-        .arg("-no_ign_eof") // let our stdin EOF propagate a close (-quiet implies -ign_eof)
+        .arg("-quiet") // no interactive mode (the `Q`-at-line-start trap); also
+                       // implies -ign_eof, so closing our stdin does NOT close
+                       // the connection — s_client keeps reading the response
+                       // until the server closes it (Connection: close).
         .args(["-connect", &format!("{host}:{port}")])
         .args(["-servername", host])
         .arg("-verify_return_error") // a verify failure aborts, non-zero exit
@@ -197,14 +199,18 @@ impl OpensslStream {
                 return fallback;
             }
         }
-        // Drain stderr BEFORE wait() — a child blocked writing a full stderr
-        // pipe would otherwise deadlock the reap (drain_stderr's invariant).
+        // Drain stderr BEFORE wait() (drain_stderr's invariant), then reap.
         let reason = self.drain_stderr();
         let status_failed = match self.child.wait() {
             Ok(s) => !s.success(),
             Err(_) => true,
         };
-        if status_failed || !reason.is_empty() {
+        // A non-zero openssl exit means the failure was at the TLS layer
+        // (verify/handshake/connect). A clean exit means TLS was fine and the
+        // error is a real framing problem — surface that unchanged. (s_client
+        // prints verify info to stderr even on success, so stderr being
+        // non-empty is NOT itself a failure signal.)
+        if status_failed {
             let detail = if reason.is_empty() {
                 "verification or handshake failed".to_string()
             } else {
@@ -256,8 +262,10 @@ impl Write for OpensslStream {
 
 impl ByteStream for OpensslStream {
     fn shutdown_write(&mut self) -> io::Result<()> {
-        // Dropping ChildStdin closes it → EOF on the child's stdin → (with
-        // -no_ign_eof) openssl closes its write side to the server.
+        // Dropping ChildStdin closes it → EOF on the child's stdin. With
+        // -quiet's implied -ign_eof, s_client does NOT tear down the
+        // connection on that EOF — it keeps reading the response until the
+        // server closes its side (Connection: close).
         self.stdin = None;
         Ok(())
     }
@@ -329,14 +337,14 @@ mod tests {
         // probe_uncached (NOT the cached probe()) so it never pollutes the
         // OnceLock that connect() uses.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let help = "-connect -servername -verify_return_error -verify_hostname -verify_ip -CAfile -quiet"; // no -no_ign_eof
+        let help = "-connect -servername -verify_return_error -verify_hostname -CAfile -quiet"; // no -verify_ip
         let dir = stub_openssl_dir(help);
         let old = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{}", dir.display(), old));
         let result = probe_uncached();
         std::env::set_var("PATH", old);
         let msg = result.expect_err("missing -no_ign_eof must fail closed");
-        assert!(msg.contains("-no_ign_eof"), "message: {msg}");
+        assert!(msg.contains("-verify_ip"), "message: {msg}");
         assert!(msg.to_lowercase().contains("openssl"), "message: {msg}");
     }
 
