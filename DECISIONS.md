@@ -3,6 +3,32 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Rendering — X11 viewport-band painting (O(viewport) RAM, T5)
+
+### D54 — `paint_viewport_band` paints the FULL fragment sequence at a y-offset, not a culled sub-slice
+`paint_viewport_band` first culled fragments to the visible band and painted
+that sub-slice directly, but that reset `raster::paint`'s stateful
+cross-fragment gap-synthesis (`synthesize_gap_rect`) at band boundaries →
+pixel divergence from the old whole-doc-then-crop baseline. **Options:** (a)
+cull fragments to the visible band + paint the sub-slice (O(viewport) CPU,
+but resets raster's cross-fragment gap-synthesis state at band seams →
+pixel divergence); (b) paint the FULL fragment sequence at a y-offset via a
+new `raster::paint_at(fragments, …, y_offset)`, relying on `MemSurface`
+write-clipping for the RAM bound (pixel-identical to whole-doc-then-crop;
+still O(viewport) RAM). **Choice: (b).** `raster::paint` now delegates to
+`paint_at(…, 0.0)` — a no-op transform, byte-identical output, so the A5
+goldens are unchanged. **Why:** correctness — raster's gap-synthesis is
+stateful across the fragment sequence; a culled sub-slice diverges at band
+boundaries. Full-sequence + offset + `MemSurface` clipping preserves both
+pixel-identity and O(viewport) RAM. **Trade-off / revisit:** full-sequence
+painting is O(document) CPU per frame (notably `effective_background`'s
+backward scan per text fragment). Judged acceptable for real fragment
+counts, but if tall-document (68k.news-scale) scroll feels janky on the
+operator's WSLg/486 testimonial, add an off-band skip to `paint_at` that
+still threads the gap-synthesis state for off-surface fragments but skips
+their draw + `effective_background` — reducing per-frame cost toward
+O(viewport) while keeping pixel-identity.
+
 ## Networking — HTTPS transport
 
 ### D53 — HTTPS transport: delegated `openssl s_client`, not embedded TLS
