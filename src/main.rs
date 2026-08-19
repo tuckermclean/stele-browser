@@ -1429,7 +1429,7 @@ fn run_x11(source: &str) {
                         Ok(p) => p,
                         Err(e) => {
                             eprintln!("stele: --x11: recreate pixmap failed: {e}");
-                            pixmap
+                            0
                         }
                     };
                     match render_x11_page(history.current(), width) {
