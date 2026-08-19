@@ -826,6 +826,9 @@ pub struct XConnection {
     /// MapWindow arrive BEFORE a later request's reply). Drained by
     /// [`Self::next_event`] before it touches the socket again.
     pending: VecDeque<XEvent>,
+    /// When `Some`, `send` appends to this buffer instead of writing to the
+    /// socket immediately — see [`Self::begin_frame`]/[`Self::end_frame`].
+    frame: Option<Vec<u8>>,
 }
 
 /// Read 32-byte X packets from `stream`, queueing any *events* (first byte
@@ -897,11 +900,34 @@ impl XConnection {
         let setup = parse_setup_reply(&full)?;
         let ids = IdAllocator::new(setup.resource_id_base, setup.resource_id_mask);
 
-        Ok(XConnection { stream, setup, ids, pending: VecDeque::new() })
+        Ok(XConnection { stream, setup, ids, pending: VecDeque::new(), frame: None })
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.stream.write_all(bytes).map_err(|e| format!("write to X server: {e}"))
+        if let Some(buf) = self.frame.as_mut() {
+            buf.extend_from_slice(bytes);
+            Ok(())
+        } else {
+            self.stream.write_all(bytes).map_err(|e| format!("write to X server: {e}"))
+        }
+    }
+
+    /// Start buffering requests; pair with `end_frame`. Nesting is a no-op
+    /// (an already-open frame keeps accumulating).
+    pub fn begin_frame(&mut self) {
+        if self.frame.is_none() {
+            self.frame = Some(Vec::with_capacity(64 * 1024));
+        }
+    }
+
+    /// Flush the buffered frame in one write.
+    pub fn end_frame(&mut self) -> Result<(), String> {
+        if let Some(buf) = self.frame.take() {
+            if !buf.is_empty() {
+                self.stream.write_all(&buf).map_err(|e| format!("write frame to X server: {e}"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Find the [`PixmapFormat`] for `depth` (falls back to the FIRST

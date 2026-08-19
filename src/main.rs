@@ -1356,7 +1356,9 @@ fn run_x11(source: &str) {
         }
     };
 
+    conn.begin_frame();
     x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+    let _ = conn.end_frame();
 
     loop {
         let batch = match conn.drain_events() {
@@ -1385,7 +1387,9 @@ fn run_x11(source: &str) {
                     let old = scroll_y;
                     scroll_y = ((old as i64 + d as i64).clamp(0, max_scroll as i64)) as u32;
                     if scroll_y != old {
+                        conn.begin_frame();
                         x11_scroll_to(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
+                        let _ = conn.end_frame();
                     }
                 }
                 xproto::XIntent::Click { x, y } => {
@@ -1404,7 +1408,9 @@ fn run_x11(source: &str) {
                         }
                         // New content -- full repaint, same reasoning as
                         // ConfigureNotify below.
+                        conn.begin_frame();
                         x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                        let _ = conn.end_frame();
                     }
                 }
                 xproto::XIntent::Reload => {
@@ -1416,7 +1422,9 @@ fn run_x11(source: &str) {
                         }
                         Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
                     }
+                    conn.begin_frame();
                     x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    let _ = conn.end_frame();
                 }
                 xproto::XIntent::Resize { w, h } => {
                     // classify_x11_intent already screens out a 0x0
@@ -1443,7 +1451,9 @@ fn run_x11(source: &str) {
                     scroll_y = scroll_y.min(x11_max_scroll(doc_h, height));
                     // Content (and the window geometry itself) changed --
                     // nothing on screen is safe to retain via CopyArea.
+                    conn.begin_frame();
                     x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    let _ = conn.end_frame();
                 }
                 xproto::XIntent::Expose { x, y, w, h } => {
                     if !focus_set {
@@ -1458,9 +1468,11 @@ fn run_x11(source: &str) {
                     }
                     // Present the damaged region straight from the back
                     // buffer -- zero image bytes on the wire.
+                    conn.begin_frame();
                     if let Err(e) = conn.copy_area(pixmap, window, gc, x as i16, y as i16, x as i16, y as i16, w, h) {
                         eprintln!("stele: --x11: Expose CopyArea failed: {e}");
                     }
+                    let _ = conn.end_frame();
                 }
             }
         }
