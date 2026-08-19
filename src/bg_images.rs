@@ -60,9 +60,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::fetch::file::FileFetcher;
-use crate::fetch::http1::Http1Client;
-use crate::fetch::{Fetch, Request, Response, Url};
+use crate::fetch::{Request, Response, Url};
 use crate::img::{self, RgbaImage};
 use crate::images::MAX_TOTAL_IMAGE_BYTES;
 use crate::style::ComputedStyle;
@@ -94,14 +92,11 @@ fn fetch_and_decode(url: &Url) -> Option<RgbaImage> {
     frames.into_iter().next().map(|f| f.image)
 }
 
-/// Duplicated from `images::fetch_response` — see that function's (and this
-/// module's own) doc comment on why these small fetch helpers aren't shared.
+/// The thin per-module wrapper stays (duplicated from `images::
+/// fetch_response` rather than shared), but the scheme table itself is now
+/// shared in `fetch::fetch`, so a new scheme lands once.
 fn fetch_response(url: &Url) -> Result<Response, String> {
-    match url.scheme().as_str() {
-        "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        other => Err(format!("unsupported scheme: {other}")),
-    }
+    crate::fetch::fetch(&Request::get(url.clone())).map_err(crate::fetch::err_to_string)
 }
 
 /// Running resource-consumption state threaded through one

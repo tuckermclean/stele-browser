@@ -33,9 +33,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::dom::{Dom, Node, NodeId};
-use crate::fetch::file::FileFetcher;
-use crate::fetch::http1::Http1Client;
-use crate::fetch::{Fetch, Request, Response, Url};
+use crate::fetch::{Request, Response, Url};
 use crate::img::{self, RgbaImage};
 
 /// Upper bound on how many DISTINCT `<img src>` URLs one `collect_images`
@@ -225,20 +223,12 @@ fn fetch_and_decode(url: &Url) -> Option<RgbaImage> {
     frames.into_iter().next().map(|f| f.image)
 }
 
-/// Duplicated from (rather than shared with) `main.rs::fetch_body` /
-/// `frames.rs::fetch_body`: same rationale as `frames.rs`'s own doc comment
-/// on its copy — this is a small, total, driver-level fetch helper, and
-/// three near-identical copies across `main`/`frames`/`images` cost far less
-/// than reaching into the bin crate or inventing a shared "driver" module for
-/// three call sites. This copy additionally returns the full [`Response`]
-/// (not just the body) because [`fetch_and_decode`] needs its `Content-Type`
-/// header as a decode hint (`img::decode_bytes`'s `content_type` parameter).
+/// The thin per-module wrapper stays (this one returns the full [`Response`]
+/// for its `Content-Type` decode hint — [`fetch_and_decode`] needs it for
+/// `img::decode_bytes`'s `content_type` parameter), but the scheme table
+/// itself is now shared in `fetch::fetch`, so a new scheme lands once.
 fn fetch_response(url: &Url) -> Result<Response, String> {
-    match url.scheme().as_str() {
-        "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        other => Err(format!("unsupported scheme: {other}")),
-    }
+    crate::fetch::fetch(&Request::get(url.clone())).map_err(crate::fetch::err_to_string)
 }
 
 #[cfg(test)]

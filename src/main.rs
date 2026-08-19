@@ -21,9 +21,7 @@ use stele::backend::raster;
 use stele::backend::tty;
 use stele::browser;
 use stele::dom;
-use stele::fetch::file::FileFetcher;
-use stele::fetch::http1::Http1Client;
-use stele::fetch::{Fetch, Request, Response, Url};
+use stele::fetch::{Request, Response, Url};
 use stele::frames;
 use stele::layout::box_tree::build_box_tree;
 use stele::layout::{self, Size};
@@ -266,15 +264,12 @@ fn resolve_url(raw: &str) -> Url {
 /// the full [`Response`] (not just the body) — `dump_png` needs
 /// `Response::final_url` (see its own doc comment: review finding,
 /// Important) to resolve document-relative `<img src>`s against the
-/// POST-redirect URL, not the request URL. Every other scheme (including
-/// `https`, which this build never serves — no TLS, ever, per the charter)
-/// is a clean `Err`, never a panic.
+/// POST-redirect URL, not the request URL. Scheme dispatch lives in
+/// `fetch::fetch` (one table); every other scheme — including `https`,
+/// which this build does not yet serve — comes back a clean `Err`, never a
+/// panic.
 fn fetch_response(url: &Url) -> Result<Response, String> {
-    match url.scheme().as_str() {
-        "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        other => Err(format!("unsupported scheme: {other}")),
-    }
+    stele::fetch::fetch(&Request::get(url.clone())).map_err(stele::fetch::err_to_string)
 }
 
 /// `fetch_response`'s body only — `dump_text` has no use for `final_url`
@@ -1516,15 +1511,12 @@ fn load_page(url: &Url, cols: usize) -> browser::Page {
 }
 
 /// Dispatch a form-submission [`Request`] (`browser::Command::Submit`) over
-/// whichever of the two live schemes it names — same scheme dispatch as
-/// [`fetch_response`], just over a caller-built `Request` (method/body
-/// already set by `form::serialize_submit`) instead of a fresh `GET`.
+/// whichever of the two live schemes it names — same shared `fetch::fetch`
+/// table as [`fetch_response`], just over a caller-built `Request`
+/// (method/body already set by `form::serialize_submit`) instead of a fresh
+/// `GET`.
 fn fetch_request(req: &Request) -> Result<Response, String> {
-    match req.url.scheme().as_str() {
-        "file" => FileFetcher::new().fetch(req).map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new().fetch(req).map_err(|e| format!("{e:?}")),
-        other => Err(format!("unsupported scheme: {other}")),
-    }
+    stele::fetch::fetch(req).map_err(stele::fetch::err_to_string)
 }
 
 /// Query the real terminal size via `TIOCGWINSZ` (`rustix::termios::

@@ -76,9 +76,7 @@
 //! potentially-huge decoded pixel buffers).
 
 use crate::dom::{Dom, Element, Node, NodeId};
-use crate::fetch::file::FileFetcher;
-use crate::fetch::http1::Http1Client;
-use crate::fetch::{Fetch, Request, Response, Url};
+use crate::fetch::{Request, Response, Url};
 use crate::style::{self, ColorScheme, Stylesheet};
 
 /// Upper bound on how many `<link rel="stylesheet">` fetch ATTEMPTS one
@@ -199,18 +197,11 @@ fn fetch_link_css(base: &Url, href: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&response.body).into_owned())
 }
 
-/// Duplicated from (rather than shared with) `main.rs`/`frames.rs`/
-/// `images.rs`'s own copies of this exact helper — same rationale as each of
-/// theirs: a small, total, driver-level fetch helper, and one more near-
-/// identical copy costs far less than inventing a shared "driver" module for
-/// four call sites (see `images.rs::fetch_response`'s own doc comment, which
-/// already made this call for three).
+/// The thin per-module wrapper stays (kept local rather than shared with
+/// `main.rs`/`frames.rs`/`images.rs`'s own copies), but the scheme table
+/// itself is now shared in `fetch::fetch`, so a new scheme lands once.
 fn fetch_response(url: &Url) -> Result<Response, String> {
-    match url.scheme().as_str() {
-        "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new().fetch(&Request::get(url.clone())).map_err(|e| format!("{e:?}")),
-        other => Err(format!("unsupported scheme: {other}")),
-    }
+    crate::fetch::fetch(&Request::get(url.clone())).map_err(crate::fetch::err_to_string)
 }
 
 /// Concatenate a `<style>` element's direct `Text` children's raw content —
