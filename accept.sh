@@ -160,6 +160,34 @@ elif [ -f "$BIN" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# A6 (covenant): TLS is DELEGATED — the binary must contain zero embedded
+# cryptography. openssl runs as a CHILD; its NAME may appear in our error
+# strings, but no TLS/crypto implementation symbols may be linked in.
+# ---------------------------------------------------------------------------
+check_a6_covenant() {
+  if [ ! -f "$BIN" ]; then
+    bad "A6: binary not found at $BIN"
+    return
+  fi
+  # Symbols that would betray an embedded TLS/crypto stack (rustls, ring,
+  # openssl-sys, boringssl, embedded-tls). The word "openssl" alone is allowed
+  # (our error text); these are library-internal symbols that never appear
+  # unless a crypto crate is linked.
+  if strings -a "$BIN" | grep -Eiq 'rustls|ring::|boringssl|libcrypto|SSL_CTX_new|EVP_|X509_verify|embedded_tls'; then
+    bad "A6: covenant broken — TLS/crypto implementation symbols found in $BIN"
+    strings -a "$BIN" | grep -Ei 'rustls|ring::|boringssl|libcrypto|SSL_CTX_new|EVP_|X509_verify|embedded_tls' | head | sed 's/^/    /'
+  else
+    pass "A6: covenant intact — no embedded TLS/crypto symbols in the binary"
+  fi
+}
+
+if [ "$TTY_ONLY" = 1 ]; then
+  :
+elif [ -f "$BIN" ]; then
+  check_a6_covenant
+fi
+
+# ---------------------------------------------------------------------------
 # A3 — fixture golden renders. The tty-dump half is LIVE as of P7/M2: a
 # host-native (no qemu — --dump-text has no 486-specific instructions; A4
 # already exhaustively probes that) run of `stele --headless --dump-text`
