@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-19-x11-responsiveness-design.md` (§ "PR 2 — T5"). Builds on PR 1 (merged: pixmap double-buffer, `reflow_from_dom`, coalesce loop).
 
+> **Amendment (post-implementation):** the whole-branch review found that culling reset
+> `raster::paint`'s stateful gap-synthesis at band seams, so `paint_viewport_band` was
+> changed to paint the full sequence via a new `raster::paint_at(…, y_offset)`;
+> `raster.rs` WAS modified. Golden safety now rests on `paint` delegating to
+> `paint_at(…, 0.0)` (a no-op transform — A5 goldens byte-identical, CI-verified), not
+> on raster.rs being untouched. See DECISIONS `D54` and JOURNAL.
+
 ## Global Constraints
 
 - **`--x11` only.** `fb.rs`/tty/headless-dump untouched. **`raster.rs` is NOT modified** — so the A5 PNG surface goldens (headless `dump_png` path) stay byte-identical by construction. If any A5 golden moves, that's a bug, not a re-bless.

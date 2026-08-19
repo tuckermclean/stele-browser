@@ -1365,4 +1365,7 @@ Append-only running log. Newest at the bottom.
   exists; this is a stronger, non-flaky proof of the same guarantee).
 - **Golden safety:** `raster::paint` still delegates to `paint_at(…, 0.0)` →
   byte-identical output → A5 goldens unchanged.
-- **Size:** i486 size delta measured by the CI A2 line / `stele-i486` artifact.
+- **Size:** the i486 binary is **1,258,652 bytes** (CI A2 line / `stele-i486` artifact) —
+  net-zero delta vs `main` (T5 removed the whole-document surface path and added
+  `RenderState`/`paint_at`; the win is runtime RAM, not binary size), comfortably under
+  the 1.44 MB floppy.
