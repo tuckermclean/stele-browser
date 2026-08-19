@@ -120,14 +120,33 @@ place**.
 
 - Spawn with `std::process::Command` **args only, never a shell**:
   ```
-  openssl s_client -quiet -connect HOST:443 -servername HOST \
+  openssl s_client -quiet -no_ign_eof -connect HOST:443 -servername HOST \
     -verify_return_error -verify_hostname HOST [-CAfile <ca>]
   ```
 - `stdin` = plaintext request (write half); `stdout` = response (read half); `stderr`
-  captured for error reporting. `kill_on_drop(true)`; `wait()` to reap. One child per
-  connection.
-- `shutdown_write` closes child stdin (drops the `ChildStdin`). `Read`/`Write` proxy to
-  the child's stdout/stdin. Connect/read timeouts mirror `http1`'s `IO_TIMEOUT`.
+  captured for error reporting. One child per connection.
+- **Child lifecycle is manual — std has no `kill_on_drop`** (that is a tokio API):
+  `impl Drop for OpensslStream` does `kill()` **then `wait()`** — the wait is
+  load-bearing (kill without reap leaks a zombie per failed connection). The happy
+  path also `wait()`s after stdout EOF.
+- **Pipe reads have no timeout setter** — child stdout is a pipe, not a `TcpStream`;
+  a stalled connection would block forever. The read side is a **`poll`-with-timeout
+  loop** on the pipe fd (rustix, already in-tree for the tty shell), enforcing
+  `IO_TIMEOUT` per read and overall. Design note: this poll loop is deliberately the
+  seam a future `progress()` hook (throbber/download progress) subscribes to — build
+  the loop hook-shaped now, even though no hook lands in this packet.
+- `shutdown_write` closes child stdin (drops the `ChildStdin`) — **but note `-quiet`
+  implies `-ign_eof`**, so stdin EOF does NOT propagate a close to the TLS peer by
+  default. Add **`-no_ign_eof`** to restore stdin-EOF semantics (safe: interactive
+  `Q`/`R` mode stays off because `-quiet` was given — verify against the installed
+  openssl's man page and pin with a test). If `-no_ign_eof` proves unsupported on a
+  probed binary, document that https correctness rests entirely on
+  `Connection: close` + server-side close, and `shutdown_write` is best-effort there.
+- **stderr drain discipline:** stderr is only read on the error path, which risks the
+  classic deadlock — a child blocked writing to a full stderr pipe while we `wait()`.
+  With `-quiet` the output is small, but on ANY failure: drain stderr (bounded cap,
+  e.g. 64 KB) **before** `wait()`, never after. `Read`/`Write` proxy to the child's
+  stdout/stdin.
 - Always send `Connection: close`; child stdout EOF = connection close. The existing
   framing/read code drives it **unchanged** because it is just another `ByteStream`.
 - `-quiet` is **correctness, not cosmetics**: without it, `s_client` runs interactive
@@ -151,9 +170,12 @@ place**.
 On first https use (result cached for the process):
 
 - Parse `openssl s_client -help`; if the binary is absent or any required flag
-  (`-quiet`, `-connect`, `-servername`, `-verify_return_error`, `-verify_hostname`,
-  `-CAfile`) is missing, https is **UNAVAILABLE** with a legible error naming the
-  binary/flag and suggesting the proxy.
+  (`-quiet`, `-no_ign_eof`, `-connect`, `-servername`, `-verify_return_error`,
+  `-verify_hostname`, `-CAfile`) is missing, https is **UNAVAILABLE** with a legible
+  error naming the binary/flag and suggesting the proxy. The error text should
+  anticipate the common cause: *"your `openssl` may be LibreSSL or too old; install
+  OpenSSL or use the proxy"* — LibreSSL ships an `s_client` that fails this probe,
+  and that failure must read as guidance, not mystery.
 - **Never** fall through to a silently-unverified connection. Fail closed.
 
 ### G. CA bundle
@@ -194,6 +216,11 @@ cert** created in the harness. Cases:
    forever).
 5. **Probe fail-closed**: a stub `openssl` on `PATH` missing a required flag → legible
    UNAVAILABLE error.
+6. **stdin-EOF semantics** (`-quiet -no_ign_eof` interaction): with both flags, (a) a
+   body line starting with `Q` still survives (interactive mode stays off — same
+   payload as test 4), and (b) closing child stdin propagates EOF so a
+   close-delimited response terminates. Pins the flag pair against openssl behavior
+   drift.
 
 `accept.sh` additions:
 
