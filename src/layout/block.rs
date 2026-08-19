@@ -122,16 +122,16 @@ use taffy::prelude::{
 // from `taffy::prelude` (only flexbox/grid additions are) -- pull them from
 // the crate root, same seam the proving spike (spike/taffy-float-layout)
 // used.
-use taffy::{Clear as TClear, Float as TFloat};
+use taffy::{BoxSizing as TBoxSizing, Clear as TClear, Float as TFloat};
 
 use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
 use crate::layout::table_layout;
 use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode, Point, Rect, Size};
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float,
-    GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize, JustifyContent, LengthPercentage,
-    LengthPercentageAuto, Dimension as CssDimension, TextAlign,
+    AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, BoxSizing, Clear, Display, FlexDirection,
+    FlexWrap, Float, GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize, JustifyContent,
+    LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -366,9 +366,31 @@ pub fn layout_tree<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -
     // filling the window) — but only when the caller gave us a positive
     // viewport width; a zero/degenerate viewport still computes (shrinking
     // to content) rather than panicking.
+    //
+    // packet/acid1-content-box: `box_sizing` is forced to `BorderBox` for
+    // this ONE synthetic assignment, regardless of `box_sizing_for`'s
+    // otherwise-CSS-correct `ContentBox` default (and regardless of
+    // whatever the page itself declared). `vw` is unambiguously a
+    // BORDER-BOX target -- "the root's rendered box fills the viewport,
+    // padding/border inward, content shrinking to accommodate" -- the same
+    // way a real browser's initial containing block works, and the same
+    // way a real CSS `width: auto` block stretch-fit ALREADY works
+    // regardless of `box-sizing` (that property only ever reinterprets an
+    // EXPLICIT declared length, never the auto/stretch-fit case -- see
+    // `box_sizing_for`'s own doc comment, which this comment complements
+    // rather than duplicates). Before this line existed, every node
+    // defaulted to taffy's own `BoxSizing::BorderBox`, so setting a bare
+    // `style.size.width` here was implicitly already correct; now that
+    // `ContentBox` is the real default, the SAME assignment would silently
+    // get reinterpreted as a CONTENT width, growing the root's border-box
+    // PAST the viewport by its own padding+border (caught by `tests/
+    // layout_block.rs`'s `nested_margin_padding_border_produce_expected_
+    // rects`: a 1px-padding-all-round root grew from the correct 300 to a
+    // wrong 302 -- exactly `2 * 1px` padding -- before this fix).
     if vw > 0.0 {
         if let Ok(mut style) = taffy.style(built.taffy_id()).cloned() {
             style.size.width = length(vw);
+            style.box_sizing = TBoxSizing::BorderBox;
             let _ = taffy.set_style(built.taffy_id(), style);
         }
     }
@@ -842,31 +864,32 @@ fn margin_px_for_collapse(v: LengthPercentageAuto) -> Option<f32> {
 /// otherwise. The returned `Vec` is parallel to `children` (same length,
 /// same order).
 ///
-/// **Every** adjoining pair gets an explicit override, not just the ones
-/// that collapse — this is load-bearing, not belt-and-suspenders. Taffy
-/// 0.13's `Display::Block` algorithm (`taffy::compute::block`) implements
-/// real CSS margin collapsing NATIVELY, and unlike this function it does
-/// NOT gate sibling-to-sibling collapsing on border/padding/float at all
-/// (those only affect taffy's own "can this box be collapsed THROUGH"
-/// pass-through check, a different question — see `has_styles_preventing_
-/// being_collapsed_through` in taffy's source, which only ever gates a
-/// PARENT/child or pass-through relationship, never a plain sibling pair).
-/// So taffy will happily collapse two directly-adjacent `Display::Block`
-/// items' margins on its own initiative REGARDLESS of what this function
-/// decides — leaving a "should NOT collapse" pair's margins untouched
-/// (the pre-`t6` fix's original approach) does not make taffy sum them,
-/// it just lets taffy collapse them anyway. The only way to reliably
-/// override taffy's own decision is to feed it a `(sum, 0)` pair instead
-/// of `(a, b)`: taffy's own `collapse_with_margin`/`collapse_with_set`
-/// calls always resolve to `max`, and `max(sum, 0) == sum` for the
-/// non-negative margins this function handles — so committing the desired
-/// final value into the EARLIER box's margin-bottom and zeroing the LATER
-/// box's margin-top makes any further collapsing taffy performs on top of
-/// that a no-op, regardless of which formula (max or sum) produced the
-/// committed value. The same trick is what makes the actually-eligible
-/// pairs work too (`max(a, b)` committed with a trailing `0` collapses to
-/// itself) — the two cases share one code path below, differing only in
-/// which formula computes `gap`.
+/// **Every** adjoining pair of NON-FLOATED real blocks gets an explicit
+/// override, not just the ones that collapse — this is load-bearing, not
+/// belt-and-suspenders. Taffy 0.13's `Display::Block` algorithm
+/// (`taffy::compute::block`) implements real CSS margin collapsing
+/// NATIVELY, and unlike this function it does NOT gate sibling-to-sibling
+/// collapsing on border/padding at all (those only affect taffy's own "can
+/// this box be collapsed THROUGH" pass-through check, a different question
+/// — see `has_styles_preventing_being_collapsed_through` in taffy's
+/// source, which only ever gates a PARENT/child or pass-through
+/// relationship, never a plain sibling pair). So taffy will happily
+/// collapse two directly-adjacent `Display::Block` items' margins on its
+/// own initiative REGARDLESS of what this function decides — leaving a
+/// "should NOT collapse" pair's margins untouched (the pre-`t6` fix's
+/// original approach) does not make taffy sum them, it just lets taffy
+/// collapse them anyway. The only way to reliably override taffy's own
+/// decision is to feed it a `(sum, 0)` pair instead of `(a, b)`: taffy's
+/// own `collapse_with_margin`/`collapse_with_set` calls always resolve to
+/// `max`, and `max(sum, 0) == sum` for the non-negative margins this
+/// function handles — so committing the desired final value into the
+/// EARLIER box's margin-bottom and zeroing the LATER box's margin-top
+/// makes any further collapsing taffy performs on top of that a no-op,
+/// regardless of which formula (max or sum) produced the committed value.
+/// The same trick is what makes the actually-eligible pairs work too
+/// (`max(a, b)` committed with a trailing `0` collapses to itself) — the
+/// two cases share one code path below, differing only in which formula
+/// computes `gap`.
 ///
 /// Walks `children` once, tracking the most recent REAL (non-whitespace,
 /// non-inline) block-level box still adjacent to the position being
@@ -875,13 +898,47 @@ fn margin_px_for_collapse(v: LengthPercentageAuto) -> Option<f32> {
 /// does (never actually reached here in practice — such content is folded
 /// into an `Inline` run by the caller's own grouping loop before this
 /// function ever sees it, but the check is kept for clarity/defense).
-/// EVERY adjoining pair of real block-level boxes gets an override — even
-/// a collapse-INELIGIBLE one (a float): it still becomes `prev` for the
-/// pair after it, still gets an explicit (summed) override against its
-/// neighbor on each side, because taffy doesn't know it's floated and
-/// would otherwise collapse across it regardless (a chain like `[A, float,
-/// C]` needs BOTH the `(A, float)` and `(float, C)` pairs neutralized, not
-/// just the first).
+///
+/// packet/acid1-content-box regression fix: a pair where EITHER side is
+/// floated (`style.float != Float::None`) gets NO override at all, on
+/// EITHER index — this used to not be true (a float still got zeroed as
+/// the "later" sibling, or had its "earlier" sibling's margin summed into
+/// its own bottom), on the theory that "taffy doesn't know it's floated
+/// and would otherwise collapse across it regardless." That theory is
+/// FALSE for the float's OWN margin specifically: reading taffy 0.13's
+/// vendored `compute::block::perform_final_layout_on_in_flow_children`
+/// directly shows a floated item's branch (`if let Some(float_direction) =
+/// item.float.float_direction() { ... continue; }`) is checked FIRST and
+/// unconditionally `continue`s BEFORE any of the margin-collapsing
+/// bookkeeping (`active_collapsible_margin_set`, `collapse_with_margin`,
+/// ...) ever runs for it — a floated item's own margin is NEVER a
+/// candidate for taffy-native collapsing in the first place; it goes
+/// straight into `margin_box = item_layout.size + item_non_auto_margin.
+/// sum_axes()` (its RAW cascaded margin, `top` AND `bottom` both), and
+/// `location.y += item_non_auto_margin.top` converts that margin-box
+/// position back to the float's own border-box position. Zeroing a
+/// float's `top` override (or inflating its `bottom` override with a
+/// neighbor's margin, as the old code did as `prev` in the NEXT pair) does
+/// not neutralize any taffy-native collapsing (there was never any to
+/// neutralize) — it just silently DELETES or DISTORTS the float's real
+/// declared margin, which taffy then faithfully (and now wrongly)
+/// consumes. This is exactly the bug `fixtures/css1-float-5526c.html`'s
+/// `blockquote`/`h1` (both `float:left`, both `margin: 1em ...`, i.e. a
+/// real 10px top margin) surfaced: the old code zeroed their margin-top,
+/// so row 2 of `dd`'s floated content started 10px higher than it should
+/// have, leaving a 20px gap at `dd`'s bottom interior edge instead of the
+/// uniform 10px every other side already had (Chrome's own reference
+/// rendering, pixel-verified). The (real, taffy-native) concern the old
+/// code's "chain like `[A, float, C]`" reasoning was trying to guard
+/// against — `A`'s trailing margin potentially collapsing THROUGH the
+/// float into `C`'s leading margin, since the float's `continue` also
+/// means it never resets `active_collapsible_margin_set` — is a genuine,
+/// SEPARATE question about the two NON-floated neighbors of a float, not
+/// about the float's own margin; no fixture in this repo's golden set
+/// exercises a `[non-float, float, non-float]` sibling chain that would
+/// need it resolved, so this fix scopes cleanly to "never touch a float's
+/// own margin override" without having to also solve that separate,
+/// currently-unexercised case.
 ///
 /// Each child can accumulate up to two independent overrides across the
 /// whole walk — one as the "later" sibling of the pair before it (its
@@ -913,15 +970,24 @@ fn compute_sibling_margin_overrides(children: &[LayoutNode]) -> Vec<MarginOverri
             continue;
         }
         if let Some(p) = prev {
-            let eligible = is_collapse_eligible_block(&children[p])
-                && is_collapse_eligible_block(child)
-                && margins_may_collapse(&children[p], child);
-            let prev_bottom = margin_px_for_collapse(children[p].style.margin.bottom);
-            let next_top = margin_px_for_collapse(child.style.margin.top);
-            if let (Some(pb), Some(nt)) = (prev_bottom, next_top) {
-                let gap = if eligible { pb.max(nt) } else { pb + nt };
-                overrides[p].bottom = Some(gap);
-                overrides[i].top = Some(0.0);
+            // packet/acid1-content-box: a float's own margin is NEVER a
+            // candidate for taffy-native collapsing (see this function's
+            // own doc comment for the full "why", verified against taffy
+            // 0.13's vendored source) -- skip the whole pair, on EITHER
+            // index, whenever either side is floated, rather than zeroing/
+            // distorting the float's real declared margin.
+            let touches_float = children[p].style.float != Float::None || child.style.float != Float::None;
+            if !touches_float {
+                let eligible = is_collapse_eligible_block(&children[p])
+                    && is_collapse_eligible_block(child)
+                    && margins_may_collapse(&children[p], child);
+                let prev_bottom = margin_px_for_collapse(children[p].style.margin.bottom);
+                let next_top = margin_px_for_collapse(child.style.margin.top);
+                if let (Some(pb), Some(nt)) = (prev_bottom, next_top) {
+                    let gap = if eligible { pb.max(nt) } else { pb + nt };
+                    overrides[p].bottom = Some(gap);
+                    overrides[i].top = Some(0.0);
+                }
             }
         }
         prev = Some(i);
@@ -1481,6 +1547,11 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
 /// reaches this function (inline-level content is folded into a measure-
 /// function leaf, see this module's own doc comment), so it keeps handling
 /// its own narrower case exactly as before.
+///
+/// packet/acid1-content-box: `box_sizing` reflects `cs.box_sizing` (real
+/// `box-sizing` CSS parsing, `map_box_sizing` below) -- CSS's `ContentBox`
+/// initial value applies to every node unless the page explicitly declares
+/// `box-sizing: border-box` on it.
 fn base_style(cs: &ComputedStyle) -> TStyle {
     TStyle {
         size: TSize { width: map_dimension(cs.width), height: map_dimension(cs.height) },
@@ -1504,7 +1575,99 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
         },
         float: map_float(cs.float),
         clear: map_clear(cs.clear),
+        box_sizing: box_sizing_for(cs),
         ..Default::default()
+    }
+}
+
+/// `box_sizing` for a node: `map_box_sizing(cs.box_sizing)` (real CSS
+/// `box-sizing`, honoring an explicit author declaration) for everything
+/// EXCEPT table-internal display types (`Display::Table`/`TableRow`/
+/// `TableCell`/`TableRowGroup`), which are hardcoded `BorderBox` regardless
+/// of `cs.box_sizing` -- `layout::table`/this module's own `cell_query_
+/// width`/`cell_content_layout`/`compute_table_cache_entry` compute a
+/// cell's/table's own box dimensions ASSUMING taffy's reported width is a
+/// BORDER-box (they add/subtract padding+border themselves on top of that
+/// assumption -- see e.g. `cell_content_layout`'s `style.size.width =
+/// length(w)` immediately followed by reading the resulting layout's own
+/// border/padding back out). Flipping every node to `ContentBox` (this
+/// packet's own first attempt, verified by the user's own pixel
+/// measurement) makes that path double-count padding+border: a cell grows
+/// by its padding+border TWICE (once from taffy's real `ContentBox`
+/// growth, once again from the table code's own border-box-shaped
+/// arithmetic on top), which doesn't just resize cells -- it desyncs the
+/// column solver's column-width sum from what actually got painted,
+/// producing a phantom extra (empty, or content-overlapping) column at the
+/// table's right edge (`goldens/table-spacing.png`/`table-border.png`, and
+/// `kitchen-sink.png`'s embedded table). No fixture ever declares
+/// `box-sizing` on a table/row/cell (`grep -c "box-sizing" fixtures/
+/// table-*.html fixtures/kitchen-sink.html` is all zeros), so this
+/// hardcoding costs nothing real today -- it's the table engine's own
+/// well-established (if implicit) border-box contract, not a regression;
+/// giving table cells real per-declaration `box-sizing` support is a
+/// separate, out-of-scope rabbit hole (the table solver's own arithmetic
+/// would need to branch on it too, not just this one field) with zero
+/// user-visible benefit -- every fixture's tables already render correctly
+/// under the implicit border-box assumption they were written against.
+fn box_sizing_for(cs: &ComputedStyle) -> TBoxSizing {
+    match cs.display {
+        Display::Table | Display::TableRow | Display::TableCell | Display::TableRowGroup => TBoxSizing::BorderBox,
+        _ => map_box_sizing(cs.box_sizing),
+    }
+}
+
+/// Maps Stele's `BoxSizing` (`src/style/computed.rs`, packet/acid1-
+/// content-box) onto taffy's `BoxSizing` -- the two enums are shape-
+/// identical (`ContentBox`/`BorderBox`), so this is a straight rename, not
+/// a semantic translation (mirrors `map_float`/`map_clear` right below).
+///
+/// This used to be a hand-picked-per-node decision (`float_box_sizing`,
+/// later `box_sizing_for`, packet/acid1-coherence's `b88f9cd` and this
+/// packet's own first attempt) because the engine had no `box-sizing` CSS
+/// property support at all, and taffy 0.13's OWN default (`BoxSizing::
+/// BorderBox` -- see `taffy::style::Style`'s own doc comment on the field)
+/// disagrees with CSS's real initial value (`content-box`: a declared
+/// `width`/`height` is the CONTENT size, padding/border add on top, rather
+/// than being subtracted back out of a border-box-pinned declared size).
+///
+/// `fixtures/css1-float-5526c.html` (the W3C CSS1 Acid1 test) is what
+/// surfaced this: EVERY element in it pairs an explicit `width`/`height`
+/// with non-zero `padding`/`border`, exactly where `BorderBox` vs
+/// `ContentBox` diverge. Scoping the fix to floated elements only (`b88f9cd`)
+/// fixed `dd`'s own size but left `dt`/`dd` stacking vertically instead of
+/// sitting side by side at their intended exact 470px fit -- instrumenting
+/// real fragment geometry (a temporary diagnostic dump, since removed)
+/// traced this to `<body>` (`width: 48em; border: .5em solid black`, NOT
+/// floated): still `BorderBox`, so its content box came out 470px instead
+/// of the CSS-correct 480px -- a real 10px shortfall (`<body>`'s own
+/// border), not sub-pixel rounding, that propagated through `<dl>` (auto-
+/// width) to shrink `dt`/`dd`'s actual containing block by the same 10px,
+/// turning "fits with ~1px to spare" into "overflows by ~9px" against
+/// taffy's own (correctly inclusive, `<=` -- verified by reading taffy
+/// 0.13's vendored `compute::float::float_fits_horizontally` directly)
+/// float-fit check, which correctly wrapped `dd` onto a new line.
+///
+/// Given that, the CSS-correct fix is unconditional: `ContentBox` is the
+/// real default for every element, not just floats -- so this packet adds
+/// real `box-sizing` CSS parsing (`Declarations::box_sizing`, `cascade::
+/// resolve`) instead of continuing to hand-pick which nodes get which
+/// model. `ComputedStyle::default().box_sizing` is `ContentBox`, so any
+/// element that never mentions the property gets CSS's real default; a
+/// page that explicitly asks for `border-box` (`fixtures/grid.html`'s own
+/// `* { box-sizing: border-box; }`) gets exactly that instead. Every OTHER
+/// fixture with a byte-compared PNG golden that combines an explicit
+/// `width`/`height` with non-zero `padding`/`border` on a plain (non-
+/// grid.html) element now legitimately renders BIGGER than before (padding
+/// and border add outside the declared size instead of eating into it) --
+/// `fixtures/flex-polite.html`'s `aside` and `fixtures/kitchen-sink.html`'s
+/// `.flexrow .fixed` -- and their goldens were re-blessed to match, each
+/// pixel-verified (this packet's PR description has the measurements) to
+/// have grown by EXACTLY their own padding+border, with the rest of the
+/// page's layout staying coherent, not merely "different."
+fn map_box_sizing(box_sizing: BoxSizing) -> TBoxSizing {
+    match box_sizing {
+        BoxSizing::ContentBox => TBoxSizing::ContentBox,
+        BoxSizing::BorderBox => TBoxSizing::BorderBox,
     }
 }
 
@@ -2090,5 +2253,31 @@ mod tests {
     fn is_inline_ish_false_for_a_block_container() {
         let div = container(block_style(), vec![text_node("hello")]);
         assert!(!is_inline_ish(&div));
+    }
+
+    // ---- packet/acid1-content-box: `map_box_sizing` ----
+
+    #[test]
+    fn map_box_sizing_is_a_straight_rename() {
+        assert_eq!(map_box_sizing(BoxSizing::ContentBox), TBoxSizing::ContentBox);
+        assert_eq!(map_box_sizing(BoxSizing::BorderBox), TBoxSizing::BorderBox);
+    }
+
+    #[test]
+    fn base_style_defaults_to_content_box_for_an_ordinary_element() {
+        // ComputedStyle::default().box_sizing is ContentBox (CSS's real
+        // initial value) -- an element that never declares `box-sizing`
+        // (e.g. `<body>`/`<dl>` in fixtures/css1-float-5526c.html) must get
+        // it, not taffy's own BorderBox default.
+        let style = base_style(&ComputedStyle::default());
+        assert_eq!(style.box_sizing, TBoxSizing::ContentBox);
+    }
+
+    #[test]
+    fn base_style_honors_an_explicit_border_box_declaration() {
+        // fixtures/grid.html's `* { box-sizing: border-box; }`.
+        let cs = ComputedStyle { box_sizing: BoxSizing::BorderBox, ..ComputedStyle::default() };
+        let style = base_style(&cs);
+        assert_eq!(style.box_sizing, TBoxSizing::BorderBox);
     }
 }

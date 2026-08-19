@@ -5,8 +5,8 @@
 
 use crate::dom::AttrMap;
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderCollapse, BorderStyle, Clear, Display, FlexDirection, FlexWrap, Float, FontFamily,
-    FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
+    AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Display, FlexDirection, FlexWrap, Float,
+    FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
     WhiteSpace,
 };
 use crate::style::tokenizer::Token;
@@ -163,6 +163,36 @@ pub(crate) struct Declarations {
     /// /`-left` (out of scope -- only `<hr>`'s UA rule needs a single-side
     /// border today); add them the same way if a future packet needs them.
     pub border_top: Option<BorderRaw>,
+    /// `border-width: <length>{1,4}` (packet/acid1-content-box:
+    /// `fixtures/css1-float-5526c.html`'s `blockquote` declares
+    /// `border-width: 1em 1.5em 2em .5em` as its OWN longhand, never a
+    /// `border` shorthand at all -- before this packet, `apply_property`
+    /// had no `"border-width"` arm, so this fell through to the catch-all
+    /// `_ => false` and the whole border silently never applied (`style`/
+    /// `width` both stayed the CSS-initial `none`/`0`). A per-edge
+    /// `EdgesRaw<RawLength>`, same 1-4-value TRBL grammar as `margin`/
+    /// `padding` above (`apply_edges_shorthand`), because — unlike
+    /// `border`/`border-top` (curated as ONE uniform width/style/color
+    /// triple per brief §4) — THIS fixture needs four genuinely different
+    /// widths on one element and there is no shorthand token in its CSS to
+    /// carry them. `cascade::resolve_border` layers this on top of
+    /// whatever `border`/`border-top` already resolved, side by side,
+    /// touching a side's width only when this field actually set it (never
+    /// a behavior change for the many existing fixtures that only ever use
+    /// the `border` shorthand).
+    pub border_width: EdgesRaw<RawLength>,
+    /// `border-style: <keyword>` (packet/acid1-content-box, sibling to
+    /// `border_width` above — same fixture, same gap). Curated to a single
+    /// uniform value (real CSS allows 1-4, but no fixture needs more than
+    /// one), reusing the border shorthand's own solid-vs-everything-else
+    /// mapping (`parse_border_raw`'s doc comment) so `none`/`dashed`/
+    /// `dotted`/... all collapse to `BorderStyle::None` exactly like they
+    /// do inside the `border`/`border-top` shorthand grammar.
+    pub border_style: Option<BorderStyle>,
+    /// `border-color: <color>` (packet/acid1-content-box, sibling to
+    /// `border_width`/`border_style` above). Single uniform value, same
+    /// scope note as `border_style`.
+    pub border_color: Option<Color>,
     /// `border-spacing: <length-x> <length-y>?` (packet/table-spacing,
     /// `ComputedStyle`'s own freeze-amendment doc comment has the full
     /// rationale). Two independent fields (not an `EdgesRaw`-style pair —
@@ -180,6 +210,14 @@ pub(crate) struct Declarations {
     pub border_collapse: Option<BorderCollapse>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
+    /// `box-sizing: content-box | border-box` (packet/acid1-content-box) --
+    /// `fixtures/grid.html`'s `* { box-sizing: border-box; }` is the one
+    /// fixture that declares it today; `None` (not `Some(ContentBox)`) is
+    /// "this element's cascade never mentioned it," resolved by `cascade::
+    /// resolve`'s `own!` to `ComputedStyle::default().box_sizing` (CSS's
+    /// real `ContentBox` initial value) the same way every other `own!`
+    /// field here defaults when unset.
+    pub box_sizing: Option<BoxSizing>,
 
     pub flex_direction: Option<FlexDirection>,
     pub flex_wrap: Option<FlexWrap>,
@@ -265,11 +303,14 @@ impl Declarations {
         ov!(height);
         ov!(border);
         ov!(border_top);
+        ov!(border_style);
+        ov!(border_color);
         ov!(border_spacing_x);
         ov!(border_spacing_y);
         ov!(border_collapse);
         ov!(float);
         ov!(clear);
+        ov!(box_sizing);
         ov!(flex_direction);
         ov!(flex_wrap);
         ov!(justify_content);
@@ -282,6 +323,7 @@ impl Declarations {
         ov!(column_gap);
         self.margin.overlay(&other.margin);
         self.padding.overlay(&other.padding);
+        self.border_width.overlay(&other.border_width);
         // `background_image` isn't `Copy` (see its field doc comment), so it
         // can't go through the `ov!` macro above -- same last-writer-wins
         // semantics, just spelled with an explicit `.clone()`.
@@ -1243,6 +1285,96 @@ fn parse_border_raw(tokens: &[Token]) -> Option<BorderRaw> {
     Some(b)
 }
 
+/// `font` shorthand (CSS2.1 §15.3): `[ <font-style> || <font-weight> ]?
+/// <font-size> [ / <line-height> ]? <font-family>`. Curated like `border`/
+/// `background` above: extracts font-size (this shorthand's mandatory
+/// component, and the whole reason this function exists — see this
+/// function's caller-site comment in `apply_property` for the bug this
+/// closes), plus font-family/line-height/font-style/font-weight wherever
+/// present. `font-variant` and the CSS2.1 system-font keywords (`caption`/
+/// `icon`/`menu`/`message-box`/`small-caption`/`status-bar`) are NOT
+/// recognized — no fixture in this repo uses them, and (unlike `border`'s
+/// "any bad token invalidates everything" rule) an unrecognized token here
+/// before the size is found is just skipped, not fatal: font-family lists
+/// routinely carry punctuation/keywords this loop doesn't special-case, and
+/// being lenient about the leading style/weight/variant slot matches
+/// `background`'s "apply what we understood" precedent instead of
+/// `border`'s stricter one.
+///
+/// A missing font-size fails the WHOLE shorthand (`None`) — real CSS
+/// invalidates `font: bold sans-serif` outright rather than half-applying
+/// it, since font-size has no default to fall back to within the
+/// shorthand's own grammar.
+fn apply_font_shorthand(tokens: &[Token], d: &mut Declarations) -> bool {
+    let mut size: Option<RawLength> = None;
+    let mut weight: Option<FontWeight> = None;
+    let mut style: Option<FontStyle> = None;
+    let mut line_height: Option<RawLineHeight> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if let Token::Ident(s) = t {
+            match s.to_ascii_lowercase().as_str() {
+                "italic" | "oblique" => {
+                    style = Some(FontStyle::Italic);
+                    i += 1;
+                    continue;
+                }
+                "bold" | "bolder" => {
+                    weight = Some(FontWeight::Bold);
+                    i += 1;
+                    continue;
+                }
+                "lighter" => {
+                    weight = Some(FontWeight::Normal);
+                    i += 1;
+                    continue;
+                }
+                _ => {} // font-variant/"normal"/system-font keyword/garbage: skip, see doc comment
+            }
+        } else if let Token::Number(n) = t {
+            // A bare number before the size is a numeric font-weight
+            // (100-900) — `token_to_raw_length` never parses a nonzero
+            // `Number` token (only Dimension/Percentage/unitless-0), so
+            // this is unambiguous with the size search below.
+            weight = Some(if *n >= 600.0 { FontWeight::Bold } else { FontWeight::Normal });
+            i += 1;
+            continue;
+        } else if let Some(l) = token_to_raw_length(t) {
+            size = Some(l);
+            i += 1;
+            if i < tokens.len() && tokens[i] == Token::Delim('/') {
+                i += 1;
+                if let Some(lh_tok) = tokens.get(i) {
+                    line_height = match lh_tok {
+                        Token::Ident(s) if s.eq_ignore_ascii_case("normal") => Some(RawLineHeight::Normal),
+                        Token::Number(n) => Some(RawLineHeight::Number(*n)),
+                        other => token_to_raw_length(other).map(RawLineHeight::Length),
+                    };
+                    i += 1;
+                }
+            }
+            break; // everything after size[/line-height] is the font-family list
+        }
+        i += 1;
+    }
+    let Some(size) = size else { return false }; // font-size is mandatory
+    d.font_size = Some(size);
+    if let Some(w) = weight {
+        d.font_weight = Some(w);
+    }
+    if let Some(s) = style {
+        d.font_style = Some(s);
+    }
+    if let Some(lh) = line_height {
+        d.line_height = Some(lh);
+    }
+    if let Some(f) = classify_font_family(&tokens[i..]) {
+        d.font_family = Some(f);
+    }
+    true
+}
+
 /// Apply one already-lowercased property `name` with its (whitespace-
 /// filtered) value tokens onto `d`. Returns whether it was recognized *and*
 /// parsed successfully — the caller counts `false` against
@@ -1287,6 +1419,11 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             let image = parse_background_image_component(tokens).map(|u| d.background_image = Some(u.into_boxed_str())).is_some();
             color || image
         }
+        // `font` shorthand (packet/acid1-coherence): see `apply_font_
+        // shorthand`'s own doc comment above for the grammar it covers and
+        // the bug this closes (`html { font: 10px/1 ... }` used to parse as
+        // nothing at all, leaving font-size at the UA default).
+        "font" => apply_font_shorthand(tokens, d),
         "font-family" => classify_font_family(tokens).map(|f| d.font_family = Some(f)).is_some(),
         "font-size" => tokens.first().and_then(token_to_raw_length).map(|l| d.font_size = Some(l)).is_some(),
         "font-weight" => match tokens.first() {
@@ -1517,6 +1654,31 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             None => false,
         },
+        // packet/acid1-content-box: `border-width`/`border-style`/
+        // `border-color` as their OWN longhands (not folded into `border`/
+        // `border-top`'s shorthand grammar above) -- see `Declarations::
+        // border_width`'s own doc comment for why `fixtures/css1-float-
+        // 5526c.html`'s `blockquote` needs exactly this shape.
+        // `token_to_border_width`'s percent-rejecting conversion is reused
+        // here too (same reasoning as the `border-spacing` 1/2-value arm
+        // below): `border-width` has no percentage form in CSS either.
+        "border-width" => apply_edges_shorthand(tokens, &mut d.border_width, token_to_border_width),
+        "border-style" => match keyword(tokens).as_deref() {
+            Some("solid") => {
+                d.border_style = Some(BorderStyle::Solid);
+                true
+            }
+            // Curated set is solid-only (brief §4), matching `parse_border_
+            // raw`'s own style-keyword mapping exactly: every other named
+            // style is a real CSS keyword that resolves to "no visible
+            // border" here rather than being rejected outright.
+            Some("none" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset") => {
+                d.border_style = Some(BorderStyle::None);
+                true
+            }
+            _ => false,
+        },
+        "border-color" => parse_color(tokens).map(|c| d.border_color = Some(c)).is_some(),
         "float" => match keyword(tokens).as_deref() {
             Some("left") => {
                 d.float = Some(Float::Left);
@@ -1547,6 +1709,23 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             Some("none") => {
                 d.clear = Some(Clear::None);
+                true
+            }
+            _ => false,
+        },
+        // packet/acid1-content-box: `fixtures/grid.html`'s `* { box-sizing:
+        // border-box; }` is the one fixture that declares this today --
+        // parsing it lets that page's explicit request be honored (its
+        // `.card` keeps its already-blessed pixels) instead of silently
+        // dropping the property the way this engine did before this
+        // packet (`Declarations::box_sizing`'s own doc comment).
+        "box-sizing" => match keyword(tokens).as_deref() {
+            Some("content-box") => {
+                d.box_sizing = Some(BoxSizing::ContentBox);
+                true
+            }
+            Some("border-box") => {
+                d.box_sizing = Some(BoxSizing::BorderBox);
                 true
             }
             _ => false,
@@ -2006,6 +2185,89 @@ mod tests {
         assert!(d.border_top.is_none());
     }
 
+    // ---- packet/acid1-content-box: `border-width`/`border-style`/
+    // `border-color` longhands (fixtures/css1-float-5526c.html's
+    // `blockquote` uses exactly this triple, never the `border` shorthand)
+    // ----
+
+    #[test]
+    fn border_width_four_values_expand_top_right_bottom_left() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-width", &toks("1em 1.5em 2em .5em"), &mut d));
+        assert_eq!(d.border_width.top, Some(RawLength::Em(1.0)));
+        assert_eq!(d.border_width.right, Some(RawLength::Em(1.5)));
+        assert_eq!(d.border_width.bottom, Some(RawLength::Em(2.0)));
+        assert_eq!(d.border_width.left, Some(RawLength::Em(0.5)));
+    }
+
+    #[test]
+    fn border_width_rejects_percentage_like_the_border_shorthand_does() {
+        // `token_to_border_width` (shared with the `border` shorthand's own
+        // width sub-token) rejects `%` -- CSS has no percentage form for
+        // `border-width`. A single bad token invalidates the whole 1-4-value
+        // declaration, same as `apply_edges_shorthand`'s existing contract.
+        let mut d = Declarations::default();
+        assert!(!apply_property("border-width", &toks("10%"), &mut d));
+    }
+
+    #[test]
+    fn border_style_solid_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-style", &toks("solid"), &mut d));
+        assert_eq!(d.border_style, Some(BorderStyle::Solid));
+    }
+
+    #[test]
+    fn border_style_non_solid_keywords_map_to_none_not_rejected() {
+        // Matches `parse_border_raw`'s own curated mapping: `dashed`/
+        // `dotted`/... are recognized CSS keywords, just not ones this
+        // engine paints (brief §4, solid-only) -- so they resolve to "no
+        // visible border" rather than failing the whole declaration.
+        let mut d = Declarations::default();
+        assert!(apply_property("border-style", &toks("dashed"), &mut d));
+        assert_eq!(d.border_style, Some(BorderStyle::None));
+    }
+
+    #[test]
+    fn border_color_parses_a_named_or_hex_color() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-color", &toks("black"), &mut d));
+        assert_eq!(d.border_color, Some(Color::rgb(0, 0, 0)));
+    }
+
+    #[test]
+    fn border_width_style_color_longhands_do_not_touch_the_border_shorthand_field() {
+        let mut d = Declarations::default();
+        assert!(apply_property("border-width", &toks("1em 1.5em 2em .5em"), &mut d));
+        assert!(apply_property("border-style", &toks("solid"), &mut d));
+        assert!(apply_property("border-color", &toks("black"), &mut d));
+        assert!(d.border.is_none(), "border-width/-style/-color longhands must not also set the `border` shorthand field");
+        assert!(d.border_top.is_none());
+    }
+
+    // ---- packet/acid1-content-box: `box-sizing` ----
+
+    #[test]
+    fn box_sizing_border_box_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("box-sizing", &toks("border-box"), &mut d));
+        assert_eq!(d.box_sizing, Some(BoxSizing::BorderBox));
+    }
+
+    #[test]
+    fn box_sizing_content_box_is_recognized() {
+        let mut d = Declarations::default();
+        assert!(apply_property("box-sizing", &toks("content-box"), &mut d));
+        assert_eq!(d.box_sizing, Some(BoxSizing::ContentBox));
+    }
+
+    #[test]
+    fn box_sizing_rejects_an_unknown_keyword() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("box-sizing", &toks("padding-box"), &mut d));
+        assert_eq!(d.box_sizing, None);
+    }
+
     // ---- packet/table-spacing: `border-spacing` shorthand ----
 
     #[test]
@@ -2202,6 +2464,68 @@ mod tests {
         assert!(!apply_property("background", &toks("bogus"), &mut d));
         assert_eq!(d.background_color, None);
         assert_eq!(d.background_image, None);
+    }
+
+    // ------------------------------------------------- font shorthand (D-acid1)
+    //
+    // packet/acid1-coherence: `html { font: 10px/1 Verdana, sans-serif }`
+    // (fixtures/css1-float-5526c.html) used to be silently DROPPED whole —
+    // `apply_property` had longhands for `font-family`/`font-size`/`font-
+    // weight`/`font-style` but no `"font"` arm at all, so it fell to the
+    // catch-all `_ => false` and counted as an ignored declaration. The
+    // practical effect: `html`'s font-size never left the UA default
+    // (16px), so EVERY `em` length in the whole document (including this
+    // fixture's own `width: 10.638%`/`41.17%`, which resolve against an
+    // `em`-sized ancestor) computed 1.6x too large against an 800px fixed
+    // viewport — see fixtures/evidence/css1-float-5526c.diagnosis.md's
+    // follow-up note for the pixel-measurement trail that found this.
+
+    #[test]
+    fn font_shorthand_extracts_size_and_family() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("10px/1 Verdana, sans-serif"), &mut d));
+        assert_eq!(d.font_size, Some(RawLength::Px(10.0)));
+        assert_eq!(d.line_height, Some(RawLineHeight::Number(1.0)));
+        assert_eq!(d.font_family, Some(FontFamily::SansSerif));
+    }
+
+    #[test]
+    fn font_shorthand_size_without_line_height_or_family() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("1em"), &mut d));
+        assert_eq!(d.font_size, Some(RawLength::Em(1.0)));
+        assert_eq!(d.line_height, None);
+        assert_eq!(d.font_family, None);
+    }
+
+    #[test]
+    fn font_shorthand_extracts_leading_style_and_weight() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("italic bold 12px sans-serif"), &mut d));
+        assert_eq!(d.font_style, Some(FontStyle::Italic));
+        assert_eq!(d.font_weight, Some(FontWeight::Bold));
+        assert_eq!(d.font_size, Some(RawLength::Px(12.0)));
+        assert_eq!(d.font_family, Some(FontFamily::SansSerif));
+    }
+
+    #[test]
+    fn font_shorthand_percent_line_height() {
+        let mut d = Declarations::default();
+        assert!(apply_property("font", &toks("12px/150% serif"), &mut d));
+        assert_eq!(d.line_height, Some(RawLineHeight::Length(RawLength::Percent(150.0))));
+    }
+
+    #[test]
+    fn font_shorthand_without_a_size_is_not_applied() {
+        // Real CSS: font-size is mandatory in the `font` shorthand — a
+        // value with none invalidates the whole declaration (same
+        // total-parse-failure rule `parse_border_raw` documents for
+        // `border`, just triggered by a missing mandatory component instead
+        // of a bad token).
+        let mut d = Declarations::default();
+        assert!(!apply_property("font", &toks("bold sans-serif"), &mut d));
+        assert_eq!(d.font_size, None);
+        assert_eq!(d.font_family, None);
     }
 
     // ------------------------------------------- background-image (bg-image)

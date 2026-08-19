@@ -199,6 +199,23 @@ pub enum Clear {
     Both,
 }
 
+/// CSS `box-sizing: content-box | border-box` (packet/acid1-content-box).
+/// `ContentBox` is the real CSS initial value (a declared `width`/`height`
+/// is the box's CONTENT size; padding/border add on top to reach the
+/// rendered/border-box size) -- taffy 0.13's OWN default disagrees
+/// (`taffy::style::Style::DEFAULT.box_sizing` is `BoxSizing::BorderBox`),
+/// which is why `layout::block::map_box_sizing` has to set this explicitly
+/// on every node rather than leaving taffy's default in place. See that
+/// function's own doc comment for the acid1 stacking regression this
+/// property's ABSENCE caused before this packet, and `fixtures/grid.html`'s
+/// own `* { box-sizing: border-box; }` for the one fixture that actually
+/// declares it today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListStyleType {
     Disc,
@@ -396,6 +413,12 @@ pub struct ComputedStyle {
     pub border_collapse: BorderCollapse,
     pub float: Float,
     pub clear: Clear,
+    /// `box-sizing` (packet/acid1-content-box) -- non-inherited ("own") box
+    /// property, same resolution shape as `border_collapse`/`float`/`clear`
+    /// right above. Defaults to `ContentBox` (`Default` impl below), CSS's
+    /// real initial value -- see `BoxSizing`'s own doc comment for why that
+    /// default had to become explicit (taffy 0.13 disagrees).
+    pub box_sizing: BoxSizing,
 
     // Flex
     pub flex_direction: FlexDirection,
@@ -469,6 +492,7 @@ impl Default for ComputedStyle {
             border_collapse: BorderCollapse::Separate,
             float: Float::None,
             clear: Clear::None,
+            box_sizing: BoxSizing::ContentBox,
 
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::NoWrap,

@@ -65,7 +65,8 @@ Flexbox
 
 
 
-   This region grows (flex-grow: 1) to fill remaining space.     Fixed 120px
+   This region grows (flex-grow: 1) to fill remaining          Fixed 120px
+   space.
 
 
 Disclosure & Noscript
