@@ -161,8 +161,9 @@ pub(crate) fn send_one(
 
     if scheme == "https" {
         // Delegated TLS: the openssl child is just another ByteStream. Close its
-        // stdin after writing (half_close = true) so -no_ign_eof propagates our
-        // end-of-request. On failure, recover openssl's own reason (T4).
+        // stdin after writing (half_close = true); with -quiet's implied -ign_eof
+        // this does NOT close the connection — s_client keeps reading the response
+        // to completion. On failure, recover openssl's own reason (T4).
         let mut stream = super::https::connect(&host, port)?;
         match exchange(&mut stream, &request_bytes, true) {
             Ok(r) => Ok(r),
@@ -179,8 +180,9 @@ pub(crate) fn send_one(
 }
 
 /// Transport-agnostic core: write the formatted request, optionally half-close
-/// the write side (openssl child stdin → EOF → server-visible close via
-/// -no_ign_eof), then read the framed response. `half_close = false` preserves
+/// the write side (close the openssl child's stdin; harmless under -quiet's
+/// implied -ign_eof — the connection stays open to read the response), then read
+/// the framed response. `half_close = false` preserves
 /// http's exact PR-1 wire behavior (no FIN-after-request).
 pub(crate) fn exchange<S: ByteStream>(
     stream: &mut S,

@@ -368,7 +368,7 @@ mod tests {
         std::env::set_var("PATH", format!("{}:{}", dir.display(), old));
         let result = probe_uncached();
         std::env::set_var("PATH", old);
-        let msg = result.expect_err("missing -no_ign_eof must fail closed");
+        let msg = result.expect_err("missing -verify_ip must fail closed");
         assert!(msg.contains("-verify_ip"), "message: {msg}");
         assert!(msg.to_lowercase().contains("openssl"), "message: {msg}");
     }
