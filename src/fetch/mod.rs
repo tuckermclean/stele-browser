@@ -6,6 +6,7 @@
 pub mod cookies;
 pub mod file;
 pub mod http1;
+pub mod https;
 pub mod transport;
 pub mod url;
 
