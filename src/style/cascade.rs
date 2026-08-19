@@ -309,6 +309,18 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         border_collapse: own!(border_collapse),
         float: own!(float),
         clear: own!(clear),
+        // Acid2 Packet 1: `position` is non-inherited ("own"), same shape
+        // as `float`/`clear` right above.
+        position: own!(position),
+        // Acid2 Packet 1: `inset` (top/right/bottom/left) is non-inherited,
+        // resolved edge-by-edge exactly like `margin` above (same raw/
+        // computed type, `LengthPercentageAuto`).
+        inset: Edges {
+            top: resolve_lpa(d.inset.top, font_size, default.inset.top),
+            right: resolve_lpa(d.inset.right, font_size, default.inset.right),
+            bottom: resolve_lpa(d.inset.bottom, font_size, default.inset.bottom),
+            left: resolve_lpa(d.inset.left, font_size, default.inset.left),
+        },
         // packet/acid1-content-box: non-inherited ("own"), same shape as
         // `border_collapse`/`float`/`clear` right above -- `own!` falls
         // back to `ComputedStyle::default().box_sizing` (`BoxSizing::
