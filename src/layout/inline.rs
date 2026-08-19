@@ -1365,19 +1365,50 @@ mod tests {
     }
 
     #[test]
-    fn explicit_css_line_height_is_never_floored_even_at_a_sub_16px_font_size() {
+    fn explicit_css_line_height_generous_enough_to_dominate_stays_exactly_as_authored() {
         // An author-specified `line-height: <px>` is a resolved BOX value
-        // (`style::cascade::resolve`), not a `Metrics` call -- flooring it
-        // here would leak the glyph-render floor into geometry an
-        // auto-height container could size against. A tight 10px
-        // line-height at font-size 10 must stay exactly 10px even though
-        // the glyph itself now renders at floored 16px.
+        // (`style::cascade::resolve`), not a `Metrics` call -- `resolved_
+        // line_height` returns it verbatim, un-floored (see that fn's own
+        // doc comment). When it's already generously larger than the
+        // floored glyph's ascent+descent (16.0 at any sub-16px font-size,
+        // by `BitmapFont`'s own `ascent+descent == size_px` invariant), it
+        // alone decides the final line box height.
+        let runs = [run_with("x", |s| {
+            s.font_size = 10.0;
+            s.line_height = LH::Px(40.0);
+        })];
+        let font = crate::text::BitmapFont::vga_8x16();
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
+        assert_eq!(out.lines[0].rect.size.h, 40.0, "explicit CSS line-height must stay exactly as authored");
+    }
+
+    #[test]
+    fn explicit_css_line_height_tighter_than_the_floored_ink_still_grows_to_fit_it() {
+        // The flip side of the test above: `layout_runs` has ALWAYS taken
+        // `max(specified_line_height, ascent + descent)` (pre-dates this
+        // packet — a line box must be tall enough to actually fit its own
+        // content's ink). `resolved_line_height` itself still returns the
+        // CSS value UNFLOORED (10.0, not 16.0) -- but this packet's brief
+        // explicitly asks for "the line box is tall enough for the >=8px
+        // ink", so a tight 10px `line-height` on 10px-font text (whose
+        // glyph now renders at the floored 16px, i.e. ascent+descent==16.0)
+        // correctly grows the REALIZED line box to 16px. This is NOT the
+        // floor leaking into box/em resolution (`resolved_line_height`'s
+        // own return value is untouched -- see the sibling test above and
+        // `style::cascade`'s own regression guard) — it's the pre-existing
+        // "line box fits its content" safety net, now doing real work
+        // because the content's ink is taller.
         let runs = [run_with("x", |s| {
             s.font_size = 10.0;
             s.line_height = LH::Px(10.0);
         })];
         let font = crate::text::BitmapFont::vga_8x16();
         let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
-        assert_eq!(out.lines[0].rect.size.h, 10.0, "explicit CSS line-height must stay exactly as authored");
+        assert_eq!(
+            out.lines[0].rect.size.h,
+            16.0,
+            "a line box must still be tall enough for its own (now floored-to-16px) glyph ink, even under a \
+             tighter explicit CSS line-height"
+        );
     }
 }
