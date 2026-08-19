@@ -130,9 +130,7 @@
 
 use crate::backend::tty::{self, TextGrid, CELL_H, CELL_W};
 use crate::dom::{Dom, Node, NodeId};
-use crate::fetch::file::FileFetcher;
-use crate::fetch::http1::Http1Client;
-use crate::fetch::{Fetch, Request, Url};
+use crate::fetch::{Request, Url};
 use crate::layout::box_tree::build_box_tree;
 use crate::layout::{self, Fragment, FragmentKind, Point, Rect, Size};
 use crate::style::cascade;
@@ -438,18 +436,16 @@ fn placeholder(cols: usize, text: &str) -> TextGrid {
     tty::render(std::slice::from_ref(&frag), cols)
 }
 
-/// Fetch `url`'s body over whichever of the two live schemes it names.
-/// Duplicated from (rather than shared with) `main.rs::fetch_body`: that
-/// function lives in the bin crate, this module lives in the lib crate, and
-/// the packet brief scopes this driver-level module to ADDING to the lib
-/// surface, not reaching into the bin. Both are small, both total (a fetch
-/// error is a clean `Err`, never a panic).
+/// Fetch `url`'s body. The thin wrapper stays (kept local rather than
+/// shared with `main.rs::fetch_body`: that function lives in the bin crate,
+/// this module lives in the lib crate, and it returns just the body rather
+/// than the full `Response`), but the scheme table itself is now shared in
+/// `fetch::fetch`, so a new scheme lands once. Still total — a fetch error
+/// is a clean `Err`, never a panic.
 fn fetch_body(url: &Url) -> Result<Vec<u8>, String> {
-    match url.scheme().as_str() {
-        "file" => FileFetcher::new().fetch(&Request::get(url.clone())).map(|r| r.body).map_err(|e| format!("{e:?}")),
-        "http" => Http1Client::new().fetch(&Request::get(url.clone())).map(|r| r.body).map_err(|e| format!("{e:?}")),
-        other => Err(format!("unsupported scheme: {other}")),
-    }
+    crate::fetch::fetch(&Request::get(url.clone()))
+        .map(|r| r.body)
+        .map_err(crate::fetch::err_to_string)
 }
 
 // -- track sizing (pure, unit-tested independently of rendering) -----------

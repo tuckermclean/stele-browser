@@ -6,6 +6,7 @@
 pub mod cookies;
 pub mod file;
 pub mod http1;
+pub mod transport;
 pub mod url;
 
 /// A minimal URL. P3 decides bespoke-vs-crate for the real parser and may swap
@@ -87,4 +88,66 @@ pub enum FetchError {
 /// real network.
 pub trait Fetch {
     fn fetch(&mut self, request: &Request) -> Result<Response, FetchError>;
+}
+
+/// The single scheme -> fetcher table. Every driver-level wrapper delegates
+/// here, so a new scheme (PR 2 adds `https`) is one arm in ONE place instead
+/// of six. Cookie jars are intentionally per-call (fresh `Http1Client`), which
+/// matches the pre-centralization behavior — no jar was shared across these
+/// call sites before.
+pub fn fetch(request: &Request) -> Result<Response, FetchError> {
+    match request.url.scheme().as_str() {
+        "file" => file::FileFetcher::new().fetch(request),
+        "http" => http1::Http1Client::new().fetch(request),
+        other => Err(FetchError::UnsupportedScheme(other.to_string())),
+    }
+}
+
+/// Render a `FetchError` as the driver-level `String` the call sites use.
+/// Preserves the EXACT text each site produced before centralization: an
+/// unsupported scheme reads "unsupported scheme: <scheme>"; everything else
+/// is the `Debug` form the sites already showed via `format!("{e:?}")`.
+pub fn err_to_string(err: FetchError) -> String {
+    match err {
+        FetchError::UnsupportedScheme(s) => format!("unsupported scheme: {s}"),
+        other => format!("{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn fetch_routes_file_scheme_to_the_file_fetcher() {
+        // A file:// URL to a path that does not exist must reach FileFetcher
+        // (=> Io error), proving dispatch — NOT UnsupportedScheme.
+        let err = fetch(&Request::get(Url::new("file:///stele/does/not/exist")))
+            .expect_err("nonexistent file must error");
+        assert!(
+            matches!(err, FetchError::Io(_)),
+            "expected Io (dispatched to FileFetcher), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_rejects_unknown_scheme() {
+        let err = fetch(&Request::get(Url::new("gopher://example.com/")))
+            .expect_err("unknown scheme must error");
+        assert!(matches!(err, FetchError::UnsupportedScheme(ref s) if s == "gopher"), "got {err:?}");
+    }
+
+    #[test]
+    fn err_to_string_preserves_unsupported_scheme_text() {
+        // Must match the exact string the six call sites produced before
+        // centralization: "unsupported scheme: <scheme>".
+        let s = err_to_string(FetchError::UnsupportedScheme("gopher".to_string()));
+        assert_eq!(s, "unsupported scheme: gopher");
+    }
+
+    #[test]
+    fn err_to_string_debug_formats_other_errors() {
+        let s = err_to_string(FetchError::Protocol("boom".to_string()));
+        assert_eq!(s, "Protocol(\"boom\")");
+    }
 }
