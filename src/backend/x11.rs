@@ -298,9 +298,14 @@ impl IdAllocator {
 
 const OP_CREATE_WINDOW: u8 = 1;
 const OP_MAP_WINDOW: u8 = 8;
+const OP_CREATE_PIXMAP: u8 = 53;
+const OP_FREE_PIXMAP: u8 = 54;
 const OP_CREATE_GC: u8 = 55;
 const OP_PUT_IMAGE: u8 = 72;
 const OP_GET_KEYBOARD_MAPPING: u8 = 101;
+
+/// `CreateGC` value-mask bit for `graphics-exposures`.
+const GC_GRAPHICS_EXPOSURES_MASK: u32 = 0x0001_0000;
 
 /// `CWBackPixel` value-mask bit.
 pub const CW_BACK_PIXEL: u32 = 0x0000_0002;
@@ -376,17 +381,44 @@ pub fn encode_set_input_focus(window: u32) -> Vec<u8> {
     out
 }
 
-/// Encode a `CreateGC` request (opcode 55) with an empty value-mask — this
-/// client never needs anything but the drawable's defaults (`PutImage`
-/// ignores GC foreground/background entirely).
+/// Encode a `CreateGC` request (opcode 55) with graphics-exposures = FALSE:
+/// this client never wants NoExpose/GraphicsExpose events (it repaints
+/// damaged regions from its own server-side pixmap), and on non-retaining
+/// servers discarding GraphicsExpose after CopyArea shows scroll garbage.
 pub fn encode_create_gc(cid: u32, drawable: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16);
+    let mut out = Vec::with_capacity(20);
     out.push(OP_CREATE_GC);
-    out.push(0); // unused
-    out.extend_from_slice(&4u16.to_le_bytes());
+    out.push(0);
+    out.extend_from_slice(&5u16.to_le_bytes()); // length in 4-byte words
     out.extend_from_slice(&cid.to_le_bytes());
     out.extend_from_slice(&drawable.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // value-mask: none
+    out.extend_from_slice(&GC_GRAPHICS_EXPOSURES_MASK.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // FALSE
+    out
+}
+
+/// Encode a `CreatePixmap` request (opcode 53) — allocates a server-side
+/// pixmap of `depth` at `width`x`height`, rooted at `drawable` (used both
+/// for the double-buffer and for icon/backing-store data).
+pub fn encode_create_pixmap(pid: u32, drawable: u32, depth: u8, width: u16, height: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.push(OP_CREATE_PIXMAP);
+    out.push(depth);
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&pid.to_le_bytes());
+    out.extend_from_slice(&drawable.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out
+}
+
+/// Encode a `FreePixmap` request (opcode 54).
+pub fn encode_free_pixmap(pid: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    out.push(OP_FREE_PIXMAP);
+    out.push(0);
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&pid.to_le_bytes());
     out
 }
 
@@ -623,7 +655,7 @@ pub fn keysym_to_key(keysym: u32) -> Option<X11Key> {
 pub enum XEvent {
     KeyPress { keycode: u8, state: u16 },
     ButtonPress { button: u8, x: i16, y: i16 },
-    Expose,
+    Expose { x: u16, y: u16, w: u16, h: u16, count: u16 },
     ConfigureNotify { width: u16, height: u16 },
     Other,
 }
@@ -674,10 +706,68 @@ pub fn parse_event(buf: &[u8]) -> Option<XEvent> {
     match code {
         EVENT_CODE_KEY_PRESS => Some(XEvent::KeyPress { keycode: buf[1], state: get_u16_le(buf, 28)? }),
         EVENT_CODE_BUTTON_PRESS => Some(XEvent::ButtonPress { button: buf[1], x: get_u16_le(buf, 24)? as i16, y: get_u16_le(buf, 26)? as i16 }),
-        EVENT_CODE_EXPOSE => Some(XEvent::Expose),
+        EVENT_CODE_EXPOSE => Some(XEvent::Expose {
+            x: get_u16_le(buf, 8)?,
+            y: get_u16_le(buf, 10)?,
+            w: get_u16_le(buf, 12)?,
+            h: get_u16_le(buf, 14)?,
+            count: get_u16_le(buf, 16)?,
+        }),
         EVENT_CODE_CONFIGURE_NOTIFY => Some(XEvent::ConfigureNotify { width: get_u16_le(buf, 20)?, height: get_u16_le(buf, 22)? }),
         _ => Some(XEvent::Other),
     }
+}
+
+/// A folded, transport-level intent — the output of coalescing a drained
+/// event batch. The `run_x11` loop maps each `XIntent` onto the existing
+/// scroll/navigate/repaint decisions. (`Navigate` is NOT here — a click's
+/// hit-test happens loop-side against the fragment stream.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XIntent {
+    ScrollBy(i32),
+    Resize { w: u16, h: u16 },
+    Expose { x: u16, y: u16, w: u16, h: u16 },
+    Click { x: i16, y: i16 },
+    Reload,
+    Quit,
+}
+
+/// Fold a classified batch: adjacent `ScrollBy` sum into one; adjacent
+/// `Expose` union into one bounding box; all but the LAST `Resize` are
+/// dropped; `Click`/`Reload`/`Quit` pass through in order (and break scroll/
+/// expose runs). Pure — the responsiveness contract lives here.
+pub fn coalesce(intents: Vec<XIntent>) -> Vec<XIntent> {
+    // Drop every Resize except the last (a resize supersedes earlier sizes).
+    let last_resize_idx = intents
+        .iter()
+        .rposition(|i| matches!(i, XIntent::Resize { .. }));
+    let filtered = intents.into_iter().enumerate().filter(move |(idx, i)| {
+        !matches!(i, XIntent::Resize { .. }) || Some(*idx) == last_resize_idx
+    });
+
+    let mut out: Vec<XIntent> = Vec::new();
+    for (_, intent) in filtered {
+        match (out.last_mut(), intent) {
+            (Some(XIntent::ScrollBy(acc)), XIntent::ScrollBy(d)) => {
+                *acc = acc.saturating_add(d);
+            }
+            (
+                Some(XIntent::Expose { x, y, w, h }),
+                XIntent::Expose { x: nx, y: ny, w: nw, h: nh },
+            ) => {
+                let x0 = (*x).min(nx);
+                let y0 = (*y).min(ny);
+                let x1 = (*x).saturating_add(*w).max(nx.saturating_add(nw));
+                let y1 = (*y).saturating_add(*h).max(ny.saturating_add(nh));
+                *x = x0;
+                *y = y0;
+                *w = x1.saturating_sub(x0);
+                *h = y1.saturating_sub(y0);
+            }
+            (_, other) => out.push(other),
+        }
+    }
+    out
 }
 
 // =========================================================================
@@ -736,6 +826,9 @@ pub struct XConnection {
     /// MapWindow arrive BEFORE a later request's reply). Drained by
     /// [`Self::next_event`] before it touches the socket again.
     pending: VecDeque<XEvent>,
+    /// When `Some`, `send` appends to this buffer instead of writing to the
+    /// socket immediately — see [`Self::begin_frame`]/[`Self::end_frame`].
+    frame: Option<Vec<u8>>,
 }
 
 /// Read 32-byte X packets from `stream`, queueing any *events* (first byte
@@ -807,11 +900,34 @@ impl XConnection {
         let setup = parse_setup_reply(&full)?;
         let ids = IdAllocator::new(setup.resource_id_base, setup.resource_id_mask);
 
-        Ok(XConnection { stream, setup, ids, pending: VecDeque::new() })
+        Ok(XConnection { stream, setup, ids, pending: VecDeque::new(), frame: None })
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.stream.write_all(bytes).map_err(|e| format!("write to X server: {e}"))
+        if let Some(buf) = self.frame.as_mut() {
+            buf.extend_from_slice(bytes);
+            Ok(())
+        } else {
+            self.stream.write_all(bytes).map_err(|e| format!("write to X server: {e}"))
+        }
+    }
+
+    /// Start buffering requests; pair with `end_frame`. Nesting is a no-op
+    /// (an already-open frame keeps accumulating).
+    pub fn begin_frame(&mut self) {
+        if self.frame.is_none() {
+            self.frame = Some(Vec::with_capacity(64 * 1024));
+        }
+    }
+
+    /// Flush the buffered frame in one write.
+    pub fn end_frame(&mut self) -> Result<(), String> {
+        if let Some(buf) = self.frame.take() {
+            if !buf.is_empty() {
+                self.stream.write_all(&buf).map_err(|e| format!("write frame to X server: {e}"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Find the [`PixmapFormat`] for `depth` (falls back to the FIRST
@@ -854,6 +970,16 @@ impl XConnection {
         let cid = self.ids.next();
         self.send(&encode_create_gc(cid, drawable))?;
         Ok(cid)
+    }
+
+    pub fn create_pixmap(&mut self, drawable: u32, depth: u8, width: u16, height: u16) -> Result<u32, String> {
+        let pid = self.ids.next();
+        self.send(&encode_create_pixmap(pid, drawable, depth, width, height))?;
+        Ok(pid)
+    }
+
+    pub fn free_pixmap(&mut self, pid: u32) -> Result<(), String> {
+        self.send(&encode_free_pixmap(pid))
     }
 
     /// Blit `image_data` (a `ZPixmap` buffer at `depth`'s native layout,
@@ -925,6 +1051,33 @@ impl XConnection {
                 _ => return Ok(parse_event(&buf).unwrap_or(XEvent::Other)),
             }
         }
+    }
+
+    /// Block for the next event, then drain every event already queued on the
+    /// socket (non-blocking) into one batch. The batch feeds `coalesce`, so a
+    /// burst of wheel/resize/expose events collapses to one paint. Returns at
+    /// least one event. A short/failed read is a clean `Err`.
+    pub fn drain_events(&mut self) -> Result<Vec<XEvent>, String> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        const ZERO: Timespec = Timespec { tv_sec: 0, tv_nsec: 0 };
+
+        let mut batch = vec![self.next_event()?];
+        // First, anything already demuxed into `pending`.
+        while let Some(ev) = self.pending.pop_front() {
+            batch.push(ev);
+        }
+        // Then everything sitting on the socket right now.
+        loop {
+            let mut fds = [PollFd::new(&self.stream, PollFlags::IN)];
+            let n = poll(&mut fds, Some(&ZERO)).map_err(|e| format!("poll X socket: {e}"))?;
+            if n == 0 || !fds[0].revents().contains(PollFlags::IN) {
+                break;
+            }
+            // A byte is ready; read one whole event (blocking only for the
+            // remaining bytes of an event whose first byte already arrived).
+            batch.push(self.next_event()?);
+        }
+        Ok(batch)
     }
 }
 
@@ -1269,7 +1422,7 @@ mod tests {
         assert_eq!(full[0], 1);
         assert_eq!(&full[32..36], &[0xaa, 0xbb, 0xcc, 0xdd]);
         // Both preceding events were queued (not swallowed / misread):
-        assert_eq!(pending.pop_front(), Some(XEvent::Expose));
+        assert_eq!(pending.pop_front(), Some(XEvent::Expose { x: 0, y: 0, w: 0, h: 0, count: 0 }));
         assert_eq!(pending.pop_front(), Some(XEvent::Other)); // MapNotify
         assert!(pending.is_empty());
     }
@@ -1284,14 +1437,37 @@ mod tests {
     }
 
     #[test]
-    fn encode_create_gc_produces_correct_bytes() {
+    fn encode_create_gc_disables_graphics_exposures() {
         let out = encode_create_gc(0x0040_0002, 0x0040_0001);
         assert_eq!(out[0], 55);
-        assert_eq!(&out[2..4], &4u16.to_le_bytes());
-        assert_eq!(&out[4..8], &0x0040_0002u32.to_le_bytes());
-        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes());
-        assert_eq!(&out[12..16], &0u32.to_le_bytes());
+        assert_eq!(&out[2..4], &5u16.to_le_bytes()); // request length = 5 words
+        assert_eq!(&out[4..8], &0x0040_0002u32.to_le_bytes()); // cid
+        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes()); // drawable
+        assert_eq!(&out[12..16], &0x0001_0000u32.to_le_bytes()); // value-mask: graphics-exposures
+        assert_eq!(&out[16..20], &0u32.to_le_bytes()); // value: FALSE
+        assert_eq!(out.len(), 20);
+    }
+
+    #[test]
+    fn encode_create_pixmap_produces_correct_bytes() {
+        let out = encode_create_pixmap(0x0040_0003, 0x0040_0001, 24, 1024, 768);
+        assert_eq!(out[0], 53);
+        assert_eq!(out[1], 24); // depth
+        assert_eq!(&out[2..4], &4u16.to_le_bytes()); // length = 4 words
+        assert_eq!(&out[4..8], &0x0040_0003u32.to_le_bytes()); // pid
+        assert_eq!(&out[8..12], &0x0040_0001u32.to_le_bytes()); // drawable
+        assert_eq!(&out[12..14], &1024u16.to_le_bytes()); // width
+        assert_eq!(&out[14..16], &768u16.to_le_bytes()); // height
         assert_eq!(out.len(), 16);
+    }
+
+    #[test]
+    fn encode_free_pixmap_produces_correct_bytes() {
+        let out = encode_free_pixmap(0x0040_0003);
+        assert_eq!(out[0], 54);
+        assert_eq!(&out[2..4], &2u16.to_le_bytes()); // length = 2 words
+        assert_eq!(&out[4..8], &0x0040_0003u32.to_le_bytes()); // pixmap
+        assert_eq!(out.len(), 8);
     }
 
     // ------------------------------------------------------------- PutImage
@@ -1550,7 +1726,23 @@ mod tests {
     #[test]
     fn parse_event_expose() {
         let buf = synth_event(12, 0, &[]);
-        assert_eq!(parse_event(&buf), Some(XEvent::Expose));
+        assert_eq!(parse_event(&buf), Some(XEvent::Expose { x: 0, y: 0, w: 0, h: 0, count: 0 }));
+    }
+
+    #[test]
+    fn parse_event_expose_carries_region_and_count() {
+        // Expose event (code 12): x@8, y@10, width@12, height@14, count@16.
+        let mut buf = [0u8; 32];
+        buf[0] = 12;
+        buf[8..10].copy_from_slice(&40u16.to_le_bytes());   // x
+        buf[10..12].copy_from_slice(&50u16.to_le_bytes());  // y
+        buf[12..14].copy_from_slice(&300u16.to_le_bytes()); // width
+        buf[14..16].copy_from_slice(&200u16.to_le_bytes()); // height
+        buf[16..18].copy_from_slice(&3u16.to_le_bytes());   // count
+        assert_eq!(
+            parse_event(&buf),
+            Some(XEvent::Expose { x: 40, y: 50, w: 300, h: 200, count: 3 })
+        );
     }
 
     #[test]
@@ -1562,7 +1754,7 @@ mod tests {
     #[test]
     fn parse_event_masks_off_the_send_event_bit() {
         let buf = synth_event(12 | 0x80, 0, &[]);
-        assert_eq!(parse_event(&buf), Some(XEvent::Expose));
+        assert_eq!(parse_event(&buf), Some(XEvent::Expose { x: 0, y: 0, w: 0, h: 0, count: 0 }));
     }
 
     #[test]
@@ -1574,6 +1766,65 @@ mod tests {
     #[test]
     fn parse_event_short_buffer_is_none() {
         assert_eq!(parse_event(&[1, 2, 3]), None);
+    }
+
+    // -------------------------------------------------------------- coalesce
+
+    #[test]
+    fn coalesce_sums_a_wheel_storm_into_one_scroll() {
+        let batch = vec![XIntent::ScrollBy(60); 50];
+        assert_eq!(coalesce(batch), vec![XIntent::ScrollBy(3000)]);
+    }
+
+    #[test]
+    fn coalesce_preserves_click_order_between_scroll_runs() {
+        let batch = vec![
+            XIntent::ScrollBy(60), XIntent::ScrollBy(60),
+            XIntent::Click { x: 10, y: 20 },
+            XIntent::ScrollBy(-60), XIntent::ScrollBy(-60),
+        ];
+        assert_eq!(
+            coalesce(batch),
+            vec![XIntent::ScrollBy(120), XIntent::Click { x: 10, y: 20 }, XIntent::ScrollBy(-120)]
+        );
+    }
+
+    #[test]
+    fn coalesce_keeps_only_the_last_resize() {
+        let batch = vec![
+            XIntent::Resize { w: 800, h: 600 },
+            XIntent::Resize { w: 900, h: 650 },
+            XIntent::Resize { w: 1024, h: 768 },
+        ];
+        assert_eq!(coalesce(batch), vec![XIntent::Resize { w: 1024, h: 768 }]);
+    }
+
+    #[test]
+    fn coalesce_unions_an_expose_series() {
+        let batch = vec![
+            XIntent::Expose { x: 10, y: 10, w: 20, h: 20 }, // covers (10,10)-(30,30)
+            XIntent::Expose { x: 50, y: 5,  w: 10, h: 40 }, // covers (50,5)-(60,45)
+        ];
+        // Union bounding box: x 10..60, y 5..45 => x=10,y=5,w=50,h=40.
+        assert_eq!(coalesce(batch), vec![XIntent::Expose { x: 10, y: 5, w: 50, h: 40 }]);
+    }
+
+    #[test]
+    fn coalesce_expose_union_saturates_on_huge_coords_no_panic() {
+        // A hostile/buggy server could send Expose coords whose x+w overflows
+        // u16; the union must saturate, not panic (totality).
+        let batch = vec![
+            XIntent::Expose { x: 60000, y: 60000, w: 60000, h: 60000 },
+            XIntent::Expose { x: 0, y: 0, w: 10, h: 10 },
+        ];
+        let out = coalesce(batch);
+        assert_eq!(out, vec![XIntent::Expose { x: 0, y: 0, w: 65535, h: 65535 }]);
+    }
+
+    #[test]
+    fn coalesce_scroll_run_then_quit_passes_quit_through() {
+        let batch = vec![XIntent::ScrollBy(60), XIntent::ScrollBy(60), XIntent::Quit];
+        assert_eq!(coalesce(batch), vec![XIntent::ScrollBy(120), XIntent::Quit]);
     }
 
     // --------------------------------------------------------- hit_test_pixel

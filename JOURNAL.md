@@ -1301,3 +1301,48 @@ Append-only running log. Newest at the bottom.
   Size impact is expected to be negligible — `OpensslStream` is std process/IO plumbing
   only, no crypto crate linked — measured by the A2 line / `stele-i486` CI artifact, not
   asserted here as a specific byte count.
+
+## 2026-08-19 — X11 responsiveness PR 1: coalesced input, server-side double-buffer, frame batching, DOM-cached resize (packet/x11-responsiveness)
+
+- **Packet summary (T1–T4 + T6, spec `2026-08-19-x11-responsiveness-pr1`; T5/RAM is its
+  own PR 2):** four independent responsiveness fixes to `run_x11`'s interactive loop, plus
+  the instrumentation + non-gating CI smoke this entry closes out with.
+  - **Input coalescing (T1):** `XConnection::drain_events` pulls every event currently
+    queued (one blocking read, then non-blocking poll-until-empty) instead of acting one
+    event at a time; the batch is classified to `XIntent`s and folded through the pure
+    `coalesce` — a wheel storm sums to a single `ScrollBy`, adjacent `Expose`s union to one
+    damage rect, only the last `Resize` in a burst survives. A held-down scroll wheel now
+    repaints once per drained batch, not once per notch.
+  - **Server-side pixmap double-buffer (T2):** every paint (initial, `Expose`, scroll,
+    reload, navigate, resize) lands in a server-side `pixmap` back buffer first;
+    `Expose` repaints ONLY the damaged rect via a single `CopyArea` off that pixmap —
+    **zero `PutImage` bytes** on the wire for an `Expose`. `graphics-exposures` is disabled
+    on the GC so a `CopyArea` never generates a spurious follow-up `Expose`/`NoExpose`.
+  - **Frame-batched writes (T4):** `begin_frame`/`end_frame` brackets each paint so the
+    request(s) it issues go out as one buffered socket write instead of one write per
+    X request.
+  - **Resize reflows from a cached DOM (T3):** `ConfigureNotify` re-lays-out from the
+    session's already-parsed DOM (`reflow_from_dom`) at the new width — **zero network**
+    on resize, where the old path re-fetched.
+- **Instrumentation (T6, this entry's own task):** counters behind `STELE_X11_STATS` (any
+  value set = on) — `struct X11Stats { batches, events, scrolls, copy_areas,
+  put_image_bytes, frames }`, accumulated for the whole session and printed as one line to
+  stderr on quit (`print_x11_stats`, shared by both the clean-`Quit` and
+  connection-closed exit paths). `batches`/`events`/`scrolls`/`frames` are counted exactly
+  at the site the thing happens; `copy_areas`/`put_image_bytes` are honest approximations
+  taken at `run_x11`'s own call sites (the `Expose`-present `CopyArea`, and
+  `width*height*4` per `x11_full_redraw` call) rather than threaded through the paint
+  helpers — noted in the code as an approximation, not a precise byte count.
+- **CI (T6):** a NEW, explicitly non-gating `x11-smoke` job in `m0-acceptance.yml`
+  (`continue-on-error: true`, own job, no `needs:`) — installs `xvfb` (+ `xdotool` if
+  available), builds the host-target release binary, starts `Xvfb :99`, runs
+  `STELE_X11_STATS=1 timeout 20 stele --x11 file://.../fixtures/basic.html`, best-effort
+  synthesizes a wheel-click storm via `xdotool` against whatever window it can find, then
+  checks the process didn't crash before its own timeout. Every driving step is `|| true`
+  — the goal is a live smoke signal on a real (virtual) X server, never a merge gate.
+- **PENDING (operator, not invented here):** the operator testimonial (WSLg feel; 486/
+  Xfbdev per-frame cost) and the `strace` syscall-count before/after table for the
+  50-wheel-storm case are to be filled in by the operator on the dev box — no syscall
+  numbers are fabricated in this entry. Run with `STELE_X11_STATS=1` to get the `--stats`-
+  style counter line (batches/events/scrolls/frames/copy_areas/put_image_bytes) alongside
+  the `strace` capture.

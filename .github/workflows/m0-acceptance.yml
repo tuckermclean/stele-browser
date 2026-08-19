@@ -201,3 +201,96 @@ jobs:
         run: |
           chmod +x target/i486-monolith-linux-musl/release/stele accept.sh
           ./accept.sh
+
+  # x11-smoke (packet x11-responsiveness, Task 8): a NON-GATING live smoke
+  # test of `stele --x11` under a real (virtual) X server. It never gates
+  # merge -- `continue-on-error: true` on the job AND best-effort `|| true`
+  # on the driving commands, because xvfb/xdotool startup timing is
+  # inherently flaky in a shared CI runner and this is meant as a signal,
+  # not a gate (see run_x11's own doc comment: there is no X server in the
+  # `build`/`accept` jobs above, so this is the only place `--x11` ever
+  # actually runs in CI). Independent of `build`/`accept` (no `needs:`) --
+  # it builds its own host-target release binary rather than downloading
+  # the i486 artifact, since `--x11` needs to run natively on the runner,
+  # not under qemu-user.
+  x11-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Xvfb (+ xdotool for synthetic input, best-effort)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xdotool || sudo apt-get install -y xvfb
+
+      - name: Build host-target release binary
+        run: cargo build --release
+
+      - name: Start Xvfb :99
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          echo "XVFB_PID=$!" >> "$GITHUB_ENV"
+          # Give the virtual server a moment to come up before anything
+          # tries to open a window against it.
+          sleep 2
+
+      # The actual smoke: launch `stele --x11` against a local fixture
+      # under a bounded `timeout`, let it sit on screen for a beat, poke it
+      # with a synthetic wheel-scroll storm via xdotool if available (this
+      # is what Task 1-3's input coalescing exists to absorb), then kill it
+      # and check it didn't crash before we asked it to exit. `timeout`
+      # itself exiting 124 (ran the full duration) is a CLEAN pass here --
+      # the smoke is "did it stay up and not crash", not "did it exit on
+      # its own". Every driving step is wrapped in `|| true`: a flaky xvfb/
+      # xdotool interaction should degrade this smoke to inconclusive, not
+      # fail the (non-gating) job loudly.
+      - name: Smoke -- stele --x11 against fixtures/basic.html
+        env:
+          DISPLAY: ":99"
+        run: |
+          set -x
+          STELE_X11_STATS=1 timeout 20 ./target/release/stele --x11 file://$PWD/fixtures/basic.html &
+          STELE_PID=$!
+          sleep 2
+
+          # Best-effort synthetic wheel-event storm: exercises the same
+          # coalescing path an interactive session under a real WM would.
+          # xdotool needs a window to target -- `search` can legitimately
+          # find nothing on a WM-less Xvfb, so every step here is `|| true`.
+          if command -v xdotool >/dev/null 2>&1; then
+            WIN=$(xdotool search --name "" 2>/dev/null | head -n1 || true)
+            if [ -n "$WIN" ]; then
+              # Buttons 4/5 are the X11 core-protocol convention for
+              # wheel-up/wheel-down (see classify_x11_intent's ButtonPress
+              # arms in src/main.rs) -- this is the "wheel storm" the
+              # coalescing loop (drain_events + coalesce) exists to fold
+              # down to a single scroll repaint.
+              for _ in $(seq 1 50); do
+                xdotool click --window "$WIN" 5 || true
+              done
+            fi
+          fi
+
+          sleep 1
+          # Is the process still alive (not crashed) after the storm?
+          if kill -0 "$STELE_PID" 2>/dev/null; then
+            ALIVE=1
+          else
+            ALIVE=0
+          fi
+
+          # Let it run out its own `timeout` rather than signaling it, so
+          # the STELE_X11_STATS summary (printed on quit) has a chance to
+          # flush to stderr; then reap it either way.
+          wait "$STELE_PID" || true
+
+          if [ "$ALIVE" -eq 1 ]; then
+            echo "x11-smoke: stele --x11 was still running after the wheel storm (no crash) -- OK"
+          else
+            echo "x11-smoke: stele --x11 exited before the storm completed -- INCONCLUSIVE (non-gating)"
+          fi
+
+      - name: Stop Xvfb
+        if: always()
+        run: kill "$XVFB_PID" 2>/dev/null || true

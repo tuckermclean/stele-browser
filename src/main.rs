@@ -963,17 +963,30 @@ fn render_fb_opts(source: &str, no_bg_images: bool) -> Result<(), String> {
 // click-to-follow, which the painted pixels alone don't carry.
 // ---------------------------------------------------------------------------
 
-/// Render `url` (already resolved -- see `browser::History::current`) into
-/// a full-document `MemSurface` at `width` CSS px, alongside the
-/// `Fragment`s that produced it. Total: fetch/parse/layout failure is a
-/// clean `Err`, never a panic -- `run_x11` degrades to a blank page rather
-/// than propagating a panic into the event loop.
-fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fragment>), String> {
-    let response = fetch_response(url)?;
-    let html = String::from_utf8_lossy(&response.body);
-    let dom_tree = dom::parser::parse(&html);
+/// Cached per-navigation state `run_x11` holds alongside `surface`/
+/// `fragments`: the parsed DOM and the (possibly redirected) URL it was
+/// fetched from. A resize (`ConfigureNotify`) reflows from this cache via
+/// [`reflow_from_dom`] instead of re-fetching -- see that function's doc
+/// comment for the zero-network guarantee this exists to make structural.
+struct X11Session {
+    dom: dom::ast::Dom,
+    final_url: Url,
+}
 
-    if frames::find_frameset(&dom_tree).is_some() {
+/// Reflow an ALREADY-PARSED `dom` (fetched/parsed once by [`load_x11_page`]
+/// and cached in an [`X11Session`]) into a full-document `MemSurface` at
+/// `width` CSS px, alongside the `Fragment`s that produced it -- the
+/// width-dependent tail of the old `render_x11_page`
+/// (cascade/layout/paint), now reusable across a resize without re-fetching
+/// or re-parsing. Takes NO `Url` to fetch (only `final_url`, used to
+/// resolve relative stylesheet/image/background URLs against) -- so a
+/// `ConfigureNotify` resize can call this directly and the zero-network
+/// guarantee is structural, not just behavioral: there is no fetch call
+/// anywhere on this path for the compiler to type-check against. Total:
+/// layout failure is a clean `Err`, never a panic -- `run_x11` degrades to
+/// a blank page rather than propagating a panic into the event loop.
+fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fragment>), String> {
+    if frames::find_frameset(dom_tree).is_some() {
         return Err("frameset documents are not supported by --x11".to_string());
     }
 
@@ -981,10 +994,10 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
     // has no `--color-scheme` CLI flag to read at all (that flag is scoped
     // to the `--headless` dump paths); out of scope for this and the
     // t1b-color-scheme packet alike.
-    let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
-    let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let images = stele::images::collect_images(&dom_tree, &response.final_url);
-    let Some(root) = build_box_tree(&dom_tree, &styles, &images) else {
+    let author_sheets = stele::stylesheets::collect_all_author_sheets(dom_tree, final_url, width as f32, style::ColorScheme::Light);
+    let styles = cascade::cascade(dom_tree, &author_sheets);
+    let images = stele::images::collect_images(dom_tree, final_url);
+    let Some(root) = build_box_tree(dom_tree, &styles, &images) else {
         return Err("empty document (nothing to render)".to_string());
     };
 
@@ -1003,11 +1016,29 @@ fn render_x11_page(url: &Url, width: u32) -> Result<(MemSurface, Vec<layout::Fra
     }
     let height = if content_bottom.is_finite() && content_bottom > 0.0 { (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT) } else { 1 };
 
-    let bg_images = stele::bg_images::collect_bg_images(&styles, &response.final_url);
+    let bg_images = stele::bg_images::collect_bg_images(&styles, final_url);
 
     let mut surface = MemSurface::new(width, height, Color::WHITE);
     raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
     Ok((surface, fragments))
+}
+
+/// Fetch + parse `url` into a fresh [`X11Session`], then [`reflow_from_dom`]
+/// it at `width` CSS px. This is the ONLY path in `run_x11` that touches
+/// the network (initial load, link click, F5 reload) -- a resize
+/// (`ConfigureNotify`) never calls this; it calls `reflow_from_dom`
+/// directly against the already-cached `X11Session`. Total:
+/// fetch/parse/layout failure is a clean `Err`, never a panic -- `run_x11`
+/// degrades to a blank page rather than propagating a panic into the event
+/// loop.
+fn load_x11_page(url: &Url, width: u32) -> Result<(X11Session, MemSurface, Vec<layout::Fragment>), String> {
+    let response = fetch_response(url)?;
+    let html = String::from_utf8_lossy(&response.body);
+    let dom_tree = dom::parser::parse(&html);
+
+    let session = X11Session { dom: dom_tree, final_url: response.final_url };
+    let (surface, fragments) = reflow_from_dom(&session.dom, &session.final_url, width)?;
+    Ok((session, surface, fragments))
 }
 
 /// Window pixel width, the drawable's bits-per-pixel, and the format's
@@ -1143,22 +1174,29 @@ const DEFAULT_X11_HEIGHT: u32 = 768;
 const X11_LINE_SCROLL: u32 = 60;
 
 /// Full re-crop + re-convert + re-`PutImage` of the whole window at
-/// `scroll_y` — used for the initial paint, `Expose`, a resize
-/// (`ConfigureNotify`), and anything that changes the CONTENT (reload,
-/// navigate), where nothing already on screen is worth retaining via
-/// `CopyArea`. Manual/interactive-only, like `run_x11` itself (see its own
-/// doc comment) — takes `window`/`gc`/`depth`/`bpp`/`scanline_pad` as
-/// explicit params (rather than closing over them) since it's called from
-/// both `run_x11` and [`x11_scroll_to`]'s `Full` fallback.
+/// `scroll_y` — used for the initial paint, `Expose`'s first-focus setup,
+/// a resize (`ConfigureNotify`), and anything that changes the CONTENT
+/// (reload, navigate), where nothing already on screen is worth retaining
+/// via `CopyArea`. Paints through the server-side `pixmap` back buffer
+/// (`PutImage` into `pixmap`, then one `CopyArea` from `pixmap` to
+/// `window` to present) rather than the window directly — the window is
+/// NEVER `PutImage`d. Manual/interactive-only, like `run_x11` itself (see
+/// its own doc comment) — takes `pixmap`/`window`/`gc`/`depth`/`bpp`/
+/// `scanline_pad` as explicit params (rather than closing over them) since
+/// it's called from both `run_x11` and [`x11_scroll_to`]'s `Full`
+/// fallback.
 #[allow(clippy::too_many_arguments)]
-fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, surface: &MemSurface, window: u32, gc: u32, depth: u8, bpp: u32, scanline_pad: u32, width: u32, height: u32, scroll_y: u32) {
+fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, surface: &MemSurface, pixmap: u32, window: u32, gc: u32, depth: u8, bpp: u32, scanline_pad: u32, width: u32, height: u32, scroll_y: u32) {
     let cropped = crop_surface_rows(surface, width, height, scroll_y);
     let stride = x11_row_stride(width, bpp, scanline_pad);
     let fb_info = fb::FbInfo { width, height, bpp, stride };
     match fb::convert_to_fb_bytes(&cropped, width, height, fb_info) {
         Ok(bytes) => {
-            if let Err(e) = conn.put_image(window, gc, width as u16, height as u16, depth, &bytes, stride as usize) {
+            if let Err(e) = conn.put_image(pixmap, gc, width as u16, height as u16, depth, &bytes, stride as usize) {
                 eprintln!("stele: --x11: PutImage failed: {e}");
+            }
+            if let Err(e) = conn.copy_area(pixmap, window, gc, 0, 0, 0, 0, width as u16, height as u16) {
+                eprintln!("stele: --x11: CopyArea (present) failed: {e}");
             }
         }
         Err(e) => eprintln!("stele: --x11: pixel conversion failed: {e}"),
@@ -1168,15 +1206,18 @@ fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, surface: &MemSur
 /// Repaint the window for a scroll from `old_scroll_y` to `new_scroll_y`,
 /// per [`scroll_blit`]'s plan: `ScrollBlit::Full` falls back to
 /// [`x11_full_redraw`] (nothing survives to copy); `ScrollBlit::Partial`
-/// server-side `CopyArea`s the retained rows (skipped entirely when
-/// `copy_h == 0`) and re-crops + re-converts + `PutImage`s ONLY the
-/// newly-exposed strip at `strip_dst_y` (skipped entirely when
-/// `strip_h == 0`, e.g. a no-op scroll) — never the whole window. Manual/
-/// interactive-only, like `run_x11` itself.
+/// server-side `CopyArea`s the retained rows WITHIN `pixmap` (skipped
+/// entirely when `copy_h == 0`) and re-crops + re-converts + `PutImage`s
+/// ONLY the newly-exposed strip at `strip_dst_y`, also into `pixmap`
+/// (skipped entirely when `strip_h == 0`, e.g. a no-op scroll) — never the
+/// whole window's worth of pixels. Either way, ends with exactly one
+/// `CopyArea` from `pixmap` to `window` to present the back buffer.
+/// Manual/interactive-only, like `run_x11` itself.
 #[allow(clippy::too_many_arguments)]
 fn x11_scroll_to(
     conn: &mut stele::backend::x11::XConnection,
     surface: &MemSurface,
+    pixmap: u32,
     window: u32,
     gc: u32,
     depth: u8,
@@ -1188,10 +1229,10 @@ fn x11_scroll_to(
     new_scroll_y: u32,
 ) {
     match scroll_blit(old_scroll_y, new_scroll_y, height) {
-        ScrollBlit::Full => x11_full_redraw(conn, surface, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y),
+        ScrollBlit::Full => x11_full_redraw(conn, surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y),
         ScrollBlit::Partial { copy_src_y, copy_dst_y, copy_h, strip_page_y, strip_dst_y, strip_h } => {
             if copy_h > 0 {
-                if let Err(e) = conn.copy_area(window, window, gc, 0, copy_src_y as i16, 0, copy_dst_y as i16, width as u16, copy_h as u16) {
+                if let Err(e) = conn.copy_area(pixmap, pixmap, gc, 0, copy_src_y as i16, 0, copy_dst_y as i16, width as u16, copy_h as u16) {
                     eprintln!("stele: --x11: CopyArea failed: {e}");
                 }
             }
@@ -1201,27 +1242,85 @@ fn x11_scroll_to(
                 let fb_info = fb::FbInfo { width, height: strip_h, bpp, stride };
                 match fb::convert_to_fb_bytes(&cropped, width, strip_h, fb_info) {
                     Ok(bytes) => {
-                        if let Err(e) = conn.put_image_at(window, gc, width as u16, strip_h as u16, depth, &bytes, stride as usize, strip_dst_y as i16) {
+                        if let Err(e) = conn.put_image_at(pixmap, gc, width as u16, strip_h as u16, depth, &bytes, stride as usize, strip_dst_y as i16) {
                             eprintln!("stele: --x11: PutImage (scroll strip) failed: {e}");
                         }
                     }
                     Err(e) => eprintln!("stele: --x11: pixel conversion (scroll strip) failed: {e}"),
                 }
             }
+            if let Err(e) = conn.copy_area(pixmap, window, gc, 0, 0, 0, 0, width as u16, height as u16) {
+                eprintln!("stele: --x11: CopyArea (present) failed: {e}");
+            }
         }
     }
 }
 
+/// Session-accumulated debug counters for `run_x11`, printed to stderr on
+/// quit when `STELE_X11_STATS` is set (any value). Loop instrumentation
+/// only -- deliberately no dedicated unit test, same as `run_x11` itself.
+///
+/// `batches`/`events`/`scrolls`/`frames` are counted exactly, at the site
+/// where the thing actually happens. `copy_areas`/`put_image_bytes` are
+/// honest approximations taken at `run_x11`'s own call sites rather than
+/// threaded through [`x11_full_redraw`]/[`x11_scroll_to`] (which would mean
+/// changing their signatures just to carry a counter out): `copy_areas`
+/// only counts the one explicit `CopyArea` `run_x11` issues itself (the
+/// `Expose` present), and `put_image_bytes` approximates each
+/// [`x11_full_redraw`] call as one full-window `PutImage` of
+/// `width * height * 4` bytes (BGRA8, the fb encoder's most common case --
+/// it undercounts for lower bpp formats and doesn't count
+/// [`x11_scroll_to`]'s partial-strip `PutImage`s at all).
+#[derive(Default)]
+struct X11Stats {
+    /// Number of `drain_events` calls (one non-blocking poll-until-empty
+    /// batch each).
+    batches: u64,
+    /// Total raw `XEvent`s drained across all batches (pre-coalesce).
+    events: u64,
+    /// Number of times a scroll intent actually moved `scroll_y` and
+    /// triggered an [`x11_scroll_to`] repaint.
+    scrolls: u64,
+    /// Number of `CopyArea` ops `run_x11` issued directly (the `Expose`
+    /// present path only -- see struct doc).
+    copy_areas: u64,
+    /// Approximate total `PutImage` bytes over the session -- see struct
+    /// doc for the approximation.
+    put_image_bytes: u64,
+    /// Number of paint brackets (`begin_frame`/`end_frame` pairs).
+    frames: u64,
+}
+
 /// `stele --x11 <url>`: open a real X11 window (kdrive/Xfbdev, core
 /// protocol only — see `backend::x11`'s own doc comment for the wire
-/// details) and drive it interactively: `Expose` repaints the current
-/// frame (and, on the FIRST `Expose`, claims keyboard focus — see below);
-/// arrow keys/PageUp/PageDown/mouse wheel scroll via [`x11_scroll_to`]
-/// (server-side `CopyArea` of the retained rows + `PutImage` of only the
-/// newly-exposed strip, no re-layout); `F5` reloads; a left click
-/// pixel-hit-tests the current fragment stream and, on a link hit,
-/// navigates; `ConfigureNotify` (a resize) re-lays-out at the new width;
-/// `q`/Escape quits.
+/// details) and drive it interactively. Each loop iteration DRAINS every
+/// event currently available (`XConnection::drain_events`, a non-blocking
+/// poll-until-empty batch after one blocking read) rather than acting on
+/// one event at a time, classifies each raw `XEvent` to an `XIntent`
+/// ([`classify_x11_intent`]), and folds the batch with
+/// `xproto::coalesce` (adjacent scrolls sum, adjacent Exposes union to one
+/// damage rect, only the LAST resize in a burst survives) before acting —
+/// this is what keeps the loop responsive under an input burst (a
+/// held-down scroll wheel, a dragged resize) instead of replaying every
+/// individual event's full repaint. `Expose` repaints ONLY the damaged
+/// rect, and does it with a single `CopyArea` off the server-side `pixmap`
+/// back buffer (see below) — zero image bytes back to the server; on the
+/// FIRST `Expose` it also claims keyboard focus (see below). Scroll
+/// intents (arrow keys/PageUp/PageDown/mouse wheel) repaint via
+/// [`x11_scroll_to`] (server-side `CopyArea` of the retained rows +
+/// `PutImage` of only the newly-exposed strip, no re-layout); `F5`
+/// reloads; a left click pixel-hit-tests the current fragment stream and,
+/// on a link hit, navigates; a resize re-lays-out at the new width AND
+/// recreates the pixmap at the new size (the old one is freed first); `q`/
+/// Escape quits.
+///
+/// Every paint (initial, `Expose`, scroll, reload, navigate, resize) goes
+/// through a server-side pixmap double-buffer, NOT the window directly:
+/// `pixmap` is created once up front (window-depth, window-sized) and
+/// recreated on every resize; [`x11_full_redraw`]/[`x11_scroll_to`]
+/// `PutImage`/`CopyArea` INTO `pixmap`, then present it to `window` with
+/// one final `CopyArea`. `Expose` never `PutImage`s at all — it just
+/// re-presents whatever is already sitting in the back buffer.
 ///
 /// `SetInputFocus` is deliberately NOT sent right after `MapWindow`: the
 /// window isn't viewable yet at that point, and a real server replies
@@ -1234,15 +1333,29 @@ fn x11_scroll_to(
 /// Deliberately NOT unit-tested — same split as `run_browser`'s own doc
 /// comment: there is no X server in CI to open a window against. Every
 /// pure decision this loop makes (protocol encode/parse, keysym mapping,
-/// pixel hit-test, scroll-repaint planning) already IS unit-tested, in
-/// `backend::x11` and this module's own [`scroll_blit`]; this function is
-/// thin glue over those plus [`render_x11_page`]/[`crop_surface_rows`]/
-/// [`x11_row_stride`]/[`x11_full_redraw`]/[`x11_scroll_to`]. Bounded/total
-/// throughout: every socket read goes through `XConnection`'s own
+/// intent classification/coalescing, pixel hit-test, scroll-repaint
+/// planning) already IS unit-tested, in `backend::x11` and this module's
+/// own [`scroll_blit`]; this function is thin glue over those plus
+/// [`load_x11_page`]/[`reflow_from_dom`]/[`crop_surface_rows`]/[`x11_row_stride`]/
+/// [`x11_full_redraw`]/[`x11_scroll_to`]/[`classify_x11_intent`]. Bounded/
+/// total throughout: every socket read goes through `XConnection`'s own
 /// fixed-size-buffer reads, and a page-load/reload/navigate failure prints
 /// to stderr and keeps the previous frame on screen rather than panicking.
+///
+/// Debug counters (`STELE_X11_STATS=1`): [`X11Stats`] is accumulated for the
+/// whole session and printed to stderr on quit. It's loop instrumentation
+/// only -- no dedicated unit test -- see the struct doc for what each field
+/// means and how it's counted.
 fn run_x11(source: &str) {
     use stele::backend::x11::{self as xproto, XConnection};
+
+    // Debug-only counters, gated on STELE_X11_STATS so a normal run pays
+    // nothing but the env lookup. See X11Stats's doc comment for the
+    // per-field counting rules (some fields are exact, some are honest
+    // approximations taken at the run_x11 call site rather than threaded
+    // through the paint helpers).
+    let x11_stats_enabled = std::env::var("STELE_X11_STATS").is_ok();
+    let mut stats = X11Stats::default();
 
     let mut history = browser::History::new(resolve_url(source));
 
@@ -1302,145 +1415,223 @@ fn run_x11(source: &str) {
     let min_keycode = conn.setup.min_keycode;
 
     let mut scroll_y: u32 = 0;
-    let (mut surface, mut fragments) = match render_x11_page(history.current(), width) {
+    let (mut session, mut surface, mut fragments) = match load_x11_page(history.current(), width) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("stele: --x11: initial page load failed: {e}");
-            (MemSurface::new(width, 1, Color::WHITE), Vec::new())
+            (X11Session { dom: dom::parser::parse(""), final_url: history.current().clone() }, MemSurface::new(width, 1, Color::WHITE), Vec::new())
         }
     };
 
-    x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+    // The server-side back buffer: window-depth, window-sized. Every paint
+    // lands here first; the window only ever receives a CopyArea from it
+    // (Expose) or the trailing "present" CopyArea after a PutImage into the
+    // pixmap (full redraw / scroll). See x11_full_redraw/x11_scroll_to.
+    let mut pixmap = match conn.create_pixmap(window, depth, width as u16, height as u16) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("stele: --x11: CreatePixmap failed: {e}");
+            0
+        }
+    };
+
+    conn.begin_frame();
+    x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+    let _ = conn.end_frame();
+    stats.frames += 1;
+    stats.put_image_bytes += width as u64 * height as u64 * 4;
 
     loop {
-        let event = match conn.next_event() {
-            Ok(e) => e,
+        let batch = match conn.drain_events() {
+            Ok(b) => b,
             Err(e) => {
                 eprintln!("stele: --x11: connection closed: {e}");
+                if x11_stats_enabled {
+                    print_x11_stats(&stats);
+                }
                 break;
             }
         };
+        stats.batches += 1;
+        stats.events += batch.len() as u64;
 
-        match event {
-            xproto::XEvent::Expose => {
-                if !focus_set {
-                    // Window is guaranteed viewable now (Expose only fires
-                    // for a viewable window) -- see run_x11's doc comment
-                    // for why this can't happen right after MapWindow.
-                    if let Err(e) = conn.set_input_focus(window) {
-                        eprintln!("stele: --x11: SetInputFocus failed: {e}");
-                    }
-                    focus_set = true;
+        let intents: Vec<xproto::XIntent> = batch
+            .iter()
+            .filter_map(|ev| classify_x11_intent(ev, min_keycode, keysyms_per_keycode, &keysyms, height))
+            .collect();
+
+        let mut quit = false;
+        for intent in xproto::coalesce(intents) {
+            match intent {
+                xproto::XIntent::Quit => {
+                    quit = true;
+                    break;
                 }
-                x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
-            }
-
-            xproto::XEvent::ConfigureNotify { width: w, height: h } => {
-                if w == 0 || h == 0 {
-                    continue; // a hostile/transient 0-sized geometry -- nothing sane to render
+                xproto::XIntent::ScrollBy(d) => {
+                    let (_, doc_h) = stele::surface::Surface::size(&surface);
+                    let max_scroll = x11_max_scroll(doc_h, height);
+                    let old = scroll_y;
+                    scroll_y = ((old as i64 + d as i64).clamp(0, max_scroll as i64)) as u32;
+                    if scroll_y != old {
+                        stats.scrolls += 1;
+                        conn.begin_frame();
+                        x11_scroll_to(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                    }
                 }
-                width = w as u32;
-                height = h as u32;
-                match render_x11_page(history.current(), width) {
-                    Ok((s, f)) => {
-                        surface = s;
-                        fragments = f;
-                    }
-                    Err(e) => eprintln!("stele: --x11: reflow after resize failed: {e}"),
-                }
-                let (_, doc_h) = stele::surface::Surface::size(&surface);
-                scroll_y = scroll_y.min(x11_max_scroll(doc_h, height));
-                // Content (and possibly the window geometry itself) changed
-                // -- nothing on screen is safe to retain via CopyArea.
-                x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
-            }
-
-            xproto::XEvent::KeyPress { keycode, .. } => {
-                let Some(sym) = xproto::keysym_for_keycode(keycode, min_keycode, keysyms_per_keycode, &keysyms) else { continue };
-                let Some(key) = xproto::keysym_to_key(sym) else { continue };
-                let (_, doc_h) = stele::surface::Surface::size(&surface);
-                let max_scroll = x11_max_scroll(doc_h, height);
-
-                match key {
-                    xproto::X11Key::Escape | xproto::X11Key::Char('q') => break,
-                    xproto::X11Key::Up => {
-                        let old = scroll_y;
-                        scroll_y = scroll_y.saturating_sub(X11_LINE_SCROLL);
-                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                    }
-                    xproto::X11Key::Down => {
-                        let old = scroll_y;
-                        scroll_y = (scroll_y + X11_LINE_SCROLL).min(max_scroll);
-                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                    }
-                    xproto::X11Key::PageUp => {
-                        let old = scroll_y;
-                        scroll_y = scroll_y.saturating_sub(height);
-                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                    }
-                    xproto::X11Key::PageDown => {
-                        let old = scroll_y;
-                        scroll_y = (scroll_y + height).min(max_scroll);
-                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                    }
-                    xproto::X11Key::F5 => {
-                        match render_x11_page(history.current(), width) {
-                            Ok((s, f)) => {
+                xproto::XIntent::Click { x, y } => {
+                    let doc_x = x.max(0) as f32;
+                    let doc_y = y.max(0) as f32 + scroll_y as f32;
+                    if let Some(href) = xproto::hit_test_pixel(&fragments, doc_x, doc_y) {
+                        let new_url = history.current().resolve(&href);
+                        history.navigate(new_url.clone());
+                        match load_x11_page(&new_url, width) {
+                            Ok((sess, s, f)) => {
+                                session = sess;
                                 surface = s;
                                 fragments = f;
                                 scroll_y = 0;
                             }
-                            Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
+                            Err(e) => eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}"),
                         }
                         // New content -- full repaint, same reasoning as
-                        // ConfigureNotify above.
-                        x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                        // ConfigureNotify below.
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
                     }
-                    _ => {}
                 }
-            }
-
-            xproto::XEvent::ButtonPress { button, x, y } => {
-                let (_, doc_h) = stele::surface::Surface::size(&surface);
-                let max_scroll = x11_max_scroll(doc_h, height);
-                match button {
-                    4 => {
-                        // Wheel up.
-                        let old = scroll_y;
-                        scroll_y = scroll_y.saturating_sub(X11_LINE_SCROLL);
-                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                    }
-                    5 => {
-                        // Wheel down.
-                        let old = scroll_y;
-                        scroll_y = (scroll_y + X11_LINE_SCROLL).min(max_scroll);
-                        x11_scroll_to(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                    }
-                    1 => {
-                        let doc_x = x.max(0) as f32;
-                        let doc_y = y.max(0) as f32 + scroll_y as f32;
-                        if let Some(href) = xproto::hit_test_pixel(&fragments, doc_x, doc_y) {
-                            let new_url = history.current().resolve(&href);
-                            history.navigate(new_url.clone());
-                            match render_x11_page(&new_url, width) {
-                                Ok((s, f)) => {
-                                    surface = s;
-                                    fragments = f;
-                                    scroll_y = 0;
-                                }
-                                Err(e) => eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}"),
-                            }
-                            // New content -- full repaint, same reasoning as
-                            // ConfigureNotify above.
-                            x11_full_redraw(&mut conn, &surface, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                xproto::XIntent::Reload => {
+                    match load_x11_page(history.current(), width) {
+                        Ok((sess, s, f)) => {
+                            session = sess;
+                            surface = s;
+                            fragments = f;
+                            scroll_y = 0;
                         }
+                        Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
                     }
-                    _ => {}
+                    conn.begin_frame();
+                    x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.put_image_bytes += width as u64 * height as u64 * 4;
+                }
+                xproto::XIntent::Resize { w, h } => {
+                    // classify_x11_intent already screens out a 0x0
+                    // ConfigureNotify (a hostile/transient geometry) before
+                    // it ever becomes an XIntent -- nothing to re-check here.
+                    width = w as u32;
+                    height = h as u32;
+                    // Create the new back buffer BEFORE freeing the old one: if the
+                    // create fails, keep the old (wrong-sized but VALID) pixmap so the
+                    // window keeps presenting and a later resize retries — freeing
+                    // first would leave `pixmap` permanently unusable.
+                    match conn.create_pixmap(window, depth, width as u16, height as u16) {
+                        Ok(new_pixmap) => {
+                            let _ = conn.free_pixmap(pixmap);
+                            pixmap = new_pixmap;
+                        }
+                        Err(e) => eprintln!("stele: --x11: recreate pixmap failed, keeping old buffer: {e}"),
+                    }
+                    match reflow_from_dom(&session.dom, &session.final_url, width) {
+                        Ok((s, f)) => {
+                            surface = s;
+                            fragments = f;
+                        }
+                        Err(e) => eprintln!("stele: --x11: reflow after resize failed: {e}"),
+                    }
+                    let (_, doc_h) = stele::surface::Surface::size(&surface);
+                    scroll_y = scroll_y.min(x11_max_scroll(doc_h, height));
+                    // Content (and the window geometry itself) changed --
+                    // nothing on screen is safe to retain via CopyArea.
+                    conn.begin_frame();
+                    x11_full_redraw(&mut conn, &surface, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.put_image_bytes += width as u64 * height as u64 * 4;
+                }
+                xproto::XIntent::Expose { x, y, w, h } => {
+                    if !focus_set {
+                        // Window is guaranteed viewable now (Expose only
+                        // fires for a viewable window) -- see run_x11's doc
+                        // comment for why this can't happen right after
+                        // MapWindow.
+                        if let Err(e) = conn.set_input_focus(window) {
+                            eprintln!("stele: --x11: SetInputFocus failed: {e}");
+                        }
+                        focus_set = true;
+                    }
+                    // Present the damaged region straight from the back
+                    // buffer -- zero image bytes on the wire.
+                    conn.begin_frame();
+                    if let Err(e) = conn.copy_area(pixmap, window, gc, x as i16, y as i16, x as i16, y as i16, w, h) {
+                        eprintln!("stele: --x11: Expose CopyArea failed: {e}");
+                    }
+                    let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.copy_areas += 1;
                 }
             }
-
-            xproto::XEvent::Other => {}
         }
+        if quit {
+            if x11_stats_enabled {
+                print_x11_stats(&stats);
+            }
+            break;
+        }
+    }
+}
+
+/// Prints [`X11Stats`]'s one-line summary to stderr. Split out of
+/// [`run_x11`] purely so both quit paths (a clean `Quit` intent and the
+/// connection-closed error path) can share the same print without
+/// duplicating the format string.
+fn print_x11_stats(stats: &X11Stats) {
+    eprintln!(
+        "stele x11 stats: {} batches, {} events, {} scrolls, {} frames, {} copy_areas, {} put_image_bytes",
+        stats.batches, stats.events, stats.scrolls, stats.frames, stats.copy_areas, stats.put_image_bytes
+    );
+}
+
+/// Classify one raw [`xproto::XEvent`] into an [`xproto::XIntent`] for
+/// [`xproto::coalesce`] to fold, using the keyboard map fetched once in
+/// `run_x11` (`min_keycode`/`keysyms_per_keycode`/`keysyms`) and the
+/// CURRENT window `height` (needed for `PageUp`/`PageDown`'s scroll delta).
+/// `None` for events that carry no actionable intent (an unmapped keycode,
+/// an unrecognized key, a non-wheel/non-button-1 click, `XEvent::Other`) --
+/// same "silently ignore" behavior the old one-event-at-a-time loop had.
+fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], height: u32) -> Option<stele::backend::x11::XIntent> {
+    use stele::backend::x11::{self as xproto, XEvent, XIntent, X11Key};
+    match ev {
+        XEvent::ButtonPress { button: 4, .. } => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
+        XEvent::ButtonPress { button: 5, .. } => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+        XEvent::ButtonPress { button: 1, x, y } => Some(XIntent::Click { x: *x, y: *y }),
+        XEvent::ButtonPress { .. } => None,
+        XEvent::Expose { x, y, w, h, .. } => Some(XIntent::Expose { x: *x, y: *y, w: *w, h: *h }),
+        XEvent::ConfigureNotify { width, height: eh } => {
+            if *width == 0 || *eh == 0 {
+                None
+            } else {
+                Some(XIntent::Resize { w: *width, h: *eh })
+            }
+        }
+        XEvent::KeyPress { keycode, .. } => {
+            let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms)?;
+            match xproto::keysym_to_key(sym)? {
+                X11Key::Escape | X11Key::Char('q') => Some(XIntent::Quit),
+                X11Key::Up => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
+                X11Key::Down => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+                X11Key::PageUp => Some(XIntent::ScrollBy(-(height as i32))),
+                X11Key::PageDown => Some(XIntent::ScrollBy(height as i32)),
+                X11Key::F5 => Some(XIntent::Reload),
+                _ => None,
+            }
+        }
+        XEvent::Other => None,
     }
 }
 
@@ -1468,7 +1659,7 @@ fn run_x11(source: &str) {
 /// what the status line prints).
 fn build_page_from_dom(dom_tree: dom::Dom, final_url: &Url, cols: usize) -> browser::Page {
     let viewport_width = cols as f32 * 8.0;
-    // Not `--color-scheme`-aware — same rationale as `render_x11_page`'s
+    // Not `--color-scheme`-aware — same rationale as `reflow_from_dom`'s
     // identical note just above: the interactive shell has no
     // `--color-scheme` CLI flag to read (scoped to the `--headless` dump
     // paths only).
@@ -1965,6 +2156,21 @@ mod tests {
         assert_eq!(out.len(), 2 * 3 * 4);
         assert_eq!(&out[0..8], &[0, 0, 0, 255, 0, 0, 0, 255], "row 0 is the black surface");
         assert!(out[8..].iter().all(|&b| b == 0xff), "rows below content must be white canvas");
+    }
+
+    #[test]
+    fn reflow_from_dom_renders_without_fetching() {
+        // Parses the fixture's HTML directly (no fetch) and asserts
+        // `reflow_from_dom` produces fragments -- proving the resize path
+        // is fetch-free BY CONSTRUCTION: `reflow_from_dom` takes a parsed
+        // `Dom`, not a `Url`, so there is no fetch call on this path at all.
+        let html = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/basic.html")).unwrap();
+        let dom_tree = dom::parser::parse(&html);
+        let url = Url::new("file:///fixtures/basic.html");
+        let (surface, fragments) = reflow_from_dom(&dom_tree, &url, 800).expect("reflow renders");
+        assert!(!fragments.is_empty(), "basic.html must produce fragments");
+        let (w, _) = stele::surface::Surface::size(&surface);
+        assert_eq!(w, 800);
     }
 
     // ----------------------------------------------------------- scroll_blit
