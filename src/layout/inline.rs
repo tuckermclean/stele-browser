@@ -56,7 +56,7 @@ use crate::img::RgbaImage;
 use crate::layout::{Point, Rect, Size};
 use crate::style::computed::{Float as CssFloat, LineHeight, TextAlign};
 use crate::style::ComputedStyle;
-use crate::text::Metrics;
+use crate::text::{text_render_px, Metrics};
 
 /// M6 hardening: the sentinel [`BoxContent::Text`] payload
 /// `layout::box_tree` synthesizes for an HTML `<br>` element (a real forced
@@ -331,11 +331,22 @@ fn cluster(tokens: Vec<Token>) -> Vec<Cluster> {
     clusters
 }
 
+/// packet/text-min-8x8: only the `LineHeight::Normal`/invalid-`Px` branches
+/// — which derive a line height from [`Metrics::line_height`], i.e. from
+/// `font8x8`'s glyph geometry — go through [`text_render_px`]'s floor. An
+/// explicit `LineHeight::Px(v)` (CSS `line-height: <number>|<length>`,
+/// already resolved to a fixed pixel value at cascade time from the
+/// document's real, UNfloored `font_size` — see `style::cascade::resolve`)
+/// is an author-specified box value, not a `Metrics` call at all, and is
+/// used exactly as authored: flooring it here would leak the glyph-render
+/// floor into box geometry (a line box height can, in turn, size an
+/// auto-height container), which is exactly the leak this packet's brief
+/// forbids.
 fn resolved_line_height<M: Metrics>(style: &ComputedStyle, metrics: &M) -> f32 {
     match style.line_height {
-        LineHeight::Normal => metrics.line_height(style.font_size),
+        LineHeight::Normal => metrics.line_height(text_render_px(style.font_size)),
         LineHeight::Px(v) if v.is_finite() && v > 0.0 => v,
-        LineHeight::Px(_) => metrics.line_height(style.font_size),
+        LineHeight::Px(_) => metrics.line_height(text_render_px(style.font_size)),
     }
 }
 
@@ -351,9 +362,17 @@ fn word_metrics<M: Metrics>(runs: &[InlineRun], w: &Word, metrics: &M) -> (f32, 
     let style = &runs[w.run].style;
     match &runs[w.run].content {
         InlineContent::Text(_) => {
-            let width = clamp_dim(metrics.measure(&w.text, style.font_size));
-            let ascent = clamp_dim(metrics.ascent(style.font_size));
-            let descent = clamp_dim(metrics.descent(style.font_size));
+            // packet/text-min-8x8: every glyph-derived measurement (width,
+            // ascent, descent) is taken at the FLOORED render size, never
+            // below font8x8's native 8x8-at-16px resolution — see
+            // `text::text_render_px`'s own doc comment. `resolved_line_height`
+            // applies the same floor internally (only for its own
+            // metrics-derived branches; an explicit CSS `line-height` stays
+            // exact).
+            let render_px = text_render_px(style.font_size);
+            let width = clamp_dim(metrics.measure(&w.text, render_px));
+            let ascent = clamp_dim(metrics.ascent(render_px));
+            let descent = clamp_dim(metrics.descent(render_px));
             let line_height = clamp_dim(resolved_line_height(style, metrics));
             (width, ascent, descent, line_height)
         }
@@ -636,8 +655,12 @@ pub fn layout_runs<M: Metrics>(
                 } else {
                     let style = &runs[*run].style;
                     let line_height = clamp_dim(resolved_line_height(style, metrics));
-                    let ascent = clamp_dim(metrics.ascent(style.font_size));
-                    let descent = clamp_dim(metrics.descent(style.font_size));
+                    // packet/text-min-8x8: same render-size floor as
+                    // `word_metrics` — a bare `<br>`'s own ascent/descent
+                    // still come from `Metrics`, so they floor identically.
+                    let render_px = text_render_px(style.font_size);
+                    let ascent = clamp_dim(metrics.ascent(render_px));
+                    let descent = clamp_dim(metrics.descent(render_px));
                     let baseline = ascent + (line_height - (ascent + descent)) / 2.0;
                     (line_height, baseline)
                 };
@@ -663,7 +686,10 @@ pub fn layout_runs<M: Metrics>(
         let cluster_width: f32 = words.iter().map(|w| word_metrics(runs, w, metrics).0).sum();
         let cluster_width = clamp_dim(cluster_width);
         let space_style = &runs[words[0].run].style;
-        let space_w = if space_before { clamp_dim(metrics.advance(' ', space_style.font_size)) } else { 0.0 };
+        // packet/text-min-8x8: the leading-space advance is a glyph
+        // measurement like any other word — same floor.
+        let space_w =
+            if space_before { clamp_dim(metrics.advance(' ', text_render_px(space_style.font_size))) } else { 0.0 };
 
         let would_add = if cur_x > 0.0 { space_w } else { 0.0 } + cluster_width;
         if cur_x > 0.0 && cur_x + would_add > line_avail_width {
@@ -1287,5 +1313,71 @@ mod tests {
         assert_eq!(out.lines.len(), 1);
         assert_eq!(out.lines[0].rect.origin.x, 40.0, "float exclusion base unchanged");
         assert_eq!(out.lines[0].runs[0].x, 5.0, "alignment offset measured within the reduced 60px avail width");
+    }
+
+    // -----------------------------------------------------------------
+    // packet/text-min-8x8: text metrics never render below font8x8's
+    // native 8x8-at-16px resolution. Uses the REAL `text::BitmapFont`
+    // (not `FixedMetrics`, which ignores `size_px` entirely and so can't
+    // prove anything about a size-dependent floor).
+    // -----------------------------------------------------------------
+
+    fn run_at_font_size(text: &str, font_size: f32) -> InlineRun {
+        run_with(text, move |s| s.font_size = font_size)
+    }
+
+    #[test]
+    fn sub_16px_word_advance_matches_the_native_16px_advance() {
+        let font = crate::text::BitmapFont::vga_8x16();
+        let sub16 = [run_at_font_size("ab", 8.0)];
+        let native = [run_at_font_size("ab", 16.0)];
+        let out_sub16 = layout_runs(&sub16, 1000.0, TextAlign::Left, &font);
+        let out_native = layout_runs(&native, 1000.0, TextAlign::Left, &font);
+        assert_eq!(
+            out_sub16.lines[0].runs[0].width, out_native.lines[0].runs[0].width,
+            "an 8px-declared run must measure exactly like a 16px run -- the render floor, not the raw \
+             font-size, drives glyph advance"
+        );
+        assert_eq!(out_sub16.lines[0].runs[0].width, font.measure("ab", 16.0));
+    }
+
+    #[test]
+    fn sub_16px_line_height_matches_the_native_16px_line_height() {
+        let font = crate::text::BitmapFont::vga_8x16();
+        let sub16 = [run_at_font_size("x", 10.0)];
+        let out = layout_runs(&sub16, 1000.0, TextAlign::Left, &font);
+        assert_eq!(
+            out.lines[0].rect.size.h,
+            font.line_height(16.0),
+            "LineHeight::Normal (the default) must resolve through the render floor, not raw font_size=10"
+        );
+    }
+
+    #[test]
+    fn above_16px_font_size_is_a_floor_no_op() {
+        // The floor is max(font_size, 16.0): at or above 16px, text metrics
+        // must be byte-identical to what they were before this packet.
+        let font = crate::text::BitmapFont::vga_8x16();
+        let at32 = [run_at_font_size("ab", 32.0)];
+        let out = layout_runs(&at32, 1000.0, TextAlign::Left, &font);
+        assert_eq!(out.lines[0].runs[0].width, font.measure("ab", 32.0));
+        assert_eq!(out.lines[0].rect.size.h, font.line_height(32.0));
+    }
+
+    #[test]
+    fn explicit_css_line_height_is_never_floored_even_at_a_sub_16px_font_size() {
+        // An author-specified `line-height: <px>` is a resolved BOX value
+        // (`style::cascade::resolve`), not a `Metrics` call -- flooring it
+        // here would leak the glyph-render floor into geometry an
+        // auto-height container could size against. A tight 10px
+        // line-height at font-size 10 must stay exactly 10px even though
+        // the glyph itself now renders at floored 16px.
+        let runs = [run_with("x", |s| {
+            s.font_size = 10.0;
+            s.line_height = LH::Px(10.0);
+        })];
+        let font = crate::text::BitmapFont::vga_8x16();
+        let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
+        assert_eq!(out.lines[0].rect.size.h, 10.0, "explicit CSS line-height must stay exactly as authored");
     }
 }
