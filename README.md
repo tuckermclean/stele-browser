@@ -41,15 +41,11 @@ Stele builds **inside the `monolith-builder` image** (pinned by digest), which c
 the one pinned nightly ([`rust-toolchain.toml`](rust-toolchain.toml)), the i486
 cross-musl toolchain, and `rust-src` for `-Zbuild-std`.
 
-The **canonical build command is documented and kept current at the top of
-[`accept.sh`](accept.sh)** — read it there rather than trusting a copy that can drift.
-In outline, the i486 release target is:
-
-```sh
-cargo build --release \
-  --target targets/i486-monolith-linux-musl.json \
-  -Zbuild-std=std,panic_abort -Zjson-target-spec
-```
+The **canonical build command lives at the top of [`accept.sh`](accept.sh)** — read it
+there; this README deliberately does not carry a copy. (Past copies drifted immediately:
+the real invocation also needs a load-bearing `RUSTFLAGS` line — the unwind shim and
+`-Cpanic=immediate-abort`, which must reach the `-Zbuild-std` core build — and omitting
+it yields a broken or fatter binary. accept.sh's header explains each flag.)
 
 The host build (for tests and headless golden dumps) is a plain `cargo build --release`
 (no `+toolchain` override — that would bypass the pin).
@@ -71,10 +67,13 @@ See `stele --help` / [`src/main.rs`](src/main.rs) for the current flag set.
 
 ## Acceptance is the definition of done
 
-`./accept.sh` **is** Stele's definition of DONE — exit 0 means acceptance. It runs
-checks **A1–A5**: statically-linked i386 ELF (A1), size budget (A2), fixture golden
-renders — tty + PNG (A3/A5), and the i486 binary executing under `qemu-i386 -cpu 486`
-(A4). `--tty-only` runs just the host golden check; `--bless` regenerates goldens
+`./accept.sh` **is** Stele's definition of DONE — exit 0 means acceptance. It is a
+**phased A1..A7 system**: checks come online milestone by milestone (live checks gate;
+not-yet-landed ones announce themselves as PENDING). The current roster and each
+check's live/pending status are documented in the script itself — among them:
+statically-linked i386 ELF (A1), size budget (A2), fixture goldens (A3/A5), and the
+i486 binary executing under `qemu-i386 -cpu 486` (A4).
+`--tty-only` runs just the host golden check; `--bless` regenerates goldens
 (**never bless a render you haven't verified** — see [AGENTS.md](AGENTS.md)).
 
 **Two size numbers — know both:**

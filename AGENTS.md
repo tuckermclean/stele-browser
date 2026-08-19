@@ -47,6 +47,13 @@ Load-bearing. Violating one silently is worse than not touching the code at all.
    symptom-patching, no magic offsets. If three fixes in a row don't hold, question the
    design, don't try a fourth.
 
+6. **The dialect is amended, never drifted.** If your packet makes Stele speak something
+   new — a CSS property, an element, a behavior — the **same PR** updates the charter's
+   C2 adopted-amendments record (with the packet/PR reference and the size price). The
+   charter is the source of truth on "What Stele Speaks"; code that outruns it turns the
+   constitution into a fossil. (This rule exists because it happened: grid, floats, and
+   custom properties shipped ahead of the charter and had to be back-recorded.)
+
 ---
 
 ## The build & test loop (CI-driven)

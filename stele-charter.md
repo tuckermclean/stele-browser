@@ -64,10 +64,16 @@ converge, not grow.
       Initial dialect: HTML 4.01 Transitional + HTML5 semantic/
       sectioning elements; CSS1 + FLEXBOX (in-dialect day one — the
       engine speaks it natively and polite modern documents use it) +
-      one-shot media queries. Candidate first amendments: <details>/
-      <summary> (declarative interactivity, the politeness poster
-      child), custom properties. The dialect ships as a versioned
-      one-page document: "What Stele Speaks."
+      one-shot media queries.
+      ADOPTED AMENDMENTS (deliberate, priced, per clause (c) — recorded
+      here so the charter never trails the code): CSS custom properties
+      + var() (packet T1a); block floats via the flex substrate
+      (PR #65, +16 KB); CSS GRID, handed to taffy's own algorithm, not
+      reimplemented (PR #69); box-model completion — box-sizing,
+      per-side borders, margin collapsing. Still candidates: <details>/
+      <summary> interactive toggle (rendered as blocks today), MathML,
+      static SVG. The dialect ships as a versioned one-page document:
+      "What Stele Speaks."
       HTTP/1.1 + gzip. The RUDE web is the proxy's problem; the
       polite web is Stele's native constituency.
   C3. Hostile content is unrepresentable: the document AST is a closed
