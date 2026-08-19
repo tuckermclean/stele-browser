@@ -104,7 +104,7 @@ pub trait Fetch {
 pub fn fetch(request: &Request) -> Result<Response, FetchError> {
     match request.url.scheme().as_str() {
         "file" => file::FileFetcher::new().fetch(request),
-        "http" => http1::Http1Client::new().fetch(request),
+        "http" | "https" => http1::Http1Client::new().fetch(request),
         other => Err(FetchError::UnsupportedScheme(other.to_string())),
     }
 }

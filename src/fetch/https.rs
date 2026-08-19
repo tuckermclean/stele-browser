@@ -177,19 +177,39 @@ impl OpensslStream {
         String::from_utf8_lossy(&out).trim().to_string()
     }
 
-    /// Build a legible `FetchError::Tls` for a failure on this connection,
-    /// folding in openssl's own stderr reason and the host (T4).
-    fn tls_error(&mut self, what: &str) -> FetchError {
-        let reason = self.drain_stderr();
-        let reason = if reason.is_empty() {
-            String::new()
-        } else {
-            format!(" ({reason})")
+    /// On an exchange failure over this connection, decide whether it was a
+    /// TLS-layer failure (verify/handshake/connect) and, if so, return a legible
+    /// `FetchError::Tls` folding in openssl's reason + the host; otherwise return
+    /// the framing `fallback` unchanged. Called by `http1::send_one` (T4).
+    pub(crate) fn tls_error_or(&mut self, fallback: FetchError) -> FetchError {
+        // If our own read timed out, the child may still be running — don't
+        // block on wait(); return the timeout and let Drop kill it.
+        if let FetchError::Io(ref m) = fallback {
+            if m.contains("timed out") {
+                return fallback;
+            }
+        }
+        // The child closed stdout (it exited/failed) — safe to reap and read its
+        // stderr. A non-zero exit means the failure was at the TLS layer even if
+        // -quiet trimmed the stderr reason.
+        let status_failed = match self.child.wait() {
+            Ok(s) => !s.success(),
+            Err(_) => true,
         };
-        FetchError::Tls(format!(
-            "TLS connection to {} failed: {what}{reason}. Nothing was fetched.",
-            self.host
-        ))
+        let reason = self.drain_stderr();
+        if status_failed || !reason.is_empty() {
+            let detail = if reason.is_empty() {
+                "verification or handshake failed".to_string()
+            } else {
+                reason
+            };
+            FetchError::Tls(format!(
+                "TLS connection to {} failed ({detail}). Nothing was fetched.",
+                self.host
+            ))
+        } else {
+            fallback
+        }
     }
 }
 
