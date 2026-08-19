@@ -984,6 +984,33 @@ impl XConnection {
             }
         }
     }
+
+    /// Block for the next event, then drain every event already queued on the
+    /// socket (non-blocking) into one batch. The batch feeds `coalesce`, so a
+    /// burst of wheel/resize/expose events collapses to one paint. Returns at
+    /// least one event. A short/failed read is a clean `Err`.
+    pub fn drain_events(&mut self) -> Result<Vec<XEvent>, String> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        const ZERO: Timespec = Timespec { tv_sec: 0, tv_nsec: 0 };
+
+        let mut batch = vec![self.next_event()?];
+        // First, anything already demuxed into `pending`.
+        while let Some(ev) = self.pending.pop_front() {
+            batch.push(ev);
+        }
+        // Then everything sitting on the socket right now.
+        loop {
+            let mut fds = [PollFd::new(&self.stream, PollFlags::IN)];
+            let n = poll(&mut fds, Some(&ZERO)).map_err(|e| format!("poll X socket: {e}"))?;
+            if n == 0 || !fds[0].revents().contains(PollFlags::IN) {
+                break;
+            }
+            // A byte is ready; read one whole event (blocking only for the
+            // remaining bytes of an event whose first byte already arrived).
+            batch.push(self.next_event()?);
+        }
+        Ok(batch)
+    }
 }
 
 /// Best-effort `MIT-MAGIC-COOKIE-1` lookup: `$XAUTHORITY` if set, else
