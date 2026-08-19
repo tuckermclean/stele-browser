@@ -83,6 +83,26 @@ use crate::surface::{Color, MemSurface, Rect as PixelRect, Surface, TextRun};
 /// Every caller today passes `Color::WHITE` — the same fill color it hands
 /// `MemSurface::new` — so this changes no existing render.
 pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &HashMap<String, Rc<RgbaImage>>, canvas: Color) {
+    paint_at(surface, fragments, bg_images, canvas, 0.0);
+}
+
+/// Same as [`paint`], but every fragment is drawn shifted vertically by
+/// `y_offset` px — the page→band-local translation `--x11`'s viewport-band
+/// painting needs (`main.rs`'s `paint_viewport_band`): painting the FULL
+/// fragment sequence at a negative offset (rather than culling to a
+/// sub-slice and painting that fresh) keeps [`synthesize_gap_rect`]'s
+/// cross-fragment `pending_box_boundary`/`last_text_end` state correct —
+/// every fragment before the band still runs through the loop and updates
+/// that state, exactly as it would painting the whole document — while
+/// `Surface::fill_rect`/`put_pixel`/`blit`/`draw_text` still clip every
+/// off-band write, so a `band_h`-tall `surface` costs O(viewport), not
+/// O(document), RAM regardless of how far into the document `y_offset`
+/// reaches back from.
+///
+/// `y_offset == 0.0` is byte-identical to the old `paint` (every rect's `y`
+/// is unchanged by `+= 0.0`) — the headless dump path (A5 goldens) always
+/// calls `paint`, which forwards `0.0` here.
+pub fn paint_at(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &HashMap<String, Rc<RgbaImage>>, canvas: Color, y_offset: f32) {
     // packet/t3-inline-spacing (the D3 fix): the fb half of "distinct
     // adjacent inline-level runs must not abut with zero advance" — the
     // pixel-space sibling of `backend::tty::render`'s own `pending_box_
@@ -93,9 +113,21 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &Hash
     let mut last_text_end: Option<(f32, f32)> = None;
 
     for (i, fragment) in fragments.iter().enumerate() {
+        // The Y-shifted rect this fragment actually draws at — `fragment.
+        // rect` itself (and the `fragments` slice passed to `effective_
+        // background` below) stay UNTRANSLATED: containment between
+        // fragments is invariant under a uniform shift, so `effective_
+        // background`'s geometric analysis is unaffected either way, and
+        // reusing `fragment.rect` there (rather than a shifted copy) is
+        // simply less to thread through.
+        let rect = {
+            let mut r = fragment.rect;
+            r.origin.y += y_offset;
+            r
+        };
         match &fragment.kind {
             FragmentKind::Box { style } => {
-                paint_box(surface, &fragment.rect, style, bg_images);
+                paint_box(surface, &rect, style, bg_images);
                 pending_box_boundary = true;
             }
             FragmentKind::Text { text, baseline, style } => {
@@ -111,13 +143,13 @@ pub fn paint(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &Hash
                     Some(bg) => repair_fg(style.color, bg),
                     None => style.color,
                 };
-                let rect = synthesize_gap_rect(pending_box_boundary, last_text_end, &fragment.rect);
-                paint_text(surface, &rect, text, *baseline, style, ink);
-                last_text_end = Some((rect.origin.y, rect.origin.x + finite_or(rect.size.w, 0.0)));
+                let text_rect = synthesize_gap_rect(pending_box_boundary, last_text_end, &rect);
+                paint_text(surface, &text_rect, text, *baseline, style, ink);
+                last_text_end = Some((text_rect.origin.y, text_rect.origin.x + finite_or(text_rect.size.w, 0.0)));
                 pending_box_boundary = false;
             }
             FragmentKind::Image { image } => {
-                surface.blit(to_pixel_rect(&fragment.rect), image);
+                surface.blit(to_pixel_rect(&rect), image);
                 // Conservative, same posture as `backend::tty::render`'s own
                 // `Image` handling: an image's interaction with a FOLLOWING
                 // `Text` fragment isn't a shape this packet's fixture corpus

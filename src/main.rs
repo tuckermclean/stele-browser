@@ -957,44 +957,49 @@ fn render_fb_opts(source: &str, no_bg_images: bool) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // packet/x11: the pixel-shell page-render pipeline. Mirrors
 // `render_fb_surface_opts`'s own fetch->parse->cascade->box-tree->layout->
-// paint steps (same content-driven-height derivation) but ALSO returns the
-// raw `Fragment` stream alongside the painted `Surface` -- `backend::x11`'s
-// pixel hit-test needs the fragments' `Interactive::Link` rects for
-// click-to-follow, which the painted pixels alone don't carry.
+// paint steps (same content-driven-height derivation), but returns a
+// [`RenderState`] rather than a painted `Surface` -- interactive RAM is
+// O(viewport), not O(document) (the tall-page doctrine): `run_x11` retains
+// only the fragment list, the bg-image map, and the document height, and
+// paints a viewport-sized band on demand via `paint_viewport_band`.
+// `backend::x11`'s pixel hit-test needs the fragments' `Interactive::Link`
+// rects for click-to-follow either way, which no painted surface could carry.
 // ---------------------------------------------------------------------------
 
-/// Cached per-navigation state `run_x11` holds alongside `surface`/
-/// `fragments`: the parsed DOM and the (possibly redirected) URL it was
-/// fetched from. A resize (`ConfigureNotify`) reflows from this cache via
-/// [`reflow_from_dom`] instead of re-fetching -- see that function's doc
+/// Cached per-navigation state `run_x11` holds alongside `state`
+/// ([`RenderState`]): the parsed DOM and the (possibly redirected) URL it
+/// was fetched from. A resize (`ConfigureNotify`) reflows from this cache
+/// via [`reflow_from_dom`] instead of re-fetching -- see that function's doc
 /// comment for the zero-network guarantee this exists to make structural.
 struct X11Session {
     dom: dom::ast::Dom,
     final_url: Url,
 }
 
-/// Reflow an ALREADY-PARSED `dom` (fetched/parsed once by [`load_x11_page`]
-/// and cached in an [`X11Session`]) into a full-document `MemSurface` at
-/// `width` CSS px, alongside the `Fragment`s that produced it -- the
-/// width-dependent tail of the old `render_x11_page`
-/// (cascade/layout/paint), now reusable across a resize without re-fetching
-/// or re-parsing. Takes NO `Url` to fetch (only `final_url`, used to
-/// resolve relative stylesheet/image/background URLs against) -- so a
-/// `ConfigureNotify` resize can call this directly and the zero-network
-/// guarantee is structural, not just behavioral: there is no fetch call
-/// anywhere on this path for the compiler to type-check against. Total:
-/// layout failure is a clean `Err`, never a panic -- `run_x11` degrades to
-/// a blank page rather than propagating a panic into the event loop.
 /// The retained, O(1)-in-viewport render state for `--x11`: the fragment list
 /// (already produced by layout) plus the bg-image map and document height.
-/// Painting is DEFERRED to `paint_viewport_band` — no whole-document surface is
-/// ever allocated (the tall-page doctrine: interactive RAM is O(viewport)).
+/// Painting is DEFERRED to `paint_viewport_band` -- no whole-document surface
+/// is ever allocated (the tall-page doctrine: interactive RAM is O(viewport)).
 struct RenderState {
     fragments: Vec<layout::Fragment>,
     bg_images: std::collections::HashMap<String, std::rc::Rc<stele::img::RgbaImage>>,
     doc_height: u32,
 }
 
+/// Reflow an ALREADY-PARSED `dom` (fetched/parsed once by [`load_x11_page`]
+/// and cached in an [`X11Session`]) into a [`RenderState`] at `width` CSS
+/// px -- the width-dependent tail of the old `render_x11_page`
+/// (cascade/layout/height-derivation/bg-image collection), now reusable
+/// across a resize without re-fetching or re-parsing. No surface is painted
+/// here at all: that's deferred to [`paint_viewport_band`], which paints
+/// only the currently-visible band on demand (O(viewport) RAM, never
+/// O(document)). Takes NO `Url` to fetch (only `final_url`, used to resolve
+/// relative stylesheet/image/background URLs against) -- so a
+/// `ConfigureNotify` resize can call this directly and the zero-network
+/// guarantee is structural, not just behavioral: there is no fetch call
+/// anywhere on this path for the compiler to type-check against. Total:
+/// layout failure is a clean `Err`, never a panic -- `run_x11` degrades to
+/// a blank page rather than propagating a panic into the event loop.
 fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Result<RenderState, String> {
     if frames::find_frameset(dom_tree).is_some() {
         return Err("frameset documents are not supported by --x11".to_string());
@@ -1033,35 +1038,20 @@ fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Res
     Ok(RenderState { fragments, bg_images, doc_height })
 }
 
-/// The fragments intersecting the page-y band `[band_page_y, band_page_y +
-/// band_h)`, cloned and translated into band-local coords (origin.y shifted up
-/// by `band_page_y`). Culling keeps painting O(visible), not O(document).
-fn visible_translated_fragments(fragments: &[layout::Fragment], band_page_y: u32, band_h: u32) -> Vec<layout::Fragment> {
-    let y0 = band_page_y as f32;
-    let y1 = (band_page_y + band_h) as f32;
-    fragments
-        .iter()
-        .filter(|f| {
-            let y = f.rect.origin.y;
-            let h = f.rect.size.h;
-            y.is_finite() && h.is_finite() && (y + h) > y0 && y < y1
-        })
-        .map(|f| {
-            let mut g = f.clone();
-            g.rect.origin.y -= y0;
-            g
-        })
-        .collect()
-}
-
 /// Paint only the page-y band `[band_page_y, band_page_y + band_h)` into a
-/// fresh `band_h`-tall surface (O(viewport) RAM). `raster::paint` is reused
-/// unchanged; `MemSurface` clips any straddling-fragment writes to the band.
+/// fresh `band_h`-tall surface (O(viewport) RAM). Paints the FULL fragment
+/// sequence at `y_offset = -band_page_y` via `raster::paint_at` (rather than
+/// culling to a translated sub-slice and painting that fresh) so `raster`'s
+/// stateful cross-fragment inline-gap synthesis (`synthesize_gap_rect`'s
+/// `pending_box_boundary`/`last_text_end` tracking) sees every fragment
+/// before the band, exactly as a whole-document paint would -- a band is
+/// therefore pixel-identical to the corresponding rows of the old whole-doc-
+/// surface-then-crop path. `MemSurface` clips every off-band write, so this
+/// still costs O(viewport), not O(document), RAM.
 fn paint_viewport_band(state: &RenderState, width: u32, band_page_y: u32, band_h: u32) -> MemSurface {
     let band_h = band_h.max(1);
-    let visible = visible_translated_fragments(&state.fragments, band_page_y, band_h);
     let mut band = MemSurface::new(width, band_h, Color::WHITE);
-    raster::paint(&mut band, &visible, &state.bg_images, Color::WHITE);
+    raster::paint_at(&mut band, &state.fragments, &state.bg_images, Color::WHITE, -(band_page_y as f32));
     band
 }
 
@@ -2223,24 +2213,6 @@ mod tests {
         assert!(state.doc_height > 5000, "the fixture must be genuinely tall (was {})", state.doc_height);
         let band = paint_viewport_band(&state, 800, 4000, 768);
         assert_eq!(stele::surface::Surface::size(&band), (800, 768), "band surface must be viewport-sized regardless of doc height");
-    }
-
-    #[test]
-    fn visible_translated_fragments_culls_out_of_band_and_translates() {
-        let html = format!("<html><body>{}</body></html>", "<p>line</p>".repeat(4000));
-        let dom = stele::dom::parser::parse(&html);
-        let state = reflow_from_dom(&dom, &Url::new("file:///tall.html"), 800).expect("reflow");
-        let total = state.fragments.len();
-        let band = visible_translated_fragments(&state.fragments, 2000, 768);
-        assert!(band.len() < total, "a band must contain fewer fragments than the whole doc");
-        assert!(!band.is_empty(), "a mid-document band must contain some fragments");
-        // Every returned fragment intersects the band, and its y is translated
-        // into band-local coords (so it lands within/near [0, 768)).
-        for f in &band {
-            let y = f.rect.origin.y;
-            let h = f.rect.size.h;
-            assert!(y + h > -1.0 && y < 768.0, "fragment y {y} h {h} not in band-local range");
-        }
     }
 
     #[test]
