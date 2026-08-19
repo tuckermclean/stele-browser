@@ -1235,3 +1235,37 @@ Append-only running log. Newest at the bottom.
 - **Wave 1 COMPLETE** with P4: parser (P1) · CSS (P2) · fetch (P3) · images
   (P4) · text metrics (P5) all merged/green. Next: Wave 2 — the layout engine
   (block flow + inline) and the tty backend toward M2.
+
+## 2026-08-19 — HTTPS PR 1: ByteStream seam + centralized fetch dispatch (packet/bytestream-seam, #78)
+
+- **First of two packets** delivering `https://` via a delegated `openssl s_client`
+  child (TLS delegated, never embedded — zero crypto bytes in the binary). Design:
+  `docs/superpowers/specs/2026-08-19-https-openssl-transport-design.md`; plan:
+  `docs/superpowers/plans/2026-08-19-bytestream-seam.md`.
+- **This packet is a PURE REFACTOR — zero behavior change:**
+  - New `src/fetch/transport.rs`: `trait ByteStream: Read + Write { shutdown_write }`
+    with the only PR-1 impl, `TcpStream`. The seam PR 2's openssl child slots into.
+    `shutdown_write` is defined but deliberately **not called** on the HTTP path here
+    (calling it would add a FIN-after-request — a wire change).
+  - `http1`'s five read helpers made generic over `R: Read`; write+read core factored
+    into `exchange<S: ByteStream>`; `send_one` still `TcpStream::connect`s and calls it.
+    Helper bodies left byte-identical (totality, timeouts, `MAX_RESPONSE_BYTES`,
+    CRLF-injection rejection all preserved verbatim).
+  - `fetch::fetch(&Request)` — the single scheme→fetcher table — plus
+    `fetch::err_to_string`, which exists so the six rewired call sites keep byte-identical
+    error text. The six copy-pasted `match url.scheme()` blocks (`main.rs` ×2,
+    `images.rs`, `stylesheets.rs`, `bg_images.rs`, `frames.rs`) now delegate; adding
+    `https` in PR 2 is one arm in one place.
+- **Proof of inertness:** `tests/fetch_http1.rs` framing tests (chunked / Content-Length /
+  garbage) unchanged & green; all PNG/tty goldens **byte-identical** (accept.sh A5);
+  4 new `fetch` dispatch unit tests. CI `m0-acceptance` green on the final push.
+- **Size (bonus win):** i486 binary **1,213,524 B**, **−4,096 B vs the branch point**
+  (deduplicating six inlined dispatch/format copies into one shrank it) — 261,036 B under
+  the 1.44 MB floppy ceiling (A2: 1,213,524 ≤ 2,000,000).
+- Executed subagent-driven (3 impl tasks, per-task review + Opus whole-branch review, all
+  clean). Deferred cosmetic-only doc nits: `transport.rs` module doc and four module `//!`
+  headers still carry pre-refactor phrasing — non-blocking, for a later touch.
+- **Next: PR 2 (`packet/https-openssl`)** — `OpensslStream` child `ByteStream`, `https`
+  scheme + 443, fail-closed flag probe, `STELE_CA_FILE` + default-path CA probe, legible
+  TLS-failure error document, charter C2 amendment + first `DECISIONS.md` transport entry,
+  and the `openssl s_server` fixture suite + covenant grep (zero TLS symbols in the binary).
