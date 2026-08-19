@@ -141,16 +141,24 @@ jobs:
           mkdir -p /tmp/unwindshim
           ln -sf "$GCC_EH" /tmp/unwindshim/libunwind.a
           export RUSTFLAGS="-L /tmp/unwindshim ${RUSTFLAGS:-}"
-          # panic_immediate_abort (packet size-squeeze-floppy) strips std's
+          # -Cpanic=immediate-abort (packet size-squeeze-floppy) strips std's
           # formatted-panic-message machinery from the release binary — the
           # 486 build already panic=abort's without unwinding, so the
           # formatted message was dead weight; this is the size lever that
           # keeps the i486 binary under the 1.44MB floppy ceiling (see
           # accept.sh's own note on this flag, and .cargo/config.toml).
+          # Selected via -Zunstable-options -Cpanic=immediate-abort (NOT
+          # -Zbuild-std-features=panic_immediate_abort, and NOT Cargo.toml's
+          # [profile.release] — the pinned nightly promoted
+          # panic_immediate_abort to a real panic strategy chosen with -C,
+          # and putting it in the shared release profile would also apply
+          # to the host unit-test build, breaking normal panic/assert and
+          # #[should_panic] there). -Zbuild-std=std,panic_abort is still
+          # required to build core/std themselves for this target.
           cargo build --release \
             --target targets/i486-monolith-linux-musl.json \
             -Zbuild-std=std,panic_abort \
-            -Zbuild-std-features=panic_immediate_abort \
+            -Zunstable-options -Cpanic=immediate-abort \
             -Zjson-target-spec
           BIN=target/i486-monolith-linux-musl/release/stele
           ls -l "$BIN"

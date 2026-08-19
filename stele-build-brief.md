@@ -93,11 +93,14 @@ then modify and save as targets/i486-monolith-linux-musl.json:
     back to hardware float and record that 486SX support becomes a
     known gap (DX-class has the FPU; the myth's machine is a DX2).
   - crt-static enabled (target-feature=+crt-static), relocation static.
-Build: `cargo build --release --target targets/i486-monolith-linux-musl.json -Zbuild-std=std,panic_abort -Zbuild-std-features=panic_immediate_abort`
-(packet size-squeeze-floppy: panic_immediate_abort drops std's formatted-
+Build: `cargo build --release --target targets/i486-monolith-linux-musl.json -Zbuild-std=std,panic_abort -Zunstable-options -Cpanic=immediate-abort`
+(packet size-squeeze-floppy: -Cpanic=immediate-abort drops std's formatted-
 panic-message machinery — dead weight under panic=abort, which never
 unwinds to read it — and is what keeps the release binary under the
-1.44MB floppy ceiling; release-only, never applied to host test builds)
+1.44MB floppy ceiling; a command-line flag on this one build invocation,
+never in Cargo.toml's [profile.release] since that profile is shared with
+the host unit-test build, which needs normal panic/assert + #[should_panic]
+behavior — so host test builds are unaffected)
 with profile: opt-level="z", lto="fat", codegen-units=1, panic="abort",
 strip=true.
 Sanity gate before ANY browser code: M0 hello-world through this exact

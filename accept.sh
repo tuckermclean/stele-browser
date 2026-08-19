@@ -27,13 +27,20 @@
 #   cargo build --release \
 #     --target targets/i486-monolith-linux-musl.json \
 #     -Zbuild-std=std,panic_abort \
-#     -Zbuild-std-features=panic_immediate_abort \
+#     -Zunstable-options -Cpanic=immediate-abort \
 #     -Zjson-target-spec   # this nightly gates .json target specs behind it
-# panic_immediate_abort (packet size-squeeze-floppy) drops std's formatted-
+# -Cpanic=immediate-abort (packet size-squeeze-floppy) drops std's formatted-
 # panic-message machinery from the release binary — panic=abort never
 # unwinds to read that message anyway, so this is pure fat-trim, not a
-# behavior change. Release-only: never applies to A3's host build below
-# (no build-std there at all — see that section's own note).
+# behavior change. (NOTE: this used to be requested via -Zbuild-std-
+# features=panic_immediate_abort; the pinned nightly promoted that to a
+# real panic strategy selected via -Cpanic=immediate-abort instead — see
+# the compiler's own "panic_immediate_abort is now a real panic strategy"
+# error if this drifts again.) It's a command-line-only flag on THIS build,
+# never in Cargo.toml's [profile.release] — that profile is shared with the
+# host unit-test build, which relies on normal panic/assert + #[should_panic]
+# behavior. Release-only: never applies to A3's host build below (no
+# build-std there at all — see that section's own note).
 #
 # A3's host binary is a plain `cargo build --release` (default host target,
 # no `+nightly`/`+<toolchain>` override — that would bypass rust-toolchain.

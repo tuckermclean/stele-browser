@@ -4,10 +4,13 @@
 # NOTE: we deliberately do NOT set `[build] target` here. Host unit tests must
 # build for the host; only the release binary targets i486, and it passes
 # `--target targets/i486-monolith-linux-musl.json -Zbuild-std=std,panic_abort
-# -Zbuild-std-features=panic_immediate_abort` explicitly (see accept.sh and
-# the build brief §2 canonical command). panic_immediate_abort strips the
+# -Zunstable-options -Cpanic=immediate-abort` explicitly (see accept.sh and
+# the build brief §2 canonical command). -Cpanic=immediate-abort strips the
 # formatted-message/fmt machinery panic=abort never uses anyway (packet
-# size-squeeze-floppy) — release-binary-only, host tests are unaffected.
+# size-squeeze-floppy) — a command-line flag on that one build invocation
+# only, NEVER in Cargo.toml's [profile.release] (which the host test build
+# shares and needs normal panic/assert + #[should_panic] behavior from) —
+# so host tests are unaffected.
 [target.i486-monolith-linux-musl]
 linker = "i486-linux-musl-gcc"
 # The target spec omits crt-objects-fallback / self-contained object lists, so
