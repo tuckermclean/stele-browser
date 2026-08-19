@@ -686,6 +686,58 @@ pub fn parse_event(buf: &[u8]) -> Option<XEvent> {
     }
 }
 
+/// A folded, transport-level intent — the output of coalescing a drained
+/// event batch. The `run_x11` loop maps each `XIntent` onto the existing
+/// scroll/navigate/repaint decisions. (`Navigate` is NOT here — a click's
+/// hit-test happens loop-side against the fragment stream.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XIntent {
+    ScrollBy(i32),
+    Resize { w: u16, h: u16 },
+    Expose { x: u16, y: u16, w: u16, h: u16 },
+    Click { x: i16, y: i16 },
+    Reload,
+    Quit,
+}
+
+/// Fold a classified batch: adjacent `ScrollBy` sum into one; adjacent
+/// `Expose` union into one bounding box; all but the LAST `Resize` are
+/// dropped; `Click`/`Reload`/`Quit` pass through in order (and break scroll/
+/// expose runs). Pure — the responsiveness contract lives here.
+pub fn coalesce(intents: Vec<XIntent>) -> Vec<XIntent> {
+    // Drop every Resize except the last (a resize supersedes earlier sizes).
+    let last_resize_idx = intents
+        .iter()
+        .rposition(|i| matches!(i, XIntent::Resize { .. }));
+    let filtered = intents.into_iter().enumerate().filter(move |(idx, i)| {
+        !matches!(i, XIntent::Resize { .. }) || Some(*idx) == last_resize_idx
+    });
+
+    let mut out: Vec<XIntent> = Vec::new();
+    for (_, intent) in filtered {
+        match (out.last_mut(), intent) {
+            (Some(XIntent::ScrollBy(acc)), XIntent::ScrollBy(d)) => {
+                *acc = acc.saturating_add(d);
+            }
+            (
+                Some(XIntent::Expose { x, y, w, h }),
+                XIntent::Expose { x: nx, y: ny, w: nw, h: nh },
+            ) => {
+                let x0 = (*x).min(nx);
+                let y0 = (*y).min(ny);
+                let x1 = (*x + *w).max(nx + nw);
+                let y1 = (*y + *h).max(ny + nh);
+                *x = x0;
+                *y = y0;
+                *w = x1 - x0;
+                *h = y1 - y0;
+            }
+            (_, other) => out.push(other),
+        }
+    }
+    out
+}
+
 // =========================================================================
 // Pixel hit-test
 // =========================================================================
@@ -1596,6 +1648,53 @@ mod tests {
     #[test]
     fn parse_event_short_buffer_is_none() {
         assert_eq!(parse_event(&[1, 2, 3]), None);
+    }
+
+    // -------------------------------------------------------------- coalesce
+
+    #[test]
+    fn coalesce_sums_a_wheel_storm_into_one_scroll() {
+        let batch = vec![XIntent::ScrollBy(60); 50];
+        assert_eq!(coalesce(batch), vec![XIntent::ScrollBy(3000)]);
+    }
+
+    #[test]
+    fn coalesce_preserves_click_order_between_scroll_runs() {
+        let batch = vec![
+            XIntent::ScrollBy(60), XIntent::ScrollBy(60),
+            XIntent::Click { x: 10, y: 20 },
+            XIntent::ScrollBy(-60), XIntent::ScrollBy(-60),
+        ];
+        assert_eq!(
+            coalesce(batch),
+            vec![XIntent::ScrollBy(120), XIntent::Click { x: 10, y: 20 }, XIntent::ScrollBy(-120)]
+        );
+    }
+
+    #[test]
+    fn coalesce_keeps_only_the_last_resize() {
+        let batch = vec![
+            XIntent::Resize { w: 800, h: 600 },
+            XIntent::Resize { w: 900, h: 650 },
+            XIntent::Resize { w: 1024, h: 768 },
+        ];
+        assert_eq!(coalesce(batch), vec![XIntent::Resize { w: 1024, h: 768 }]);
+    }
+
+    #[test]
+    fn coalesce_unions_an_expose_series() {
+        let batch = vec![
+            XIntent::Expose { x: 10, y: 10, w: 20, h: 20 }, // covers (10,10)-(30,30)
+            XIntent::Expose { x: 50, y: 5,  w: 10, h: 40 }, // covers (50,5)-(60,45)
+        ];
+        // Union bounding box: x 10..60, y 5..45 => x=10,y=5,w=50,h=40.
+        assert_eq!(coalesce(batch), vec![XIntent::Expose { x: 10, y: 5, w: 50, h: 40 }]);
+    }
+
+    #[test]
+    fn coalesce_scroll_run_then_quit_passes_quit_through() {
+        let batch = vec![XIntent::ScrollBy(60), XIntent::ScrollBy(60), XIntent::Quit];
+        assert_eq!(coalesce(batch), vec![XIntent::ScrollBy(120), XIntent::Quit]);
     }
 
     // --------------------------------------------------------- hit_test_pixel
