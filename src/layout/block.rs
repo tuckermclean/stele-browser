@@ -2327,7 +2327,12 @@ mod tests {
         // A static box's insets are all Auto (ComputedStyle::default()),
         // which must map to taffy's own all-Auto default inset -- i.e. no
         // offset, golden-safe for every existing (non-positioned) fixture.
-        assert_eq!(base_style(&ComputedStyle::default()).inset, TStyle::default().inset);
+        let default_inset = base_style(&ComputedStyle::default()).inset;
+        let auto = map_lpa(LengthPercentageAuto::Auto);
+        assert_eq!(default_inset.top, auto);
+        assert_eq!(default_inset.right, auto);
+        assert_eq!(default_inset.bottom, auto);
+        assert_eq!(default_inset.left, auto);
 
         // `inset.top` uses the SAME per-edge `LengthPercentageAuto` ->
         // taffy conversion `margin` already uses -- setting both to the
