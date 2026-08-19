@@ -791,6 +791,31 @@ mod tests {
         assert_eq!(styles[span].font_size, 40.0);
     }
 
+    /// packet/text-min-8x8 regression guard: `text::text_render_px`'s
+    /// glyph-RENDER floor (never rasterize below 16px, see that function's
+    /// own doc comment) must NEVER leak into `em`/`%`-box resolution here.
+    /// A sub-16px `font-size` (Acid1's own shape: `html { font: 10px/1 }`,
+    /// then `width`/`height`/`padding` in `em` against that 10px) must
+    /// resolve every box dimension against the RAW 10px font-size, not a
+    /// floored 16px one -- otherwise every `em`-sized box on a small-font
+    /// page would silently blow up (e.g. this test's `20em` width would
+    /// become 320px instead of 200px).
+    #[test]
+    fn width_height_padding_em_resolve_against_the_raw_unfloored_font_size() {
+        let d = dom::parser::parse(r#"<div>x</div>"#);
+        let sheet = parser::parse(
+            "div { font-size: 10px; width: 20em; height: 5em; padding: 2em; margin: 1em; border-width: 0.5em; border-style: solid; }",
+        );
+        let styles = cascade(&d, std::slice::from_ref(&sheet));
+        let div = find(&d, "div");
+        assert_eq!(styles[div].font_size, 10.0, "font_size itself must never be floored");
+        assert_eq!(styles[div].width, Dimension::Px(200.0), "20em * 10px, NOT 20em * 16px (320.0)");
+        assert_eq!(styles[div].height, Dimension::Px(50.0), "5em * 10px, NOT 5em * 16px (80.0)");
+        assert_eq!(styles[div].padding.top, LengthPercentage::Px(20.0), "2em * 10px, NOT 2em * 16px (32.0)");
+        assert_eq!(styles[div].margin.top, LengthPercentageAuto::Px(10.0), "1em * 10px, NOT 1em * 16px (16.0)");
+        assert_eq!(styles[div].border.top.width, 5.0, "0.5em * 10px, NOT 0.5em * 16px (8.0)");
+    }
+
     #[test]
     fn percent_font_size_resolves_against_parent_computed_size() {
         let d = dom::parser::parse(r#"<div><span>x</span></div>"#);

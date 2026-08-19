@@ -399,7 +399,15 @@ fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline
     let top_y = finite_or(rect.origin.y, 0.0);
     let bl = finite_or(baseline, 0.0);
     let baseline_px = to_i32(top_y + bl);
-    let run = TextRun { text: &sanitized, x, baseline: baseline_px, size_px: style.font_size, color: ink };
+    // packet/text-min-8x8: the ACTUAL rasterized glyph size is floored to
+    // font8x8's native 8x8-at-16px resolution (`text::text_render_px`) --
+    // never `style.font_size` verbatim -- so a sub-16px author font-size
+    // never downscales the atlas below its own native pixels. `rect`/
+    // `baseline` themselves already reflect this same floor (see
+    // `layout::inline`'s own metrics call sites), so glyphs painted here
+    // line up with the line box `layout::block::emit` built around them.
+    let size_px = crate::text::text_render_px(style.font_size);
+    let run = TextRun { text: &sanitized, x, baseline: baseline_px, size_px, color: ink };
     surface.draw_text(&run);
 }
 
@@ -780,6 +788,35 @@ mod tests {
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
         assert!(count_black > 0, "expected some glyph ink to be painted");
+    }
+
+    /// packet/text-min-8x8: a sub-16px author `font-size` must still
+    /// rasterize the atlas's native 8x8 glyph (via `text::text_render_px`'s
+    /// floor in `paint_text`), not a downscaled/muddier blob with fewer lit
+    /// pixels than the native size would paint. Same black-ink-pixel-count
+    /// probe `text_fragment_draws_ink_at_the_expected_position` uses above,
+    /// compared between an 8px-declared style and a 16px (native) one.
+    #[test]
+    fn sub_16px_font_size_still_paints_native_8x8_ink_not_a_downscaled_blob() {
+        let paint_a = |font_size: f32| {
+            let mut s = MemSurface::new(20, 20, Color::WHITE);
+            let style = ComputedStyle { color: Color::BLACK, font_size, ..ComputedStyle::default() };
+            let fragments = vec![Fragment {
+                rect: rect(4.0, 0.0, 8.0, 16.0),
+                kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style },
+                interactive: None,
+            }];
+            paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+            s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count()
+        };
+        let black_at_8 = paint_a(8.0);
+        let black_at_16 = paint_a(16.0);
+        assert_eq!(
+            black_at_8, black_at_16,
+            "an 8px-declared font-size must paint the SAME lit-pixel count as 16px (native) -- the floor \
+             must have kept the glyph at its native 8x8 resolution instead of downscaling it to ~4x4"
+        );
+        assert!(black_at_16 > 0, "sanity: the native render must actually paint some ink");
     }
 
     #[test]
