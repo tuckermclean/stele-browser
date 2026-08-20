@@ -3,6 +3,40 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Layout — CSS stacking / z-index (Acid2 Packet 2)
+
+### D56 — z-index refines P1's `emit` paint partition (not a separate stacking-context tree)
+Acid2's face layers overlap and must composite in CSS 2.1 order; `z-index` was
+absent. **Options:** (a) build a real stacking-context tree (collect contexts,
+sort, paint recursively as a separate pass); (b) refine P1's existing `emit`
+child-partition into the full CSS 2.1 Appendix-E order, bucketing/sorting
+POSITIONED siblings by z-index at each container level. **Choice: (b)** — a new
+`ZIndex { Auto, Layer(i32) }` computed field (parsed/cascaded like `position`,
+non-inherited, total) plus a five-pass emit order per container:
+`[own box][negative-z, most-negative first][static in-flow][z-auto/0, source
+order][positive-z, least-positive first]`, positioned children stable-sorted by
+z-index (`ZIndex::layer()`, `Auto`==0). **Why:** `emit` already emits each
+child's whole subtree contiguously (atomic) and recurses, so per-container
+z-index ordering of positioned siblings *is* a taffy-native approximation of
+nested stacking contexts — no second tree, no new dependency, ~+? KB. z-index
+affects only positioned elements (a static box's z-index has no effect). **Golden
+safety:** with no `z-index` declared every child is layer 0 → the negative/
+positive passes are empty and passes 3+4 reproduce P1's `[static][positioned]`
+byte-for-byte, so no existing golden moves. **Verified** (pixel-measured
+micro-fixtures): `z-order` (z:2 paints over z:1 despite source order), `z-tie`
+(equal z:5 → tree-order tie-break, stable sort), `z-negative` (z:-1 paints over
+the container background but behind in-flow text — Appendix-E step 2 < 3).
+**Simplification / revisit triggers (do not build speculatively):**
+  - `z-index: auto` ≡ `0` for sibling paint order; the distinction that `Layer(n)`
+    establishes a stacking context while `Auto` does not is not modeled. The flat
+    per-container model orders SIBLING positioned boxes (Acid2's z-index×2
+    pattern, verified). If a later fixture needs a `z-index: auto` element's
+    positioned descendant to escape into its grandparent's stacking context
+    (skip-level context), record a FINDING and hoist that subtree to its true
+    stacking parent — only then.
+  - CSS3 stacking-context triggers (`opacity`/`transform`/`filter`) are out of
+    scope — Acid2 is CSS 2.1; only positioned + `z-index` establish contexts here.
+
 ## Layout — CSS positioning (Acid2 Packet 1)
 
 ### D55 — positioning rides taffy's native `Position`/`inset`; bespoke CB/sizing correction only when Acid2 exposes it

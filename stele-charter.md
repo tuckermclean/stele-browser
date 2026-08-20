@@ -72,7 +72,8 @@ converge, not grow.
       reimplemented (PR #69); box-model completion — box-sizing,
       per-side borders, margin collapsing; CSS positioning — position
       (static/relative/absolute/fixed) + top/right/bottom/left offsets,
-      on taffy's native Position/inset (Acid2 Packet 1). Still
+      on taffy's native Position/inset (Acid2 Packet 1); z-index +
+      CSS 2.1 Appendix-E stacking/paint order (Acid2 Packet 2). Still
       candidates: <details>/
       <summary> interactive toggle (rendered as blocks today), MathML,
       static SVG. The dialect ships as a versioned one-page document:
