@@ -1493,7 +1493,7 @@ mod tests {
     fn build_page(html: &str, cols: usize, url: &str) -> Page {
         let dom = dom_mod::parser::parse(html);
         let styles = cascade::cascade(&dom, &[]);
-        let pseudo = cascade::cascade_pseudo(&dom, &[]);
+        let pseudo = cascade::cascade_pseudo(&dom, &[], &styles);
         let root =
             build_box_tree_with_pseudo(&dom, &styles, &Default::default(), &pseudo).expect("non-empty fixture");
         let viewport = Size { w: cols as f32 * 8.0, h: 100_000.0 };

@@ -409,7 +409,7 @@ fn render_single_document(dom: &Dom, base_url: &Url, cols: usize, scheme: ColorS
     let viewport_width = cols as f32 * CELL_W;
     let author_sheets = crate::stylesheets::collect_all_author_sheets(dom, base_url, viewport_width, scheme);
     let styles = cascade::cascade(dom, &author_sheets);
-    let pseudo = crate::style::cascade::cascade_pseudo(dom, &author_sheets);
+    let pseudo = crate::style::cascade::cascade_pseudo(dom, &author_sheets, &styles);
     // Frames render to a tty text grid, never pixels — no fetch/decode work
     // for images here (mirrors main.rs's own `dump_text` scope), so an
     // empty images map is always correct.

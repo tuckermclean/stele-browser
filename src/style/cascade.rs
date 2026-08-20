@@ -246,20 +246,21 @@ fn fold_pseudo_declarations(
 }
 
 /// Compute `::before`/`::after` styles for every element in `dom` (Acid2 P3).
-/// Reuses `cascade` for the element styles (the inheritance parent each
-/// pseudo-element's declarations resolve against), then walks the DOM a
-/// second time -- an explicit-stack walk mirroring `visit`'s ancestor
-/// management -- resolving each element's before/after pseudo style against
-/// `elem_styles[id]` as parent and `Env::default()` (pseudo rules don't
-/// thread the inherited custom-property environment; a `var()` inside one
-/// simply falls back to its initial value, an acceptable simplification for
-/// Acid2). A pseudo style is kept only when `content.generates_box()`.
-pub fn cascade_pseudo(dom: &Dom, author_sheets: &[Stylesheet]) -> Vec<PseudoStyles> {
+/// Takes the caller's already-computed `elem_styles` (the inheritance parent
+/// each pseudo-element's declarations resolve against -- every real caller
+/// has already run `cascade(dom, author_sheets)` for its own purposes, so
+/// this walk no longer reruns it) and walks the DOM a second time -- an
+/// explicit-stack walk mirroring `visit`'s ancestor management -- resolving
+/// each element's before/after pseudo style against `elem_styles[id]` as
+/// parent and `Env::default()` (pseudo rules don't thread the inherited
+/// custom-property environment; a `var()` inside one simply falls back to
+/// its initial value, an acceptable simplification for Acid2). A pseudo
+/// style is kept only when `content.generates_box()`.
+pub fn cascade_pseudo(dom: &Dom, author_sheets: &[Stylesheet], elem_styles: &[ComputedStyle]) -> Vec<PseudoStyles> {
     let mut out = vec![PseudoStyles::default(); dom.len()];
     if dom.is_empty() {
         return out;
     }
-    let elem_styles = cascade(dom, author_sheets); // inheritance parents (also gives the exclusion for free)
     let ua = ua_stylesheet();
 
     // Explicit-stack walk mirroring `visit`'s ancestor management.
@@ -1592,7 +1593,8 @@ mod tests {
         let sheet = crate::style::parser::parse(
             r#"p::before { content: "B"; color: red } p::after { content: none }"#,
         );
-        let pseudo = cascade_pseudo(&dom, std::slice::from_ref(&sheet));
+        let styles = cascade(&dom, std::slice::from_ref(&sheet));
+        let pseudo = cascade_pseudo(&dom, std::slice::from_ref(&sheet), &styles);
         let p = find(&dom, "p");
         let before = pseudo[p].before.as_ref().expect("::before generates (content:\"B\")");
         assert_eq!(before.content, Content::Str("B".into()));
@@ -1601,7 +1603,8 @@ mod tests {
 
         // element with no pseudo rule => neither
         let dom2 = crate::dom::parser::parse("<span>x</span>");
-        let pseudo2 = cascade_pseudo(&dom2, &[]);
+        let styles2 = cascade(&dom2, &[]);
+        let pseudo2 = cascade_pseudo(&dom2, &[], &styles2);
         let s = find(&dom2, "span");
         assert!(pseudo2[s].before.is_none() && pseudo2[s].after.is_none());
     }
@@ -1611,7 +1614,8 @@ mod tests {
         use crate::style::computed::Content;
         let dom = crate::dom::parser::parse("<div>d</div>");
         let sheet = crate::style::parser::parse(r#"div::before { content: "" }"#);
-        let pseudo = cascade_pseudo(&dom, std::slice::from_ref(&sheet));
+        let styles = cascade(&dom, std::slice::from_ref(&sheet));
+        let pseudo = cascade_pseudo(&dom, std::slice::from_ref(&sheet), &styles);
         let d = find(&dom, "div");
         let b = pseudo[d].before.as_ref().expect("content:\"\" DOES generate a box");
         assert_eq!(b.content, Content::Str(String::new()));

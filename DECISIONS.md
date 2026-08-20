@@ -34,7 +34,11 @@ box-tree seam is exactly where a generated box must live to lay out/paint like a
     generated boxes have none). Add a `(NodeId, PseudoElement)`-keyed fetch/decode path only if Acid2's
     generated content uses `url()` (verify at P7). Acid2/httpforever use strings/empty boxes.
   - Only `::before`/`::after` (not `::first-line`/`::first-letter`/`::marker`); no `counter()`/`attr()`/quotes.
-  - A `<ul>`/`<ol>` container's OWN `::before`/`::after` is not synthesized (list items are); not exercised by Acid2.
+  - Generated content synthesizes only for ordinary block/inline container elements. Elements built by a
+    specialized box-tree arm — `<a href>`, `<form>`, `<details>`/`<summary>`, `<ul>`/`<ol>` containers, and
+    replaced elements (`<img>`, form controls) — do not synthesize their OWN `::before`/`::after` yet (their
+    normal descendants still do). Not exercised by Acid2 (its generated content is on plain `div`s); broaden
+    per-arm only if a fixture needs it.
 
 ## Layout — CSS stacking / z-index (Acid2 Packet 2)
 

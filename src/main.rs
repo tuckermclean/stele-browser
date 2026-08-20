@@ -414,7 +414,7 @@ fn build_fragments_for_stats(source: &str, viewport_width_px: f32) -> Vec<layout
     let author_sheets =
         stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, viewport_width_px, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets, &styles);
     let Some(root) = build_box_tree_with_pseudo(&dom_tree, &styles, &HashMap::new(), &pseudo) else { return Vec::new() };
     let viewport = Size { w: viewport_width_px, h: HEADLESS_VIEWPORT_HEIGHT };
     layout::layout(&root, viewport)
@@ -548,7 +548,7 @@ fn dump_text_opts(source: &str, cols: usize, scheme: style::ColorScheme, stamp: 
     let viewport_width = cols as f32 * 8.0;
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, viewport_width, scheme);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets, &styles);
     // A tty dump never paints pixels, so skip the image fetch+decode
     // pre-pass entirely (an empty map — every <img> stays its `[alt]`-style
     // placeholder) rather than paying needless network/decode cost.
@@ -639,7 +639,7 @@ fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, s
     // through from the CLI the same way `dump_text_opts` already does).
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, scheme);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets, &styles);
     // Pixels matter on this path: fetch+decode every <img src> up front
     // (bounded by images::MAX_IMAGES/MAX_TOTAL_IMAGE_BYTES) so
     // build_box_tree can thread real pixel data into each Replaced box.
@@ -777,7 +777,7 @@ fn audit_contrast_opts(source: &str, scheme: style::ColorScheme, stamp: bool) ->
 
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, DEFAULT_PNG_WIDTH as f32, scheme);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets, &styles);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree_with_pseudo(&dom_tree, &styles, &images, &pseudo) else {
         return Ok(Vec::new());
@@ -861,7 +861,7 @@ fn render_fb_surface_opts(source: &str, width: u32, no_bg_images: bool) -> Resul
     // it through here too is a reasonable follow-up, not this packet's job.
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, &response.final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets, &styles);
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree_with_pseudo(&dom_tree, &styles, &images, &pseudo) else {
         return Err("empty document (nothing to render)".to_string());
@@ -1016,7 +1016,7 @@ fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Res
     // t1b-color-scheme packet alike.
     let author_sheets = stele::stylesheets::collect_all_author_sheets(dom_tree, final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(dom_tree, &author_sheets, &styles);
     let images = stele::images::collect_images(dom_tree, final_url);
     let Some(root) = build_box_tree_with_pseudo(dom_tree, &styles, &images, &pseudo) else {
         return Err("empty document (nothing to render)".to_string());
@@ -1703,7 +1703,7 @@ fn build_page_from_dom(dom_tree: dom::Dom, final_url: &Url, cols: usize) -> brow
     // paths only).
     let author_sheets = stele::stylesheets::collect_all_author_sheets(&dom_tree, final_url, viewport_width, style::ColorScheme::Light);
     let styles = cascade::cascade(&dom_tree, &author_sheets);
-    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets);
+    let pseudo = cascade::cascade_pseudo(&dom_tree, &author_sheets, &styles);
     let fragments = match build_box_tree_with_pseudo(&dom_tree, &styles, &HashMap::new(), &pseudo) {
         Some(root) => layout::layout(&root, Size { w: viewport_width, h: HEADLESS_VIEWPORT_HEIGHT }),
         None => Vec::new(),

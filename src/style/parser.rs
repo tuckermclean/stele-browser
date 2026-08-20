@@ -354,6 +354,14 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
             }
             Token::LBrace | Token::RBrace | Token::Semicolon | Token::Comma => break,
             Token::Ident(name) => {
+                // A pseudo-element (`::before`/`::after`) must be the last
+                // simple selector — anything else after it (e.g. the `span`
+                // in `p::before span`) makes the whole selector unsupported
+                // rather than silently attaching the pseudo-element to the
+                // wrong compound.
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 if pending_descendant {
                     flush!();
                     pending_descendant = false;
@@ -363,6 +371,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Star => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 if pending_descendant {
                     flush!();
                     pending_descendant = false;
@@ -372,6 +383,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Dot => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 *pos += 1;
                 if let Some(Token::Ident(name)) = tokens.get(*pos) {
                     if pending_descendant {
@@ -386,6 +400,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 }
             }
             Token::Hash(id) => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 if pending_descendant {
                     flush!();
                     pending_descendant = false;
@@ -395,6 +412,14 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Colon => {
+                // A pseudo-element must be the last simple selector; a
+                // further `:pseudo`/`::pseudo` after one already seen (e.g.
+                // `p::before:hover`) is unsupported. (The colon that sets
+                // `pseudo_element` itself hits this arm too, but at that
+                // point `pseudo_element` is still `None`, so it's unaffected.)
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 *pos += 1;
                 let double = if tokens.get(*pos) == Some(&Token::Colon) {
                     *pos += 1;
@@ -460,6 +485,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Delim('[') => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 *pos += 1;
                 if let Some((attr_name, attr_value, next)) = parse_attr_selector(tokens, *pos) {
                     // The curated exact-match attribute-selector form
@@ -987,6 +1015,16 @@ mod tests {
         // unknown pseudo-element still dropped
         let sheet = parse("p::boguspseudo { color: red }");
         assert!(!sheet.rules[0].selector.supported);
+    }
+
+    #[test]
+    fn pseudo_element_must_be_last_simple_selector() {
+        // `p::before span` is invalid — a pseudo-element must be the subject's last bit.
+        let sheet = parse("p::before span { color: red }");
+        assert!(!sheet.rules[0].selector.supported, "pseudo-element followed by more selector => dropped");
+        // sanity: the valid form still parses supported
+        let ok = parse("p::before { color: red }");
+        assert!(ok.rules[0].selector.supported);
     }
 
     // ---- packet T1a: attribute selectors ([attr=value]) -----------------
