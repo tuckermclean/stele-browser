@@ -238,6 +238,19 @@ if [ -f "$FIXTURES_DIR/basic.html" ]; then
   fi
 fi
 
+# Fixed-viewport clip demonstrator: a tall red+blue document clamped to a
+# 120px viewport with html{overflow:hidden} — only the top ~120px (red) shows.
+if [ -f "$FIXTURES_DIR/viewport-clip.html" ]; then
+  renders_total=$((renders_total + 1))
+  if "$BIN" --headless --dump-png "$FIXTURES_DIR/viewport-clip.html" "$OUTDIR/viewport-clip.png" --viewport-height 120 2>/dev/null \
+      && [ -s "$OUTDIR/viewport-clip.png" ]; then
+    renders_ok=$((renders_ok + 1))
+  else
+    echo "render-gallery: warning: viewport-clip render failed" >&2
+    failures=$((failures + 1))
+  fi
+fi
+
 # Acid2 in a FIXED 800x600 viewport (--viewport-height clamps the root so
 # html{overflow:hidden} clips the positioned face into a window instead of the
 # default 800x3960 content-height sprawl) — for the P7 smiley measurement.
