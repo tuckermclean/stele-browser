@@ -120,9 +120,22 @@ pub fn paint_at(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &H
         // background`'s geometric analysis is unaffected either way, and
         // reusing `fragment.rect` there (rather than a shifted copy) is
         // simply less to thread through.
+        // Acid2 scroll-to-fragment packet, Task 4: a `position:fixed`
+        // fragment's `rect` (and, just below, its `clip`) does NOT scroll —
+        // that's the whole point of `is_fixed` (`layout::block::emit`,
+        // Task 3, already reparented it onto the viewport, unshifted). Both
+        // gates share the SAME `!fragment.is_fixed` condition deliberately:
+        // gating only `rect` and leaving `clip`'s shift unconditional would
+        // silently clip fixed content away past a small `y_offset` (the
+        // fixed fragment's OWN `clip`, when present, already holds the
+        // UNSHIFTED viewport rect from Task 3 — shifting it here the same
+        // way an ordinary fragment's clip shifts would paint-clip the fixed
+        // content against a window that moved out from under it).
         let rect = {
             let mut r = fragment.rect;
-            r.origin.y += y_offset;
+            if !fragment.is_fixed {
+                r.origin.y += y_offset;
+            }
             r
         };
         // Acid2 Packet 5, Task 2: `overflow:hidden` paint clipping. Same
@@ -134,7 +147,9 @@ pub fn paint_at(surface: &mut dyn Surface, fragments: &[Fragment], bg_images: &H
         // golden's byte-identical output.
         surface.set_clip(fragment.clip.map(|c| {
             let mut c = c;
-            c.origin.y += y_offset;
+            if !fragment.is_fixed {
+                c.origin.y += y_offset;
+            }
             to_pixel_rect(&c)
         }));
         match &fragment.kind {
@@ -1323,5 +1338,77 @@ mod tests {
         paint(&mut s, &fragments, &bg_images, Color::WHITE);
         let count_white_ink = s.bytes().chunks(4).filter(|p| p == &[255, 255, 255, 255]).count();
         assert!(count_white_ink > 0, "white text over an (unsampled) background-image box must NOT be repaired to black");
+    }
+
+    // ---- Acid2 scroll-to-fragment packet, Task 4: paint_at is is_fixed-aware ----
+
+    /// Two same-`rect.origin.y` boxes, one `is_fixed`, one not, painted at a
+    /// nonzero `y_offset`: the ordinary one must move by `y_offset`, the
+    /// fixed one must not move at all -- the core scroll-vs-anchor contract
+    /// `paint_at` exists to implement (design §4). Red against pre-Task-4
+    /// `paint_at` (both would land at the SAME shifted `y` today).
+    #[test]
+    fn paint_at_scrolls_ordinary_fragments_but_not_fixed_ones() {
+        let mut s = MemSurface::new(20, 200, Color::WHITE);
+        let ordinary_style = box_style(Color::rgb(200, 0, 0), BorderSide::default());
+        let fixed_style = box_style(Color::rgb(0, 0, 200), BorderSide::default());
+        let fragments = vec![
+            Fragment {
+                rect: rect(0.0, 100.0, 10.0, 10.0),
+                kind: FragmentKind::Box { style: ordinary_style },
+                interactive: None,
+                clip: None,
+                id: None,
+                is_fixed: false,
+            },
+            Fragment {
+                rect: rect(10.0, 100.0, 10.0, 10.0),
+                kind: FragmentKind::Box { style: fixed_style },
+                interactive: None,
+                clip: None,
+                id: None,
+                is_fixed: true,
+            },
+        ];
+        paint_at(&mut s, &fragments, &HashMap::new(), Color::WHITE, -50.0);
+        // Ordinary fragment: painted at y = 100 - 50 = 50.
+        assert_eq!(px(&s, 4, 55), Color::rgb(200, 0, 0), "the non-fixed fragment's pixels must land at the SHIFTED y");
+        assert_eq!(px(&s, 4, 105), Color::WHITE, "the non-fixed fragment must NOT still be visible at its unshifted y");
+        // Fixed fragment: still painted at its own nominal y = 100, unmoved.
+        assert_eq!(px(&s, 14, 105), Color::rgb(0, 0, 200), "the fixed fragment's pixels must stay at its UNSHIFTED y");
+        assert_eq!(px(&s, 14, 55), Color::WHITE, "the fixed fragment must not have moved to the shifted y either");
+    }
+
+    /// The subtle half of the fix (design §4, explicitly NOT folded into the
+    /// test above): a fixed fragment's OWN `clip` (post-Task-3, an unshifted
+    /// viewport rect) must ALSO stay unshifted when painting at a nonzero
+    /// `y_offset` -- gating only `rect`'s shift and leaving `clip`'s shift
+    /// unconditional would silently clip the (deliberately unmoved) fixed
+    /// content away past a small scroll, since the clip rect would then sit
+    /// at the WRONG place relative to the fragment it's supposed to bound.
+    #[test]
+    fn paint_at_does_not_shift_a_fixed_fragments_own_clip() {
+        let mut s = MemSurface::new(20, 20, Color::WHITE);
+        let style = box_style(Color::rgb(0, 200, 0), BorderSide::default());
+        // The fragment sits at y=15 (near the bottom of a 20px window) with
+        // an UNSHIFTED viewport clip of (0,0)-(20,20) -- entirely visible as
+        // long as the clip stays put. A y_offset of -50 would, if the clip
+        // were (wrongly) shifted the same way, move the clip window to
+        // (0,-50)-(20,-30) -- entirely off-surface, clipping the fragment
+        // away completely.
+        let fragments = vec![Fragment {
+            rect: rect(0.0, 15.0, 5.0, 5.0),
+            kind: FragmentKind::Box { style },
+            interactive: None,
+            clip: Some(rect(0.0, 0.0, 20.0, 20.0)),
+            id: None,
+            is_fixed: true,
+        }];
+        paint_at(&mut s, &fragments, &HashMap::new(), Color::WHITE, -50.0);
+        assert_eq!(
+            px(&s, 2, 17),
+            Color::rgb(0, 200, 0),
+            "a fixed fragment's own (unshifted) clip must keep it visible even at a nonzero y_offset"
+        );
     }
 }
