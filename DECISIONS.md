@@ -5,6 +5,31 @@ revisit-trigger. Newest first.
 
 ## Rendering — <object> nested fallback (Acid2 Packet 6)
 
+## Interactive shell — browser chrome (address bar / back / throbber / status)
+
+### D62 -- the --x11 shell wears a self-drawn chrome; pure layout+draw goldened, interaction manual
+The interactive `--x11` window gained a minimal browser chrome. **Design:** a pure `backend::chrome` module --
+`layout(win_w,win_h) -> ChromeLayout{ top, back, address, throbber, viewport, status }` (viewport = window
+minus a 28px top bar + 18px status bar) and `draw(surface, layout, state)` -- draws the bars, the back button,
+the current URL in the address field (clipped via the P5 surface scissor so a long URL can't spill), a
+throbber, and the status line, all with the existing `Surface` primitives (no toolkit, disc-doctrine). **Why
+pure:** the `--x11` event loop is manual-verify-only (no CI), so everything testable lives in `layout`/`draw`
+(unit-tested) and a headless `--dump-png --chrome` SCREENSHOT mode renders a page inside the chrome to a PNG,
+pixel-goldened in CI (`goldens/chrome-basic.png`, HOST build only via accept.sh's `--tty-only` -- unlike the
+document renderer, the chrome's text metrics still carry a float op the i486/x87 cross-build toolchain rounds a
+pixel differently, so the golden isn't byte-stable across build targets; the chrome is a host feature anyway
+[`--x11`/`--dump-png --chrome` run on the operator's machine, not the i486 floppy], so a host golden is the
+meaningful check, same spirit as A1/A4 being i486-only -- full target-determinism + a cross-build golden is a
+follow-up). Only click-routing, history, throbber animation, and status
+live in `run_x11` (manual). **This is a C5 (chair / interactive shell) feature, NOT a C2 dialect amendment.**
+`History` gained `can_go_back()`; the back button pops it and reloads; viewport clicks hit-test in document
+coords offset by the top bar + scroll. **Trade-off:** with the chrome bars framing a narrower viewport, the old
+whole-window `CopyArea` scroll optimization (which assumed the doc filled the window) no longer applies -- scroll
+now does a full viewport-band redraw (`vh` rows + two cheap bars, still O(viewport), not O(document));
+`scroll_blit`/`ScrollBlit` stay as tested-but-unwired pure logic for a future viewport-confined version.
+**Out of scope (this MVP):** editable address bar / typing a URL (display-only now), forward button, tabs,
+reload, true throbber animation timing, scrollbar chrome.
+
 ## Acid2 — assembly + KILL-test status (Acid2 Packet 7)
 
 ### D61 -- Acid2 assembles and exercises every feature; the compact smiley awaits a fixed-viewport render

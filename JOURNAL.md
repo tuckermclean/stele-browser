@@ -1530,3 +1530,20 @@ Append-only running log. Newest at the bottom.
 - **The dialect is done.** "What Stele Speaks" now covers every CSS 2.1 mechanism Acid2 exercises. Stele grew
   from an 800x3976 flat flow (pre-P1) to a document engine that places, stacks, generates, decodes, clamps,
   clips, and falls back -- the polite web's native constituency, rendered from scratch inside the floppy.
+
+## 2026-08-20 -- Browser chrome for the interactive shell (address bar, back, throbber, status)
+
+- **Landed** a minimal self-drawn browser chrome on the `--x11` window: a top bar with a back button, an
+  address bar showing the current URL, and a throbber; the document in the viewport; a status bar at the
+  bottom -- all drawn by the engine into its own `Surface` (no toolkit). A pure `backend::chrome` module
+  (`layout` + `draw`, unit-tested) plus a headless `--dump-png --chrome` screenshot mode pixel-goldened in CI
+  (`goldens/chrome-basic.png` -- a browser screenshot of `basic.html`: back button, the `file://` URL in the
+  address field, throbber, document, and a "Done" status bar). `History::can_go_back()` + back-button clicks +
+  viewport-offset link hit-testing + throbber/status wired into `run_x11` (manual-verified, as that loop
+  always has been). See DECISIONS D62.
+- **Trade-off:** scroll now does a full viewport-band redraw (still O(viewport)) rather than the old
+  whole-window `CopyArea` optimization, which assumed the document filled the window -- no longer true with the
+  bars framing a narrower viewport. The viewport-confined `CopyArea` version is a documented follow-up.
+- **Size:** the i486 binary is **1,287,324 bytes** (`stele-i486`), **+4,096 B (+0.32 %)** vs P7's 1,283,228 --
+  **87.30 % of the 1.44 MB floppy** (187,236 B headroom).
+- The rock now looks like a browser.
