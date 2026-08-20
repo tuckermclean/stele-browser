@@ -222,6 +222,13 @@ if [ -f "$FIXTURES_DIR/httpforever.html" ]; then
   render_one "$FIXTURES_DIR/httpforever.html" "httpforever.dark" --color-scheme dark
 fi
 
+# Browser-chrome screenshot: fixtures/basic.html rendered INSIDE the chrome
+# (address bar + back button + throbber + status bar) via --chrome, so the
+# chrome-basic.png golden lands in the renders artifact for blessing.
+if [ -f "$FIXTURES_DIR/basic.html" ]; then
+  render_one "$FIXTURES_DIR/basic.html" "chrome-basic" --chrome
+fi
+
 cat >> "$INDEX" <<HTML
 </div>
 </body>
