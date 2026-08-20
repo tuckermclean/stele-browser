@@ -1029,10 +1029,18 @@ fn parse_background_color_component(tokens: &[Token]) -> Option<Color> {
 /// `Dot`, `Delim('/')`, ...), so reconstructing the original text means
 /// concatenating each token's own text back together. Covers exactly the
 /// token kinds a bare, unescaped URL can plausibly tokenize into; anything
-/// else (`Whitespace`, a nested `Function`, a brace/semicolon, ...) returns
-/// `None` and the caller treats the whole `url(...)` as malformed (charter
-/// C2: fails to parse, never guessed at) rather than silently dropping a
-/// token.
+/// else (`Whitespace`, a nested `Function`, a brace, ...) returns `None` and
+/// the caller treats the whole `url(...)` as malformed (charter C2: fails to
+/// parse, never guessed at) rather than silently dropping a token.
+///
+/// `Token::Semicolon` IS accepted (Acid2 eyes, Milestone B pt.1): a raw `;`
+/// is ordinary, legal `data:` URI content — the media-type/`;base64` flag
+/// separator (RFC 2397) — and the SAME general-purpose tokenizer that lexes
+/// the rest of the stylesheet lexes it here too (see this file's
+/// `parse_declaration_block`'s own doc comment on the paren/function-depth
+/// tracking this pairs with: that fix stops the declaration-boundary scan
+/// from truncating at this `;`; this one makes sure the reconstructed URL
+/// text keeps the `;` instead of failing closed on it).
 fn unquoted_url_token_text(t: &Token) -> Option<String> {
     Some(match t {
         Token::Ident(s) => s.clone(),
@@ -1041,6 +1049,7 @@ fn unquoted_url_token_text(t: &Token) -> Option<String> {
         Token::Dimension(n, unit) => format!("{n}{unit}"),
         Token::Percentage(n) => format!("{n}%"),
         Token::Colon => ":".to_string(),
+        Token::Semicolon => ";".to_string(),
         Token::Comma => ",".to_string(),
         Token::Dot => ".".to_string(),
         Token::Star => "*".to_string(),
@@ -2863,6 +2872,21 @@ mod tests {
         let mut d = Declarations::default();
         assert!(apply_property("background-image", &toks("url(images/tile.png)"), &mut d));
         assert_eq!(d.background_image.as_deref(), Some("images/tile.png"));
+    }
+
+    #[test]
+    fn background_image_parses_an_unquoted_data_url_with_an_internal_semicolon() {
+        // Acid2 eyes (Milestone B pt.1), companion to the depth-tracking fix
+        // in `style::parser::parse_declaration_block`/`skip_to_decl_boundary`:
+        // once the declaration-boundary scan stops truncating at a `;`
+        // inside `url(...)`, `parse_url_function` still has to actually
+        // RECONSTRUCT that `;` as part of the URL text -- `unquoted_url_
+        // token_text` must treat `Token::Semicolon` as ordinary literal URL
+        // content (like `Token::Colon`/`Token::Comma` right next to it),
+        // not as one of the "malformed" token kinds it fails closed on.
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("url(data:image/png;base64,AAAA)"), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some("data:image/png;base64,AAAA"));
     }
 
     #[test]
