@@ -3385,7 +3385,16 @@ mod tests {
     /// filesystem path directly). `body { margin: 0 }` keeps the geometry
     /// exact (no UA 8px margin to account for).
     fn scroll_to_fixture_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("stele-scroll-to-{}", std::process::id()));
+        // Unique dir per call. Three tests share this helper and cargo runs
+        // them in parallel; a per-process shared path let one test's
+        // truncate+rewrite (`fs::write`) race another test's two reads — the
+        // second read seeing a half-written fixture, rendering a different
+        // (shorter) PNG and failing an `assert_eq`. An atomic counter gives
+        // each caller its own isolated fixture directory.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("stele-scroll-to-{}-{}", std::process::id(), seq));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::write(
             dir.join("scroll-to.html"),
