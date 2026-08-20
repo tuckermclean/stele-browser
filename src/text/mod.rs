@@ -18,6 +18,10 @@
 
 pub mod bitmap;
 pub(crate) mod glyphs;
+pub(crate) mod terminus_glyphs;
+#[cfg(test)]
+#[path = "terminus_glyphs_tests.rs"]
+mod terminus_glyphs_tests;
 pub mod translit;
 
 pub use bitmap::BitmapFont;
