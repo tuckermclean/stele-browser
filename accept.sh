@@ -1348,6 +1348,38 @@ else
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_CHROME_BASIC") actual=$(wc -c < /tmp/stele_chromebasic.png)"
   fi
   fi  # end A5u host-only (TTY_ONLY) guard
+
+  # ---------------------------------------------------------------------
+  # A5v -- fixed-viewport render mode: `--dump-png --viewport-height N`
+  # clamps the document root to a fixed window and clips `overflow:hidden`
+  # content into it (DECISIONS D63), instead of the default content-height
+  # sprawl. fixtures/viewport-clip.html is a tall red+blue `html{overflow:
+  # hidden}` doc; rendered at --viewport-height 120 it must clip to an
+  # 800x120 canvas (red box clipped to 200x120, blue box clipped away
+  # entirely). NOTE: --viewport-height must come AFTER <src> <out> -- the
+  # --dump-png arm mis-grabs a flag placed in the src slot. Unlike A5u
+  # (browser chrome, host-only), this exercises the document renderer, not
+  # the chrome, so it IS cross-build stable and runs in both host and i486
+  # accept, same as A5k/A5b.
+  # ---------------------------------------------------------------------
+  FIXTURE_VIEWPORT_CLIP="fixtures/viewport-clip.html"
+  GOLDEN_PNG_VIEWPORT_CLIP="goldens/viewport-clip.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5v: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_VIEWPORT_CLIP" /tmp/stele_vpclip.png --viewport-height 120 2>/tmp/stele_vpclip.err; then
+    bad "A5v: stele --headless --dump-png crashed on $FIXTURE_VIEWPORT_CLIP"
+    sed 's/^/    /' /tmp/stele_vpclip.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_vpclip.png "$GOLDEN_PNG_VIEWPORT_CLIP"
+    pass "A5v: blessed viewport-clip PNG golden -> $GOLDEN_PNG_VIEWPORT_CLIP (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_VIEWPORT_CLIP" ]; then
+    bad "A5v: no golden at $GOLDEN_PNG_VIEWPORT_CLIP to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_VIEWPORT_CLIP" /tmp/stele_vpclip.png; then
+    pass "A5v: viewport-clipped PNG dump of $FIXTURE_VIEWPORT_CLIP matches golden"
+  else
+    bad "A5v: viewport-clipped PNG dump of $FIXTURE_VIEWPORT_CLIP differs from $GOLDEN_PNG_VIEWPORT_CLIP"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_VIEWPORT_CLIP") actual=$(wc -c < /tmp/stele_vpclip.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

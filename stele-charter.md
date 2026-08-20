@@ -139,6 +139,10 @@ converge, not grow.
       throbber, and a status bar -- framing the document viewport;
       drawn by the engine into its own Surface, no toolkit (DECISIONS
       D62).
+      A `--viewport-height` render mode lays the document out in a
+      fixed window (root clamped, `overflow:hidden` clipping) for the
+      windowed/interactive view, distinct from the default full-page
+      content-height render (DECISIONS D63).
   C6. Plain-file state: bookmarks a text file, history a log, cache a
       dir of hash-named files, cookie jar Netscape-format text. grep
       is the extension API.

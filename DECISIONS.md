@@ -5,6 +5,28 @@ revisit-trigger. Newest first.
 
 ## Rendering — <object> nested fallback (Acid2 Packet 6)
 
+## Layout — fixed-viewport render mode
+
+### D63 -- opt-in fixed-viewport render (clamp root height; overflow:hidden clips) — and why it alone doesn't compose the Acid2 smiley
+The headless renderer lays the document root out at CONTENT height by default (`layout`), which is right for a
+full-page screenshot but wrong for a windowed render: a page with `html{overflow:hidden}` positioning content
+into a fixed window (e.g. Acid2) sprawls instead of clipping. **Added** an OPT-IN `layout_viewport` (block.rs:
+clamp the root's taffy height to the viewport, symmetric to the existing width clamp; P5's `overflow:hidden`
+emit-clip then clips descendants to the window) + a `--viewport-height N` CLI flag on `--dump-png` (sizes the
+PNG canvas to N too). Default `layout`/`--dump-png` is UNCHANGED (byte-identical — every existing golden
+untouched). Verified by `viewport-clip.png` (a 400px red + 400px blue doc, `html{overflow:hidden}`, rendered
+at `--viewport-height 120` → an 800x120 PNG: red clipped to 200x120, blue entirely clipped away).
+**Honest Acid2 finding (updates D61):** rendering `acid2.html` at `--viewport-height 600` DOES clamp+clip to
+800x600 — but the face still does NOT compose: the clipped viewport shows ONLY Acid2's intro text
+("Standards compliant? ..."); the red/yellow/green face palette is absent because Acid2's absolutely-
+positioned face elements resolve BELOW the 600px viewport in our engine (they get clipped away) rather than
+overlaying the top. So the fixed-viewport clamp is necessary but NOT sufficient for the smiley — the remaining
+gap is POSITIONING FIDELITY (correct containing-block resolution for Acid2's face structure + the D55
+Finding-A fixed-anchoring deferral), an Acid2-specific layout layer beyond this render-mode packet. Still no
+false smiley golden, no false pass (charter s4). The fixed-viewport mode ships as the genuine, reusable
+feature it is (a windowed render — also what the browser chrome's viewport wants); the smiley waits on
+positioning fidelity.
+
 ## Interactive shell — browser chrome (address bar / back / throbber / status)
 
 ### D62 -- the --x11 shell wears a self-drawn chrome; pure layout+draw goldened, interaction manual
