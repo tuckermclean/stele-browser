@@ -191,29 +191,38 @@ fn parse_args(argv: &[String]) -> Args {
                 // at `None` rather than partially populating it — matching
                 // `--dump-text`'s own "trailing flag, no value" totality.
                 //
-                // packet/browser-chrome T2: `--chrome` is allowed to sit
-                // directly between `--dump-png` and its `<src> <out.png>`
-                // pair (`--dump-png --chrome <src> <out.png>`, the form
-                // accept.sh's `chrome-basic` golden uses) — this arm eagerly
-                // grabs the NEXT two tokens as positionals, so a `--chrome`
-                // sitting there has to be recognized and skipped explicitly
-                // here or it would silently BECOME `<src>` (with `<out.png>`
-                // shifted into `<src>`'s own slot) instead of setting the
-                // flag. `--chrome` AFTER the `<src> <out.png>` pair (or
-                // before `--dump-png` entirely) still works too — those
-                // positions are outside this arm's two-token grab, so the
-                // ordinary standalone `"--chrome"` match arm below catches
-                // them.
+                // packet/browser-chrome T2: `--chrome` is allowed to sit in
+                // ANY slot between `--dump-png` and its `<src> <out.png>`
+                // pair — `--dump-png --chrome <src> <out.png>` (the form
+                // accept.sh's `chrome-basic` golden uses), and equally
+                // `--dump-png <src> --chrome <out.png>` — this arm eagerly
+                // grabs the NEXT two non-`--chrome` tokens as positionals,
+                // so a `--chrome` sitting anywhere in that stretch has to be
+                // recognized and skipped explicitly here or it would
+                // silently BECOME `<src>`/`<out.png>` (shifting the real
+                // positional(s) over) instead of setting the flag. `--chrome`
+                // AFTER the full `<src> <out.png>` pair (or before
+                // `--dump-png` entirely) still works too — this loop stops
+                // as soon as it has collected two positionals, so a trailing
+                // `--chrome` is left untouched for the ordinary standalone
+                // `"--chrome"` match arm below to catch (no double-consume).
                 let mut j = i + 1;
-                if argv.get(j).map(String::as_str) == Some("--chrome") {
-                    out.chrome = true;
+                let mut chrome_seen = false;
+                let mut positionals: Vec<String> = Vec::new();
+                while positionals.len() < 2 && j < argv.len() {
+                    if argv[j] == "--chrome" {
+                        chrome_seen = true;
+                    } else {
+                        positionals.push(argv[j].clone());
+                    }
                     j += 1;
                 }
-                let src = argv.get(j).cloned();
-                let out_path = argv.get(j + 1).cloned();
-                if let (Some(src), Some(out_path)) = (src, out_path) {
-                    i = j + 1;
-                    out.dump_png = Some((src, out_path));
+                if positionals.len() == 2 {
+                    if chrome_seen {
+                        out.chrome = true;
+                    }
+                    i = j - 1;
+                    out.dump_png = Some((positionals[0].clone(), positionals[1].clone()));
                 }
             }
             "--render-fb" => {
@@ -2958,6 +2967,34 @@ mod tests {
     fn parse_args_dump_png_missing_out_path_does_not_panic_or_partially_set() {
         let a = parse_args(&args(&["--dump-png", "fixtures/basic.html"]));
         assert_eq!(a.dump_png, None);
+    }
+
+    #[test]
+    fn parse_args_dump_png_no_chrome_leaves_chrome_false() {
+        let a = parse_args(&args(&["--dump-png", "fixtures/basic.html", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert!(!a.chrome);
+    }
+
+    #[test]
+    fn parse_args_dump_png_chrome_before_src_sets_chrome_and_positionals() {
+        let a = parse_args(&args(&["--dump-png", "--chrome", "fixtures/basic.html", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert!(a.chrome);
+    }
+
+    #[test]
+    fn parse_args_dump_png_chrome_between_src_and_out_sets_chrome_and_positionals() {
+        let a = parse_args(&args(&["--dump-png", "fixtures/basic.html", "--chrome", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert!(a.chrome);
+    }
+
+    #[test]
+    fn parse_args_dump_png_chrome_after_out_sets_chrome_and_positionals() {
+        let a = parse_args(&args(&["--dump-png", "fixtures/basic.html", "/tmp/out.png", "--chrome"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert!(a.chrome);
     }
 
     fn decode_png_dims(bytes: &[u8]) -> (u32, u32) {
