@@ -565,7 +565,7 @@ mod tests {
     fn box_fragment_fills_its_background_color() {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = box_style(Color::rgb(10, 20, 30), BorderSide::default());
-        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 4.0, 4.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 4.0, 4.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 3, 3), Color::rgb(10, 20, 30));
         assert_eq!(px(&s, 0, 0), Color::WHITE, "outside the box stays background");
@@ -575,7 +575,7 @@ mod tests {
     fn transparent_background_paints_nothing() {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = box_style(Color::TRANSPARENT, BorderSide::default());
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 5, 5), Color::WHITE);
     }
@@ -585,7 +585,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 2.0, style: BorderStyle::Solid, color: Color::rgb(255, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
-        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(2.0, 2.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         // top edge
         assert_eq!(px(&s, 4, 2), Color::rgb(255, 0, 0));
@@ -604,7 +604,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 3.0, style: BorderStyle::None, color: Color::rgb(255, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
@@ -629,7 +629,7 @@ mod tests {
         };
         // hr's own box: full width, zero content height (matches `height: 0`
         // in the UA sheet -- border adds its own 1px on top of that).
-        let fragments = vec![Fragment { rect: rect(0.0, 1.0, 10.0, 0.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 1.0, 10.0, 0.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         for x in 0..10 {
             assert_eq!(px(&s, x, 1), gray, "row 1 (the box's own y) should be the gray rule line at col {x}");
@@ -648,7 +648,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let border = BorderSide { width: 3.0, style: BorderStyle::Solid, color: Color::rgba(255, 0, 0, 0) };
         let style = box_style(Color::TRANSPARENT, border);
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 0, 0), Color::WHITE);
     }
@@ -671,7 +671,7 @@ mod tests {
         let style = box_style_with_bg_image("tile.png");
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [10, 200, 30, 255])));
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
 
         paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
@@ -697,7 +697,7 @@ mod tests {
         let style = box_style_with_bg_image("tile.png");
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [1, 2, 3, 255])));
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 5.0, 5.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 5.0, 5.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
 
         paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
@@ -715,7 +715,7 @@ mod tests {
         // panic, no partial image.
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let style = ComputedStyle { background_color: Color::rgb(5, 5, 5), background_image: Some("missing.png".into()), ..ComputedStyle::default() };
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
 
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
 
@@ -728,7 +728,7 @@ mod tests {
         let style = box_style(Color::rgb(1, 2, 3), BorderSide::default());
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
         bg_images.insert("unrelated.png".to_string(), Rc::new(solid_rgba_image(2, 2, [255, 0, 0, 255])));
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
 
         paint(&mut s, &fragments, &bg_images, Color::WHITE);
 
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn empty_bg_images_map_renders_differently_from_a_populated_one() {
         let style = box_style_with_bg_image("tile.png");
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 6.0, 6.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
 
         let mut with_image = MemSurface::new(10, 10, Color::WHITE);
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
@@ -769,8 +769,8 @@ mod tests {
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [0, 0, 255, 255])));
         let text_style = ComputedStyle { color: Color::BLACK, font_size: 16.0, ..ComputedStyle::default() };
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style }, interactive: None, clip: None },
-            Fragment { rect: rect(4.0, 0.0, 8.0, 16.0), kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style }, interactive: None, clip: None, id: None, is_fixed: false },
+            Fragment { rect: rect(4.0, 0.0, 8.0, 16.0), kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style }, interactive: None, clip: None, id: None, is_fixed: false },
         ];
 
         paint(&mut s, &fragments, &bg_images, Color::WHITE);
@@ -786,8 +786,8 @@ mod tests {
         bg_images.insert("empty.png".to_string(), Rc::new(RgbaImage::new(0, 0)));
         bg_images.insert("zero-box.png".to_string(), Rc::new(solid_rgba_image(2, 2, [9, 9, 9, 255])));
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 5.0, 5.0), kind: FragmentKind::Box { style: box_style_with_bg_image("empty.png") }, interactive: None, clip: None },
-            Fragment { rect: rect(0.0, 0.0, 0.0, 0.0), kind: FragmentKind::Box { style: box_style_with_bg_image("zero-box.png") }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 5.0, 5.0), kind: FragmentKind::Box { style: box_style_with_bg_image("empty.png") }, interactive: None, clip: None, id: None, is_fixed: false },
+            Fragment { rect: rect(0.0, 0.0, 0.0, 0.0), kind: FragmentKind::Box { style: box_style_with_bg_image("zero-box.png") }, interactive: None, clip: None, id: None, is_fixed: false },
         ];
         paint(&mut s, &fragments, &bg_images, Color::WHITE); // must not panic
         assert_eq!(px(&s, 2, 2), Color::WHITE);
@@ -802,7 +802,7 @@ mod tests {
         let style = box_style_with_bg_image("tile.png");
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [4, 5, 6, 255])));
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 500_000.0, 500_000.0), kind: FragmentKind::Box { style }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 500_000.0, 500_000.0), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false }];
 
         paint(&mut s, &fragments, &bg_images, Color::WHITE); // must return promptly, not hang
 
@@ -817,7 +817,7 @@ mod tests {
             bg_images.insert(format!("tile-{i}.png"), Rc::new(solid_rgba_image(2, 2, [1, 1, 1, 255])));
         }
         let fragments: Vec<Fragment> = (0..200)
-            .map(|i| Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style_with_bg_image(&format!("tile-{i}.png")) }, interactive: None, clip: None })
+            .map(|i| Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style_with_bg_image(&format!("tile-{i}.png")) }, interactive: None, clip: None, id: None, is_fixed: false })
             .collect();
         paint(&mut s, &fragments, &bg_images, Color::WHITE); // must not panic
     }
@@ -831,7 +831,7 @@ mod tests {
         let fragments = vec![Fragment {
             rect: rect(4.0, 0.0, 8.0, 16.0),
             kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
 }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
@@ -852,7 +852,7 @@ mod tests {
             let fragments = vec![Fragment {
                 rect: rect(4.0, 0.0, 8.0, 16.0),
                 kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 }];
             paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
             s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count()
@@ -875,7 +875,7 @@ mod tests {
             vec![Fragment {
                 rect: rect(0.0, 0.0, 10.0, 10.0),
                 kind: FragmentKind::Text { text: String::new(), baseline: 8.0, style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         for i in (0..s.bytes().len()).step_by(4) {
@@ -937,17 +937,17 @@ mod tests {
         let text_style = ComputedStyle { color: Color::BLACK, font_size: 16.0, ..ComputedStyle::default() };
         let transparent_box = box_style(Color::TRANSPARENT, BorderSide::default());
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 8.0, 16.0), kind: FragmentKind::Box { style: transparent_box.clone() }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 8.0, 16.0), kind: FragmentKind::Box { style: transparent_box.clone() }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(0.0, 0.0, 8.0, 16.0),
                 kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style.clone() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
-            Fragment { rect: rect(8.0, 0.0, 8.0, 16.0), kind: FragmentKind::Box { style: transparent_box }, interactive: None, clip: None },
+            Fragment { rect: rect(8.0, 0.0, 8.0, 16.0), kind: FragmentKind::Box { style: transparent_box }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(8.0, 0.0, 8.0, 16.0),
                 kind: FragmentKind::Text { text: "B".to_string(), baseline: 12.0, style: text_style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
@@ -971,12 +971,12 @@ mod tests {
             Fragment {
                 rect: rect(0.0, 0.0, 8.0, 16.0),
                 kind: FragmentKind::Text { text: "b".to_string(), baseline: 12.0, style: text_style.clone() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
             Fragment {
                 rect: rect(8.0, 0.0, 8.0, 16.0),
                 kind: FragmentKind::Text { text: "o".to_string(), baseline: 12.0, style: text_style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
@@ -991,7 +991,7 @@ mod tests {
         let mut s = MemSurface::new(10, 10, Color::WHITE);
         let mut image = RgbaImage::new(2, 2);
         image.pixels = [255u8, 0, 0, 255].repeat(4); // solid opaque red, 2x2
-        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image }, interactive: None, clip: None }];
+        let fragments = vec![Fragment { rect: rect(0.0, 0.0, 4.0, 4.0), kind: FragmentKind::Image { image }, interactive: None, clip: None, id: None, is_fixed: false }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 0, 0), Color::rgb(255, 0, 0));
         assert_eq!(px(&s, 3, 3), Color::rgb(255, 0, 0));
@@ -1011,7 +1011,7 @@ mod tests {
             vec![Fragment {
                 rect: rect(0.0, 0.0, 4.0, 4.0),
                 kind: FragmentKind::Image { image: RgbaImage::new(2, 2) },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE); // must not panic
         assert_eq!(px(&s, 0, 0), Color::WHITE);
@@ -1025,8 +1025,8 @@ mod tests {
         let first = box_style(Color::rgb(255, 0, 0), BorderSide::default());
         let second = box_style(Color::rgb(0, 255, 0), BorderSide::default());
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: first }, interactive: None, clip: None },
-            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: second }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: first }, interactive: None, clip: None, id: None, is_fixed: false },
+            Fragment { rect: rect(0.0, 0.0, 10.0, 10.0), kind: FragmentKind::Box { style: second }, interactive: None, clip: None, id: None, is_fixed: false },
         ];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         assert_eq!(px(&s, 5, 5), Color::rgb(0, 255, 0));
@@ -1049,13 +1049,13 @@ mod tests {
             let style = box_style(Color::rgb(1, 2, 3), border);
             let text_style = ComputedStyle { font_size: f32::NAN, ..ComputedStyle::default() };
             let fragments = vec![
-                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Box { style }, interactive: None, clip: None },
+                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Box { style }, interactive: None, clip: None, id: None, is_fixed: false },
                 Fragment {
                     rect: rect(x, y, w, h),
                     kind: FragmentKind::Text { text: "z".to_string(), baseline: f32::NAN, style: text_style },
-                    interactive: None, clip: None,
+                    interactive: None, clip: None, id: None, is_fixed: false,
 },
-                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Image { image: RgbaImage::new(1, 1) }, interactive: None, clip: None },
+                Fragment { rect: rect(x, y, w, h), kind: FragmentKind::Image { image: RgbaImage::new(1, 1) }, interactive: None, clip: None, id: None, is_fixed: false },
             ];
             paint(&mut s, &fragments, &HashMap::new(), Color::WHITE); // must not panic
         }
@@ -1111,13 +1111,13 @@ mod tests {
     #[test]
     fn effective_background_nested_boxes_picks_the_innermost_opaque_one() {
         let mut fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(10, 10, 10), BorderSide::default()) }, interactive: None, clip: None },
-            Fragment { rect: rect(2.0, 2.0, 10.0, 10.0), kind: FragmentKind::Box { style: box_style(Color::rgb(20, 20, 20), BorderSide::default()) }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(10, 10, 10), BorderSide::default()) }, interactive: None, clip: None, id: None, is_fixed: false },
+            Fragment { rect: rect(2.0, 2.0, 10.0, 10.0), kind: FragmentKind::Box { style: box_style(Color::rgb(20, 20, 20), BorderSide::default()) }, interactive: None, clip: None, id: None, is_fixed: false },
         ];
         fragments.push(Fragment {
             rect: rect(3.0, 3.0, 4.0, 4.0),
             kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
 });
         let eff = effective_background(&fragments, 2, Color::WHITE);
         assert_eq!(eff, Some(Color::rgb(20, 20, 20)), "the innermost (nearer, later-painted) opaque box wins");
@@ -1126,12 +1126,12 @@ mod tests {
     #[test]
     fn effective_background_skips_a_transparent_box_and_falls_to_the_next_opaque_ancestor() {
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(5, 5, 5), BorderSide::default()) }, interactive: None, clip: None },
-            Fragment { rect: rect(2.0, 2.0, 10.0, 10.0), kind: FragmentKind::Box { style: box_style(Color::TRANSPARENT, BorderSide::default()) }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(5, 5, 5), BorderSide::default()) }, interactive: None, clip: None, id: None, is_fixed: false },
+            Fragment { rect: rect(2.0, 2.0, 10.0, 10.0), kind: FragmentKind::Box { style: box_style(Color::TRANSPARENT, BorderSide::default()) }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(3.0, 3.0, 4.0, 4.0),
                 kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         let eff = effective_background(&fragments, 2, Color::WHITE);
@@ -1143,7 +1143,7 @@ mod tests {
         let fragments = vec![Fragment {
             rect: rect(3.0, 3.0, 4.0, 4.0),
             kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
 }];
         assert_eq!(effective_background(&fragments, 0, Color::WHITE), Some(Color::WHITE));
         assert_eq!(
@@ -1159,9 +1159,9 @@ mod tests {
             Fragment {
                 rect: rect(0.0, 0.0, 20.0, 20.0),
                 kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(1, 2, 3), BorderSide::default()) }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: box_style(Color::rgb(1, 2, 3), BorderSide::default()) }, interactive: None, clip: None, id: None, is_fixed: false },
         ];
         let eff = effective_background(&fragments, 0, Color::WHITE);
         assert_eq!(eff, Some(Color::WHITE), "a box painted AFTER this text must not count as its background");
@@ -1170,11 +1170,11 @@ mod tests {
     #[test]
     fn effective_background_a_box_not_containing_the_text_origin_is_skipped() {
         let fragments = vec![
-            Fragment { rect: rect(50.0, 50.0, 5.0, 5.0), kind: FragmentKind::Box { style: box_style(Color::rgb(9, 9, 9), BorderSide::default()) }, interactive: None, clip: None },
+            Fragment { rect: rect(50.0, 50.0, 5.0, 5.0), kind: FragmentKind::Box { style: box_style(Color::rgb(9, 9, 9), BorderSide::default()) }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(0.0, 0.0, 4.0, 4.0),
                 kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         let eff = effective_background(&fragments, 1, Color::WHITE);
@@ -1199,11 +1199,11 @@ mod tests {
         // shorthand was declared).
         let image_box_style = ComputedStyle { background_color: Color::TRANSPARENT, background_image: Some("tile.png".into()), ..ComputedStyle::default() };
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box_style }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box_style }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(3.0, 3.0, 4.0, 4.0),
                 kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         assert_eq!(effective_background(&fragments, 1, Color::WHITE), None);
@@ -1217,11 +1217,11 @@ mod tests {
         // regardless of whatever color sits behind it.
         let image_box_style = ComputedStyle { background_color: Color::rgb(1, 2, 3), background_image: Some("tile.png".into()), ..ComputedStyle::default() };
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box_style }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box_style }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(3.0, 3.0, 4.0, 4.0),
                 kind: FragmentKind::Text { text: "x".to_string(), baseline: 3.0, style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         assert_eq!(effective_background(&fragments, 1, Color::WHITE), None);
@@ -1236,7 +1236,7 @@ mod tests {
         let fragments = vec![Fragment {
             rect: rect(0.0, 0.0, 16.0, 16.0),
             kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
 }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
@@ -1250,7 +1250,7 @@ mod tests {
         let fragments = vec![Fragment {
             rect: rect(0.0, 0.0, 16.0, 16.0),
             kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
 }];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
@@ -1263,11 +1263,11 @@ mod tests {
         let light_box = box_style(Color::rgb(240, 240, 240), BorderSide::default());
         let text_style = ComputedStyle { color: Color::WHITE, font_size: 16.0, ..ComputedStyle::default() };
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: light_box }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: light_box }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(0.0, 0.0, 16.0, 16.0),
                 kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
@@ -1281,11 +1281,11 @@ mod tests {
         let dark_box = box_style(Color::rgb(10, 10, 10), BorderSide::default());
         let text_style = ComputedStyle { color: Color::WHITE, font_size: 16.0, ..ComputedStyle::default() };
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: dark_box }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: dark_box }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(0.0, 0.0, 16.0, 16.0),
                 kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
@@ -1313,11 +1313,11 @@ mod tests {
         let mut bg_images: HashMap<String, Rc<RgbaImage>> = HashMap::new();
         bg_images.insert("tile.png".to_string(), Rc::new(solid_rgba_image(2, 2, [10, 10, 10, 255])));
         let fragments = vec![
-            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box }, interactive: None, clip: None },
+            Fragment { rect: rect(0.0, 0.0, 20.0, 20.0), kind: FragmentKind::Box { style: image_box }, interactive: None, clip: None, id: None, is_fixed: false },
             Fragment {
                 rect: rect(0.0, 0.0, 16.0, 16.0),
                 kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style: text_style },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
 },
         ];
         paint(&mut s, &fragments, &bg_images, Color::WHITE);

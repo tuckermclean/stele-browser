@@ -53,6 +53,22 @@ pub struct LayoutNode {
     /// exists yet, and painters (`backend::tty`/`backend::raster`) ignore it
     /// entirely, so no rendering changes.
     pub interactive: Option<Interactive>,
+    /// The element's HTML `id` attribute, when present (Acid2 scroll-to-
+    /// fragment packet). `None` for text/generated/synthesized nodes and for
+    /// any real element with no `id` attribute at all. `box_tree::build_node`
+    /// populates this from `Node::Element`'s `Element.attrs.get("id")`,
+    /// trimmed but NOT lowercased — this is a separate carrier from
+    /// `style::selector::ElementInfo::id` (which DOES lowercase, for its own
+    /// quirks-mode-flavored `#id` CSS selector matching); a fragment-lookup
+    /// id (`--scroll-to`/`find_fragment_top`) is closer to HTML's own
+    /// case-sensitive `getElementById` semantics, so it deliberately does
+    /// NOT mirror that normalization. `layout::block::emit` copies this onto
+    /// the node's own `Box`/`Replaced`/`Table` `Fragment` (never onto a
+    /// descendant text run or synthesized marker), so `layout::
+    /// find_fragment_top` can resolve `--scroll-to <id>` without re-walking
+    /// the DOM. `Box<str>`, not `String`, for the same "read-only once built"
+    /// reason `Interactive::Link::href` already is.
+    pub id: Option<Box<str>>,
 }
 
 /// Interactive provenance carried from the DOM into the rendered fragment
@@ -131,6 +147,25 @@ pub struct Fragment {
     /// the point `emit` pushes the fragment, not one derived from the
     /// fragment's own style.
     pub clip: Option<Rect>,
+    /// See [`LayoutNode::id`]'s doc comment — copied verbatim onto the
+    /// node's own `Box`/`Replaced`/`Table` fragment by `layout::block::emit`
+    /// (never onto a descendant text run's own `Fragment`, which has no
+    /// independent id of its own to carry). `None` for every fragment whose
+    /// owning `LayoutNode` had no `id` attribute.
+    pub id: Option<Box<str>>,
+    /// `true` when this fragment belongs to a `position: fixed` subtree
+    /// (Acid2 scroll-to-fragment packet, spec §2) — set from
+    /// `built_position(built) == Position::Fixed` on the OWNING node,
+    /// threaded down onto every descendant fragment (an inline text run or
+    /// replaced atom under a `position:fixed` container is still part of
+    /// the fixed subtree, even though `built_position` on its own
+    /// `Inline`/`Replaced` `Built` variant reports `Static`). Consulted by
+    /// `backend::raster::paint_at`, which does NOT apply its scroll
+    /// `y_offset` (to either `rect` or `clip`) when this is `true` — fixed
+    /// content stays anchored to the viewport across a scroll. `false` for
+    /// every fragment outside a `position:fixed` subtree; small by design,
+    /// same posture as `interactive`/`clip`.
+    pub is_fixed: bool,
 }
 
 pub enum FragmentKind {

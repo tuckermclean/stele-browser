@@ -21,7 +21,7 @@ fn text_node(s: &str) -> LayoutNode {
         style: ComputedStyle::default(),
         content: BoxContent::Text(s.to_string()),
         children: Vec::new(),
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -30,20 +30,20 @@ fn cell(colspan: u16, rowspan: u16, text: &str) -> LayoutNode {
         style: styled(Display::TableCell),
         content: BoxContent::TableCell { colspan, rowspan },
         children: vec![text_node(text)],
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
 fn row(cells: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::TableRow), content: BoxContent::Container, children: cells, interactive: None }
+    LayoutNode { style: styled(Display::TableRow), content: BoxContent::Container, children: cells, interactive: None, id: None }
 }
 
 fn tbody(rows: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::TableRowGroup), content: BoxContent::Container, children: rows, interactive: None }
+    LayoutNode { style: styled(Display::TableRowGroup), content: BoxContent::Container, children: rows, interactive: None, id: None }
 }
 
 fn table(children: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 /// Wrap a table in a plain block container, matching a real document's
@@ -63,7 +63,7 @@ fn root_with(table_node: LayoutNode) -> LayoutNode {
         style: styled(Display::Block),
         content: BoxContent::Container,
         children: vec![table_node],
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -252,7 +252,7 @@ fn deeply_nested_tables_do_not_abort() {
             style: styled(Display::TableCell),
             content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
             children: vec![inner],
-            interactive: None,
+            interactive: None, id: None,
         };
         inner = table(vec![row(vec![wrapping_cell])]);
     }
@@ -270,7 +270,7 @@ fn very_deeply_nested_tables_do_not_abort() {
             style: styled(Display::TableCell),
             content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
             children: vec![inner],
-            interactive: None,
+            interactive: None, id: None,
         };
         inner = table(vec![row(vec![wrapping_cell])]);
     }
@@ -361,7 +361,7 @@ fn table_with_spacing(spacing_x: f32, spacing_y: f32, children: Vec<LayoutNode>)
     let mut style = styled(Display::Table);
     style.border_spacing_x = spacing_x;
     style.border_spacing_y = spacing_y;
-    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 #[test]
@@ -406,7 +406,7 @@ fn table_with_spacing_and_collapse(
     style.border_spacing_x = spacing_x;
     style.border_spacing_y = spacing_y;
     style.border_collapse = collapse;
-    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 /// A collapsed table ignores its own `border_spacing_x` entirely (CSS
@@ -468,7 +468,7 @@ fn one_cell_table(padding_px: Option<f32>, text: &str) -> LayoutNode {
         style: cell_style,
         content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
         children: vec![text_node(text)],
-        interactive: None,
+        interactive: None, id: None,
     };
     root_with(table(vec![row(vec![cell_node])]))
 }
@@ -572,7 +572,7 @@ fn bordered_cell(colspan: u16, rowspan: u16, text: &str, border_px: f32) -> Layo
         style,
         content: BoxContent::TableCell { colspan, rowspan },
         children: vec![text_node(text)],
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -589,7 +589,7 @@ fn collapsed_table(frame_border_px: Option<f32>, children: Vec<LayoutNode>) -> L
     if let Some(bw) = frame_border_px {
         style.border = Edges::all(BorderSide { width: bw, style: BorderStyle::Solid, color: Color::BLACK });
     }
-    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 /// A collapsed 2x2 table (no table-level border -- the CSS-only-collapsed
@@ -769,7 +769,7 @@ fn separate_mode_bordered_cells_do_not_overlap() {
         style,
         content: BoxContent::Container,
         children: vec![row(vec![bordered_cell(1, 1, "aaaaaaaaaa", 1.0), bordered_cell(1, 1, "b", 1.0)])],
-        interactive: None,
+        interactive: None, id: None,
     });
     let fragments = layout(&t, Size { w: 640.0, h: 480.0 });
     let boxes = box_fragments(&fragments);
@@ -803,7 +803,7 @@ fn sized_bordered_cell(width_px: f32, padding_px: f32, border_px: f32) -> Layout
         style,
         content: BoxContent::TableCell { colspan: 1, rowspan: 1 },
         children: vec![text_node("x")],
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -812,7 +812,7 @@ fn sized_bordered_block(width_px: f32, padding_px: f32, border_px: f32) -> Layou
     style.width = Dimension::Px(width_px);
     style.padding = Edges::all(LengthPercentage::Px(padding_px));
     style.border = Edges::all(BorderSide { width: border_px, style: BorderStyle::Solid, color: Color::BLACK });
-    LayoutNode { style, content: BoxContent::Container, children: vec![text_node("x")], interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children: vec![text_node("x")], interactive: None, id: None }
 }
 
 #[test]
@@ -843,7 +843,7 @@ fn plain_block_box_with_width_padding_border_uses_content_box_sizing() {
         style: styled(Display::Block),
         content: BoxContent::Container,
         children: vec![sized_bordered_block(100.0, 10.0, 5.0)],
-        interactive: None,
+        interactive: None, id: None,
     };
     let fragments = layout(&root, Size { w: 640.0, h: 480.0 });
     // Filter out the (viewport-stretched, 640px-wide) root box the same way

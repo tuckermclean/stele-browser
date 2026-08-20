@@ -3633,7 +3633,7 @@ mod tests {
         let text_fragment = |s: &str| layout::Fragment {
             rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 8.0, h: 16.0 } },
             kind: layout::FragmentKind::Text { text: s.to_string(), baseline: 12.0, style: ComputedStyle::default() },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         };
         // One emoji (missing) in the first fragment, an ASCII-only second
         // fragment (nothing missing), a CJK pair (two missing) in the third.
@@ -3650,12 +3650,12 @@ mod tests {
             layout::Fragment {
                 rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 10.0, h: 10.0 } },
                 kind: layout::FragmentKind::Box { style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
             },
             layout::Fragment {
                 rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 32.0, h: 32.0 } },
                 kind: layout::FragmentKind::Image { image: RgbaImage::new(1, 1) },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
             },
         ];
         assert_eq!(count_missing_glyphs(&fragments), 0, "non-Text fragments carry no char content to count");

@@ -98,13 +98,41 @@ pub fn build_box_tree_with_pseudo(
     build_node(dom, styles, images, pseudo, dom.root(), 0, None)
 }
 
+/// Thin wrapper around [`build_node_inner`] that stamps [`LayoutNode::id`]
+/// (Acid2 scroll-to-fragment packet, spec §1) onto the built node, WITHOUT
+/// touching any of `build_node_inner`'s own ~30 `LayoutNode { .. }` literal
+/// sites — those all construct with `id: None`; this is the single place
+/// that overwrites it with the real value, when the source DOM node is an
+/// element carrying an `id` attribute. `Node::Text` (and any `id`-less
+/// element) leaves the field `None`. Matches HTML's own `id` matching:
+/// case-sensitive, only whitespace-trimmed — not lowercased (this is a new
+/// fragment-lookup carrier for `--scroll-to`/`find_fragment_top`, not a CSS
+/// selector match, so it does not need to mirror `style::selector`'s
+/// separate `ElementInfo::id` normalization, which lowercases for its own
+/// quirks-mode-flavored `#id` selector matching).
+fn build_node<'a>(
+    dom: &'a Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+    pseudo: &[PseudoStyles],
+    id: NodeId,
+    depth: usize,
+    form_action: Option<&'a str>,
+) -> Option<LayoutNode> {
+    let mut node = build_node_inner(dom, styles, images, pseudo, id, depth, form_action)?;
+    if let Node::Element(el) = dom.node(id) {
+        node.id = el.attrs.get("id").map(|s| s.trim().to_string().into_boxed_str());
+    }
+    Some(node)
+}
+
 /// `form_action` is the nearest enclosing `<form>`'s raw `action` attribute
 /// (see [`Interactive::FormControl`]), threaded down the walk from wherever
 /// a `<form>` element was last seen (`is_form`'s branch below) — `None`
 /// outside any form. Borrowed straight out of the `Dom` (`el.attrs.get`
 /// already has the right lifetime, tied to `dom`, not to any one stack
 /// frame), so passing it through many recursive calls costs nothing extra.
-fn build_node<'a>(
+fn build_node_inner<'a>(
     dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
@@ -122,7 +150,7 @@ fn build_node<'a>(
             style,
             content: BoxContent::Text(text.clone()),
             children: Vec::new(),
-            interactive: None,
+            interactive: None, id: None,
         }),
         Node::Element(el) => {
             if is_replaced(el) {
@@ -133,7 +161,7 @@ fn build_node<'a>(
                     style,
                     content: BoxContent::Replaced { intrinsic: replaced_intrinsic(el, decoded.as_deref()), image: decoded },
                     children: Vec::new(),
-                    interactive: None,
+                    interactive: None, id: None,
                 });
             }
             if el.name.as_str() == "object" {
@@ -147,7 +175,7 @@ fn build_node<'a>(
                         style,
                         content: BoxContent::Replaced { intrinsic: replaced_intrinsic(el, Some(&img)), image: Some(img) },
                         children: Vec::new(),
-                        interactive: None,
+                        interactive: None, id: None,
                     });
                 }
                 // else: fall through to the normal element path below, which
@@ -177,7 +205,7 @@ fn build_node<'a>(
                         .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, action))
                         .collect()
                 };
-                return Some(LayoutNode { style, content: BoxContent::Container, children, interactive: None });
+                return Some(LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None });
             }
             if is_link(el) {
                 // `<a href>`: propagate `Interactive::Link` onto this box AND
@@ -195,7 +223,7 @@ fn build_node<'a>(
                         .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, form_action))
                         .collect()
                 };
-                let mut node = LayoutNode { style, content: BoxContent::Container, children, interactive: None };
+                let mut node = LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None };
                 tag_interactive(&mut node, &Interactive::Link { href: href.into_boxed_str() });
                 return Some(node);
             }
@@ -218,7 +246,7 @@ fn build_node<'a>(
                     style,
                     content: BoxContent::Text(LINE_BREAK_SENTINEL.to_string()),
                     children: Vec::new(),
-                    interactive: None,
+                    interactive: None, id: None,
                 });
             }
             if is_details(el) {
@@ -226,7 +254,7 @@ fn build_node<'a>(
                     // Same defensive fallback as the generic branch below:
                     // past the cap, degrade to an empty leaf rather than
                     // recursing into the disclosure logic at all.
-                    LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None }
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None, id: None }
                 } else {
                     build_details_node(dom, styles, images, pseudo, el, style, depth, form_action)
                 };
@@ -237,7 +265,7 @@ fn build_node<'a>(
                     // Same defensive fallback as `is_details` above: past the
                     // cap, degrade to an empty leaf rather than recursing
                     // into the marker-synthesis logic at all.
-                    LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None }
+                    LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None, id: None }
                 } else {
                     build_list_container_node(dom, styles, images, pseudo, el, style, depth, form_action)
                 };
@@ -269,7 +297,7 @@ fn build_node<'a>(
             } else {
                 BoxContent::Container
             };
-            let mut node = LayoutNode { style, content, children, interactive: None };
+            let mut node = LayoutNode { style, content, children, interactive: None, id: None };
             if el.name.as_str() == "table" {
                 apply_table_border_attribute(el, &mut node);
                 apply_table_cellpadding_attribute(el, &mut node);
@@ -330,9 +358,9 @@ fn generated_node(ps: &ComputedStyle) -> Option<LayoutNode> {
                 style: ps.clone(),
                 content: BoxContent::Text(s.clone()),
                 children: Vec::new(),
-                interactive: None,
+                interactive: None, id: None,
             }],
-            interactive: None,
+            interactive: None, id: None,
         }),
         Content::Url(_) | Content::Normal | Content::None => None,
     }
@@ -896,13 +924,13 @@ fn build_details_node<'a>(
         }
     }
 
-    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 /// The synthesized marker box glued in front of a real `<summary>`'s own
 /// (recursively built) children -- see the module doc section above.
 fn marker_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
-    LayoutNode { style: style.clone(), content: BoxContent::Text(marker.to_string()), children: Vec::new(), interactive: None }
+    LayoutNode { style: style.clone(), content: BoxContent::Text(marker.to_string()), children: Vec::new(), interactive: None, id: None }
 }
 
 /// The synthesized `"> Details"`/`"v Details"` label shown in place of a
@@ -915,9 +943,9 @@ fn default_summary_node(marker: &str, style: &ComputedStyle) -> LayoutNode {
             style: style.clone(),
             content: BoxContent::Text(format!("{marker}{DEFAULT_SUMMARY_LABEL}")),
             children: Vec::new(),
-            interactive: None,
+            interactive: None, id: None,
         }],
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -1083,7 +1111,7 @@ fn build_list_container_node<'a>(
         }
         children.push(node);
     }
-    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 /// The marker text for one list item, or `None` when `list_style_type` is
@@ -1242,10 +1270,10 @@ fn build_form_control(dom: &Dom, el: &Element, style: ComputedStyle, form_action
             style: style.clone(),
             content: BoxContent::Text(label),
             children: Vec::new(),
-            interactive: Some(interactive.clone()),
+            interactive: Some(interactive.clone()), id: None,
         }],
         style,
-        interactive: Some(interactive),
+        interactive: Some(interactive), id: None,
     })
 }
 
@@ -1572,6 +1600,35 @@ mod tests {
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let text_node = find_text(&root, "hello").expect("text fragment present");
         assert!(matches!(&text_node.content, BoxContent::Text(t) if t == "hello"));
+    }
+
+    fn find_by_id<'a>(node: &'a LayoutNode, id: &str) -> Option<&'a LayoutNode> {
+        if node.id.as_deref() == Some(id) {
+            return Some(node);
+        }
+        for c in &node.children {
+            if let Some(found) = find_by_id(c, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Acid2 scroll-to-fragment packet, Task 1: an element's `id` attribute
+    /// must survive the DOM->`LayoutNode` translation (`build_node`'s new
+    /// wrapper over `build_node_inner`) so `find_fragment_top`/`--scroll-to`
+    /// have something to resolve against downstream.
+    #[test]
+    fn element_id_attribute_survives_onto_layout_node() {
+        let d = dom::parser::parse("<div id=\"x\">hi</div>");
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let target = find_by_id(&root, "x").expect("div#x should carry its id onto the box tree");
+        assert_eq!(target.id.as_deref(), Some("x"));
+        // A node with no `id` attribute at all must stay `None` (not, say,
+        // an empty string) -- the text leaf under `div#x` has no id.
+        let text_leaf = find_text(&target, "hi").expect("text child present");
+        assert_eq!(text_leaf.id, None);
     }
 
     /// Locates the direct parent of a `Text(text)` leaf in a built
