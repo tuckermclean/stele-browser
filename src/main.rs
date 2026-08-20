@@ -1988,6 +1988,43 @@ fn run_x11(source: &str) {
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
                         }
+                    } else if x11_point_in_rect(lay.attest, x, y) {
+                        // Attestations button (packet/attestation-modal): a
+                        // fixed, well-known target URL -- no document
+                        // `href` to resolve, unlike the in-page-link branch
+                        // below, but otherwise the same
+                        // navigate/load/redraw sequence.
+                        let new_url = Url::new("about:attestations");
+                        history.navigate(new_url.clone());
+
+                        status = format!("Loading {}...", new_url.as_str());
+                        loading = true;
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                        match load_x11_page(&new_url, width) {
+                            Ok((sess, s)) => {
+                                session = sess;
+                                state = s;
+                                scroll_y = 0;
+                                status = String::from("Done");
+                            }
+                            Err(e) => {
+                                eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}");
+                                status = format!("Failed to load: {e}");
+                            }
+                        }
+                        loading = false;
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
                     } else if y >= chrome::TOP_H as i16 && (y as u32) < chrome::TOP_H + lay.viewport.h {
                         // Inside the viewport band: hit-test in DOCUMENT
                         // coordinates, offset by the top bar's height and

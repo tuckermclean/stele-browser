@@ -36,6 +36,11 @@ pub struct ChromeLayout {
     pub address: Rect,
     /// The throbber/load-indicator, a roughly-square box at the right of `top`.
     pub throbber: Rect,
+    /// The attestations affordance (packet/attestation-modal): a small
+    /// square immediately left of `throbber`, clicking it navigates to
+    /// `about:attestations` (wired in `run_x11`, this struct only carries
+    /// its geometry).
+    pub attest: Rect,
     /// The document paint area: everything between `top` and `status`.
     pub viewport: Rect,
     /// The full-width status bar at the bottom of the window.
@@ -74,17 +79,27 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
     let throbber_y = INSET + ((top_h.saturating_sub(4).saturating_sub(throbber_size)) / 2) as i32;
     let throbber = Rect { x: throbber_x, y: throbber_y, w: throbber_size, h: throbber_size };
 
-    // Address field: whatever's left between `back` and `throbber`,
-    // clamped to never go negative-width (a tiny window can make `back`
-    // and `throbber` overlap or even swap order — the field just
-    // collapses to zero rather than underflowing).
     const GAP: i64 = 4;
+
+    // Attestations button: another ~20px square, immediately left of the
+    // throbber (same size/clamp discipline) -- packet/attestation-modal.
+    // Sits between `address` and `throbber`, so `address`'s right bound
+    // below is computed against THIS rect, not `throbber` directly.
+    let attest_size = 20u32.min(top_h.saturating_sub(4)).min(win_w.saturating_sub(4));
+    let attest_x = (throbber.x as i64 - GAP - attest_size as i64).max(0) as i32;
+    let attest_y = INSET + ((top_h.saturating_sub(4).saturating_sub(attest_size)) / 2) as i32;
+    let attest = Rect { x: attest_x, y: attest_y, w: attest_size, h: attest_size };
+
+    // Address field: whatever's left between `back` and `attest` (which
+    // itself sits left of `throbber`), clamped to never go negative-width
+    // (a tiny window can make these boxes overlap or even swap order — the
+    // field just collapses to zero rather than underflowing).
     let addr_x = back.x as i64 + back.w as i64 + GAP;
-    let addr_right = throbber.x as i64 - GAP;
+    let addr_right = attest.x as i64 - GAP;
     let addr_w = (addr_right - addr_x).max(0) as u32;
     let address = Rect { x: addr_x as i32, y: back.y, w: addr_w, h: back.h };
 
-    ChromeLayout { top, back, address, throbber, viewport, status }
+    ChromeLayout { top, back, address, throbber, attest, viewport, status }
 }
 
 /// A snapshot of the interactive state `draw` needs to paint one frame.
@@ -134,6 +149,7 @@ pub fn draw(surface: &mut dyn Surface, lay: &ChromeLayout, st: &ChromeState) {
 
     draw_back_button(surface, lay.back, st.can_go_back);
     draw_address(surface, lay.address, st.url);
+    draw_attest_button(surface, lay.attest);
     draw_throbber(surface, lay.throbber, st.loading, st.throbber_frame);
     draw_status(surface, lay.status, st.status);
 }
@@ -145,6 +161,21 @@ fn draw_back_button(surface: &mut dyn Surface, rect: Rect, can_go_back: bool) {
     let (box_color, ink) = if can_go_back { (BUTTON_COLOR, INK) } else { (BUTTON_DISABLED_COLOR, INK_DIMMED) };
     surface.fill_rect(rect, box_color);
     draw_centered_glyph(surface, rect, '<', ink);
+}
+
+/// The attestations affordance (packet/attestation-modal): always painted
+/// "enabled" (unlike `back`, `about:attestations` is always navigable, no
+/// disabled state to represent) -- a small box with a centered "\u{00A9}"
+/// (copyright sign, within the embedded Terminus subset's Latin-1 range)
+/// standing in for "about this build". Click wiring lives in `run_x11`
+/// (manual-verify, same posture as `back`'s own click handling); this
+/// function only paints.
+fn draw_attest_button(surface: &mut dyn Surface, rect: Rect) {
+    if rect.w == 0 || rect.h == 0 {
+        return;
+    }
+    surface.fill_rect(rect, BUTTON_COLOR);
+    draw_centered_glyph(surface, rect, '\u{00A9}', INK);
 }
 
 fn draw_address(surface: &mut dyn Surface, rect: Rect, url: &str) {
@@ -283,6 +314,31 @@ mod tests {
     }
 
     #[test]
+    fn layout_attest_button_has_nonzero_size_and_does_not_overlap_siblings() {
+        let lay = layout(1024, 768);
+        assert!(lay.attest.w > 0 && lay.attest.h > 0, "attest rect: {:?}", lay.attest);
+
+        fn overlaps(a: Rect, b: Rect) -> bool {
+            a.x < b.x + b.w as i32
+                && b.x < a.x + a.w as i32
+                && a.y < b.y + b.h as i32
+                && b.y < a.y + a.h as i32
+        }
+        assert!(!overlaps(lay.attest, lay.back), "attest overlaps back: {:?} / {:?}", lay.attest, lay.back);
+        assert!(!overlaps(lay.attest, lay.address), "attest overlaps address: {:?} / {:?}", lay.attest, lay.address);
+        assert!(!overlaps(lay.attest, lay.throbber), "attest overlaps throbber: {:?} / {:?}", lay.attest, lay.throbber);
+    }
+
+    #[test]
+    fn layout_attest_button_tiny_window_never_panics_and_stays_in_bounds() {
+        for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (5, 40), (40, 5), (3, 3)] {
+            let lay = layout(w, h);
+            assert!(lay.attest.w <= w, "attest width {} exceeds window width {w}", lay.attest.w);
+            assert!(lay.attest.h <= h, "attest height {} exceeds window height {h}", lay.attest.h);
+        }
+    }
+
+    #[test]
     fn layout_tiny_window_never_panics_and_yields_non_negative_sizes() {
         for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (5, 40), (40, 5), (3, 3)] {
             let lay = layout(w, h);
@@ -391,6 +447,12 @@ mod tests {
                 assert_eq!(px, (0, 0, 0, 0), "viewport pixel at ({x},{y}) should stay whatever the surface was initialized to (untouched)");
             }
         }
+    }
+
+    #[test]
+    fn draw_attest_button_guards_zero_size_rect_without_panicking() {
+        let mut s = MemSurface::new(1, 1, Color::WHITE);
+        draw_attest_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 });
     }
 
     #[test]
