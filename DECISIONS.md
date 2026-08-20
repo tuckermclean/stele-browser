@@ -20,7 +20,10 @@ stamps every descendant fragment (not the container's own box). The painter sets
 the Acid2 face needs it):** `background-position` -- lowest Acid2 value and, because our backgrounds always
 tile (no `background-repeat:no-repeat` support), it would only shift the tile phase, not place a single image;
 also deferred: `overflow:hidden` INSIDE a `<td>` (table-cell subfragments get the ambient clip, not a nested
-one -- wrong coordinate space), and independent `overflow-x`/`-y` (one clip field).
+one -- wrong coordinate space), `overflow:hidden` declared directly on a `<table>` ELEMENT (the `Built::Table`
+emit arm does not compute a child clip -- only `Built::Container` boxes clip their descendants; a table's own
+cells are not clipped by the table's own overflow), and independent `overflow-x`/`-y` (one clip field). None
+are exercised by Acid2.
 
 ## Networking — data: URI scheme (Acid2 Packet 4)
 
