@@ -1314,6 +1314,33 @@ else
   else
     pass "A5t: acid2.html renders to a non-empty PNG (smoke check; smiley golden deferred to a fixed-viewport render — see DECISIONS D61)"
   fi
+
+  # ---------------------------------------------------------------------
+  # A5u -- packet/browser-chrome T2: `--dump-png --chrome` renders the
+  # document INSIDE the browser chrome (top bar with back button/address
+  # field/throbber + bottom status bar, backend::chrome::draw) instead of a
+  # bare document PNG. Same pixel-golden discipline as every other A5
+  # check: bless only with --bless, compare byte-for-byte otherwise. Plain
+  # `--dump-png` (no `--chrome`) is unaffected -- see A3e/A5b's own
+  # goldens, unchanged by this packet.
+  # ---------------------------------------------------------------------
+  GOLDEN_PNG_CHROME_BASIC="goldens/chrome-basic.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5u: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png --chrome "$FIXTURE_BASIC" /tmp/stele_chromebasic.png 2>/tmp/stele_a5u.err; then
+    bad "A5u: stele --headless --dump-png --chrome crashed on $FIXTURE_BASIC"
+    sed 's/^/    /' /tmp/stele_a5u.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_chromebasic.png "$GOLDEN_PNG_CHROME_BASIC"
+    pass "A5u: blessed chrome-basic PNG golden -> $GOLDEN_PNG_CHROME_BASIC (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_CHROME_BASIC" ]; then
+    bad "A5u: no golden at $GOLDEN_PNG_CHROME_BASIC to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_CHROME_BASIC" /tmp/stele_chromebasic.png; then
+    pass "A5u: chrome screenshot of $FIXTURE_BASIC matches golden"
+  else
+    bad "A5u: chrome screenshot of $FIXTURE_BASIC differs from $GOLDEN_PNG_CHROME_BASIC"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_CHROME_BASIC") actual=$(wc -c < /tmp/stele_chromebasic.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

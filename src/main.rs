@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use stele::backend::chrome;
 use stele::backend::fb;
 use stele::backend::raster;
 use stele::backend::tty;
@@ -26,7 +27,7 @@ use stele::frames;
 use stele::layout::box_tree::build_box_tree_with_pseudo;
 use stele::layout::{self, Size};
 use stele::style::{self, cascade};
-use stele::surface::{Color, MemSurface};
+use stele::surface::{Color, MemSurface, Surface};
 use stele::text::translit;
 
 /// Default terminal width in character cells for `--dump-text` when
@@ -134,6 +135,17 @@ struct Args {
     /// contrast`]'s own doc comment for why a correct implementation
     /// always reports zero.
     audit_contrast: Option<String>,
+    /// `--chrome` (packet/browser-chrome T2): when set alongside
+    /// `--dump-png <src> <out>`, renders the document INSIDE the browser
+    /// chrome (top bar with back button/address field/throbber + bottom
+    /// status bar, `backend::chrome::draw`) rather than as a bare document
+    /// PNG — see [`write_dump_png_chrome_opts`]. Ignored everywhere else
+    /// (`--dump-text`/`--render-fb`/`--audit-contrast`/no `--dump-png`),
+    /// same "unused flag combo is a silent no-op, never an error" totality
+    /// every other flag here already has. Default `false` so plain
+    /// `--dump-png` (every existing golden) is completely unaffected —
+    /// golden-safe per the design doc's non-negotiables.
+    chrome: bool,
 }
 
 impl Default for Args {
@@ -151,6 +163,7 @@ impl Default for Args {
             color_scheme: style::ColorScheme::Light,
             color_scheme_given: false,
             audit_contrast: None,
+            chrome: false,
         }
     }
 }
@@ -177,10 +190,29 @@ fn parse_args(argv: &[String]) -> Args {
                 // trailing value (either or both absent) leaves `dump_png`
                 // at `None` rather than partially populating it — matching
                 // `--dump-text`'s own "trailing flag, no value" totality.
-                let src = argv.get(i + 1).cloned();
-                let out_path = argv.get(i + 2).cloned();
+                //
+                // packet/browser-chrome T2: `--chrome` is allowed to sit
+                // directly between `--dump-png` and its `<src> <out.png>`
+                // pair (`--dump-png --chrome <src> <out.png>`, the form
+                // accept.sh's `chrome-basic` golden uses) — this arm eagerly
+                // grabs the NEXT two tokens as positionals, so a `--chrome`
+                // sitting there has to be recognized and skipped explicitly
+                // here or it would silently BECOME `<src>` (with `<out.png>`
+                // shifted into `<src>`'s own slot) instead of setting the
+                // flag. `--chrome` AFTER the `<src> <out.png>` pair (or
+                // before `--dump-png` entirely) still works too — those
+                // positions are outside this arm's two-token grab, so the
+                // ordinary standalone `"--chrome"` match arm below catches
+                // them.
+                let mut j = i + 1;
+                if argv.get(j).map(String::as_str) == Some("--chrome") {
+                    out.chrome = true;
+                    j += 1;
+                }
+                let src = argv.get(j).cloned();
+                let out_path = argv.get(j + 1).cloned();
                 if let (Some(src), Some(out_path)) = (src, out_path) {
-                    i += 2;
+                    i = j + 1;
                     out.dump_png = Some((src, out_path));
                 }
             }
@@ -204,6 +236,7 @@ fn parse_args(argv: &[String]) -> Args {
             }
             "--stats" => out.stats = true,
             "--no-bg-images" => out.no_bg_images = true,
+            "--chrome" => out.chrome = true,
             "--color-scheme" => {
                 i += 1;
                 if let Some(v) = argv.get(i) {
@@ -606,16 +639,47 @@ fn dump_png(source: &str) -> Vec<u8> {
 /// its dark theme at all. t1d-httpforever's own dark-theme fidelity fixture
 /// needs exactly that, so this packet finishes the wiring.
 fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Vec<u8> {
+    match build_dump_png_render(source, no_bg_images, scheme, stamp) {
+        None => blank_png(),
+        Some(r) => {
+            let mut surface = MemSurface::new(DEFAULT_PNG_WIDTH, r.height, Color::WHITE);
+            raster::paint(&mut surface, &r.fragments, &r.bg_images, Color::WHITE);
+            raster::encode_png(&surface)
+        }
+    }
+}
+
+/// The fetch->parse->cascade->box-tree->layout half of [`dump_png_opts`],
+/// factored out so [`write_dump_png_chrome_opts`] (packet/browser-chrome T2)
+/// can reuse the EXACT same document render — fragments, decoded background
+/// images, the post-redirect `final_url`, and the content-driven height —
+/// rather than duplicating this whole pipeline. `None` on any of the same
+/// "degrade to blank" cases [`dump_png_opts`] always had (fetch error, empty/
+/// `display:none` document, a `<frameset>` document); `dump_png_opts` itself
+/// is now a thin "build, then paint+encode at the bare document width"
+/// wrapper around this, so its own output is unchanged byte-for-byte —
+/// same computation, just relocated.
+struct DocRender {
+    fragments: Vec<layout::Fragment>,
+    bg_images: HashMap<String, std::rc::Rc<stele::img::RgbaImage>>,
+    /// Content-driven height at `DEFAULT_PNG_WIDTH`, already clamped to
+    /// `MAX_PNG_HEIGHT` — see [`dump_png_opts`]'s original doc comment for
+    /// the derivation.
+    height: u32,
+    final_url: Url,
+}
+
+fn build_dump_png_render(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Option<DocRender> {
     let url = resolve_url(source);
     let response = match fetch_response(&url) {
         Ok(r) => r,
-        Err(_) => return blank_png(),
+        Err(_) => return None,
     };
     let html = String::from_utf8_lossy(&response.body);
     let mut dom_tree = dom::parser::parse(&html);
 
     if frames::find_frameset(&dom_tree).is_some() {
-        return blank_png();
+        return None;
     }
 
     // Packet t1d-httpforever: same pre-cascade `data-theme`/`data-mode` stamp
@@ -649,7 +713,7 @@ fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, s
     // HTTP redirect, not where it was originally requested from.
     let images = stele::images::collect_images(&dom_tree, &response.final_url);
     let Some(root) = build_box_tree_with_pseudo(&dom_tree, &styles, &images, &pseudo) else {
-        return blank_png();
+        return None;
     };
 
     let width = DEFAULT_PNG_WIDTH;
@@ -683,9 +747,7 @@ fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, s
     // alone, exactly as if no box declared a `background-image` at all).
     let bg_images = if no_bg_images { HashMap::new() } else { stele::bg_images::collect_bg_images(&styles, &response.final_url) };
 
-    let mut surface = MemSurface::new(width, height, Color::WHITE);
-    raster::paint(&mut surface, &fragments, &bg_images, Color::WHITE);
-    raster::encode_png(&surface)
+    Some(DocRender { fragments, bg_images, height, final_url: response.final_url })
 }
 
 /// `--dump-png <src> <out.png>`'s CLI-facing wrapper: render `source` and
@@ -704,6 +766,96 @@ fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
 /// packet-t1d-httpforever `scheme`/`stamp` wiring specifically.
 fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Result<(), String> {
     let bytes = dump_png_opts(source, no_bg_images, scheme, stamp);
+    std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
+}
+
+/// Fixed window height (px) `--dump-png --chrome` renders at, alongside the
+/// same `DEFAULT_PNG_WIDTH` the plain `--dump-png` path already lays the
+/// document out at. Per `backend::chrome::layout`'s own geometry, `viewport`
+/// spans the FULL window width (only the top/status bars are horizontal
+/// bands), so a window width equal to `DEFAULT_PNG_WIDTH` keeps the
+/// document's own layout width identical with or without `--chrome` —
+/// `--chrome` only ever changes what's ABOVE/BELOW the document, never its
+/// own column width. 600px comfortably fits `fixtures/basic.html` (a few
+/// hundred px tall) inside the viewport band without the golden needing a
+/// taller window than a typical screenshot.
+const CHROME_WINDOW_HEIGHT: u32 = 600;
+
+/// `--dump-png --chrome <src> <out.png>` (packet/browser-chrome T2, spec §2):
+/// render `source` INSIDE the browser chrome — a `DEFAULT_PNG_WIDTH` x
+/// `CHROME_WINDOW_HEIGHT` window, the document painted into `backend::
+/// chrome::layout`'s `viewport` band, the top/status bars drawn around it
+/// via `backend::chrome::draw`. Reuses [`build_dump_png_render`] for the
+/// document half — the SAME fetch->parse->cascade->layout pipeline (and the
+/// SAME post-redirect `final_url`) plain `--dump-png` uses — so the only new
+/// work here is compositing that render into the chrome window rather than
+/// encoding it standalone.
+///
+/// Total, mirroring [`dump_png_opts`]'s own contract: a fetch error/empty
+/// document/frameset (`build_dump_png_render` returning `None`) still
+/// produces a well-formed chrome window — an empty viewport band framed by
+/// the bars, with the address field showing the resolved (if unreachable)
+/// URL — rather than falling back to a bare [`blank_png`]; `chrome::draw`
+/// itself is total over any URL/status string (see its own doc comment), so
+/// there is nothing here that can panic on a hostile `source`.
+fn dump_png_chrome_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Vec<u8> {
+    let win_w = DEFAULT_PNG_WIDTH;
+    let win_h = CHROME_WINDOW_HEIGHT;
+    let lay = chrome::layout(win_w, win_h);
+
+    let render = build_dump_png_render(source, no_bg_images, scheme, stamp);
+    let final_url = match &render {
+        Some(r) => r.final_url.as_str().to_string(),
+        None => resolve_url(source).as_str().to_string(),
+    };
+
+    let mut window = MemSurface::new(win_w, win_h, Color::WHITE);
+
+    if let Some(r) = render {
+        if lay.viewport.w > 0 && lay.viewport.h > 0 {
+            // Paint the document into its OWN viewport-width surface first
+            // (same width/paint call `dump_png_opts` uses, so this is
+            // pixel-identical to what a bare `--dump-png` of the same source
+            // would produce), then copy only the rows that fit inside the
+            // viewport band into the window surface at `viewport.origin` —
+            // this is what actually keeps the document out of the top/status
+            // bars for content taller than the viewport (rather than relying
+            // on `raster::paint_at`'s per-fragment clip, which resets to
+            // `None` for any fragment with no `overflow:hidden` ancestor of
+            // its own and would let an unclipped fragment bleed past the
+            // band).
+            let mut doc_surface = MemSurface::new(DEFAULT_PNG_WIDTH, r.height, Color::WHITE);
+            raster::paint(&mut doc_surface, &r.fragments, &r.bg_images, Color::WHITE);
+
+            let (doc_w, doc_h) = doc_surface.size();
+            let doc_bytes = doc_surface.bytes();
+            let copy_w = lay.viewport.w.min(doc_w);
+            let copy_h = lay.viewport.h.min(doc_h);
+            for y in 0..copy_h {
+                for x in 0..copy_w {
+                    let i = ((y as usize) * (doc_w as usize) + (x as usize)) * 4;
+                    let color = Color::rgba(doc_bytes[i], doc_bytes[i + 1], doc_bytes[i + 2], doc_bytes[i + 3]);
+                    window.put_pixel(lay.viewport.x + x as i32, lay.viewport.y + y as i32, color);
+                }
+            }
+        }
+    }
+
+    chrome::draw(
+        &mut window,
+        &lay,
+        &chrome::ChromeState { url: &final_url, status: "Done", loading: false, throbber_frame: 0, can_go_back: false },
+    );
+
+    raster::encode_png(&window)
+}
+
+/// `--dump-png --chrome <src> <out.png>`'s CLI-facing wrapper — same
+/// "render is total, only the filesystem write can fail" contract
+/// [`write_dump_png_opts`] has, just calling [`dump_png_chrome_opts`]
+/// instead of [`dump_png_opts`].
+fn write_dump_png_chrome_opts(source: &str, out_path: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Result<(), String> {
+    let bytes = dump_png_chrome_opts(source, no_bg_images, scheme, stamp);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
@@ -2122,7 +2274,16 @@ fn main() {
             if args.stats {
                 print_stats(&source, DEFAULT_PNG_WIDTH as f32);
             }
-            if let Err(e) = write_dump_png_opts(&source, &out_path, args.no_bg_images, args.color_scheme, args.color_scheme_given) {
+            // packet/browser-chrome T2: `--chrome` composes the document
+            // into the browser chrome window instead of a bare document
+            // PNG; plain `--dump-png` (the default, every existing golden)
+            // takes the unchanged path below.
+            let result = if args.chrome {
+                write_dump_png_chrome_opts(&source, &out_path, args.no_bg_images, args.color_scheme, args.color_scheme_given)
+            } else {
+                write_dump_png_opts(&source, &out_path, args.no_bg_images, args.color_scheme, args.color_scheme_given)
+            };
+            if let Err(e) = result {
                 eprintln!("stele: --dump-png failed: {e}");
             }
             return;
