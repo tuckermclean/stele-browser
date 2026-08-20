@@ -10,6 +10,7 @@ A paragraph with bold, italic, emphasis, and strong text, plus a link. Entities:
 
 Lists
 
+
      * First unordered item
      * Second unordered item, inline-styled bold
 
@@ -18,7 +19,6 @@ Lists
 
 
   A blockquote: set apart from the surrounding text, per 1996 convention.
-
 
 
  preformatted text keeps its spacing
@@ -35,8 +35,8 @@ Table
 ┌───────┌────┌───────────┐
 │Widget └4───└Blue───────┘
 │       ┌2───┌Red────────┐
-┌────────────┌───────────┐
-│Gadget      │Backorder  │
+└───────└────└───────────┘
+┌Gadget──────┌Backorder──┐
 └────────────└───────────┘
 Form
 
