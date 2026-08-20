@@ -207,3 +207,100 @@ pub fn layout_viewport(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
     let font = crate::text::BitmapFont::vga_8x16();
     block::layout_tree_viewport(root, viewport, &font)
 }
+
+/// Resolve an element `id` to its document-space PADDING-top edge (Acid2
+/// scroll-to-fragment packet, design §1) — the y coordinate `--scroll-to
+/// <id>` scrolls to the window's top. Linear scan for the FIRST `Fragment`
+/// whose `id.as_deref() == Some(id)` AND whose `kind` is
+/// `FragmentKind::Box { .. }` (an element's own box fragment — every
+/// `Container`/`Replaced`/`Table` node `layout::block::emit` visits pushes
+/// exactly one such fragment, always BEFORE any of that node's descendants,
+/// so "first match" unambiguously means "this element's own box", never a
+/// later duplicate id or a descendant's). `rect.origin` is the BORDER-box
+/// top-left (`emit`'s own `origin = parent_origin + layout.location`
+/// convention) — this returns the PADDING-box edge, `rect.origin.y +
+/// border_top_width`, so a bordered target scrolls to just past its own
+/// border, not to a line straddling it. `border_top_width` is read off the
+/// SAME `Box` fragment's own `style.border.top.width`, clamped through
+/// `block::finite_nonneg` (the same totality posture `base_style` already
+/// applies to every other geometry input) — a hostile/negative/non-finite
+/// author value can never produce a negative or non-finite result here.
+///
+/// `None` when no fragment carries `id` — never a panic; the CLI's own
+/// `--scroll-to <id>` degrades this to `scroll_y = 0.0` (an ordinary,
+/// unscrolled render) rather than treating a missing/typo'd id as an error.
+pub fn find_fragment_top(fragments: &[Fragment], id: &str) -> Option<f32> {
+    fragments
+        .iter()
+        .find(|f| f.id.as_deref() == Some(id) && matches!(f.kind, FragmentKind::Box { .. }))
+        .map(|f| {
+            let border_top_width = match &f.kind {
+                FragmentKind::Box { style } => block::finite_nonneg(style.border.top.width),
+                _ => unreachable!("filtered to FragmentKind::Box above"),
+            };
+            f.rect.origin.y + border_top_width
+        })
+}
+
+#[cfg(test)]
+mod find_fragment_top_tests {
+    use super::*;
+    use crate::style::computed::{BorderSide, BorderStyle, Dimension, Display};
+    use crate::surface::Color;
+
+    fn block_style() -> ComputedStyle {
+        ComputedStyle { display: Display::Block, ..ComputedStyle::default() }
+    }
+
+    /// A plain block box with an explicit pixel height, no id, no border --
+    /// pure vertical filler to push a later sibling down the flow (so
+    /// `find_fragment_top`'s result is a genuinely nonzero, non-trivial
+    /// offset, not just "whatever the root's own origin happens to be").
+    fn spacer(height_px: f32) -> LayoutNode {
+        let mut style = block_style();
+        style.height = Dimension::Px(height_px);
+        LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None, id: None }
+    }
+
+    fn target(id: &str, border_top_px: f32) -> LayoutNode {
+        let mut style = block_style();
+        if border_top_px > 0.0 {
+            style.border.top = BorderSide { width: border_top_px, style: BorderStyle::Solid, color: Color::BLACK };
+        }
+        LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None, id: Some(id.into()) }
+    }
+
+    fn doc(children: Vec<LayoutNode>) -> LayoutNode {
+        LayoutNode { style: block_style(), content: BoxContent::Container, children, interactive: None, id: None }
+    }
+
+    /// The whole point of the padding-vs-border distinction (design §1): a
+    /// bordered `#target` must resolve to just past its own top border, not
+    /// to the border-box top (which would visually straddle the border).
+    #[test]
+    fn resolves_the_padding_top_edge_past_a_nonzero_border() {
+        let tree = doc(vec![spacer(50.0), target("target", 4.0)]);
+        let fragments = layout(&tree, Size { w: 200.0, h: 400.0 });
+        let border_box_top_y = 50.0; // root/spacer both have zero margin/padding/border by default.
+        assert_eq!(find_fragment_top(&fragments, "target"), Some(border_box_top_y + 4.0));
+    }
+
+    /// Acid2's own `#top` (an `<h2>` with no border) is the zero-border
+    /// path: padding-top edge == border-box top edge exactly.
+    #[test]
+    fn zero_border_target_resolves_to_the_border_box_top() {
+        let tree = doc(vec![spacer(30.0), target("target", 0.0)]);
+        let fragments = layout(&tree, Size { w: 200.0, h: 400.0 });
+        assert_eq!(find_fragment_top(&fragments, "target"), Some(30.0));
+    }
+
+    /// A missing/typo'd id must degrade to `None`, never panic -- the CLI's
+    /// own `--scroll-to` (Task 5) relies on exactly this to fall back to an
+    /// unscrolled render instead of erroring out.
+    #[test]
+    fn missing_id_returns_none_without_panicking() {
+        let tree = doc(vec![spacer(50.0), target("target", 4.0)]);
+        let fragments = layout(&tree, Size { w: 200.0, h: 400.0 });
+        assert_eq!(find_fragment_top(&fragments, "nonexistent"), None);
+    }
+}

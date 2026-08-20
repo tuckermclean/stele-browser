@@ -453,7 +453,12 @@ fn layout_tree_impl<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M, 
     fragments
 }
 
-fn finite_nonneg(v: f32) -> f32 {
+/// `pub(crate)` (not `pub`, and not just `fn`): Acid2 scroll-to-fragment
+/// packet's `layout::find_fragment_top` reuses this exact clamp for a
+/// `Fragment`'s border-top width, rather than re-deriving an equivalent
+/// helper — same totality posture (`is_finite() && >= 0.0`, floor to `0.0`
+/// otherwise) this module already applies to every other geometry input.
+pub(crate) fn finite_nonneg(v: f32) -> f32 {
     if v.is_finite() && v > 0.0 {
         v
     } else {
