@@ -223,10 +223,19 @@ if [ -f "$FIXTURES_DIR/httpforever.html" ]; then
 fi
 
 # Browser-chrome screenshot: fixtures/basic.html rendered INSIDE the chrome
-# (address bar + back button + throbber + status bar) via --chrome, so the
-# chrome-basic.png golden lands in the renders artifact for blessing.
+# (address bar + back button + throbber + status bar). Uses the EXACT
+# `--dump-png --chrome <src> <out>` form accept.sh's A5u gate uses (not
+# render_one, which would place `--chrome` after <out>) so the blessed
+# golden byte-matches what A5u compares against.
 if [ -f "$FIXTURES_DIR/basic.html" ]; then
-  render_one "$FIXTURES_DIR/basic.html" "chrome-basic" --chrome
+  renders_total=$((renders_total + 1))
+  if "$BIN" --headless --dump-png --chrome "$FIXTURES_DIR/basic.html" "$OUTDIR/chrome-basic.png" 2>/dev/null \
+      && [ -s "$OUTDIR/chrome-basic.png" ]; then
+    renders_ok=$((renders_ok + 1))
+  else
+    echo "render-gallery: warning: chrome-basic (--chrome) render failed" >&2
+    failures=$((failures + 1))
+  fi
 fi
 
 cat >> "$INDEX" <<HTML
