@@ -1125,6 +1125,63 @@ else
     bad "A5j: PNG dump of $FIXTURE_Z_TIE differs from $GOLDEN_PNG_Z_TIE"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_Z_TIE") actual=$(wc -c < /tmp/stele_a5j.png)"
   fi
+
+  FIXTURE_GC_BEFORE_STRING="fixtures/gc-before-string.html"
+  GOLDEN_PNG_GC_BEFORE_STRING="goldens/gc-before-string.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5k: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_GC_BEFORE_STRING" /tmp/stele_a5k.png 2>/tmp/stele_a5k.err; then
+    bad "A5k: stele --headless --dump-png crashed on $FIXTURE_GC_BEFORE_STRING"
+    sed 's/^/    /' /tmp/stele_a5k.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5k.png "$GOLDEN_PNG_GC_BEFORE_STRING"
+    pass "A5k: blessed gc-before-string PNG golden -> $GOLDEN_PNG_GC_BEFORE_STRING (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_GC_BEFORE_STRING" ]; then
+    bad "A5k: no golden at $GOLDEN_PNG_GC_BEFORE_STRING to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_GC_BEFORE_STRING" /tmp/stele_a5k.png; then
+    pass "A5k: PNG dump of $FIXTURE_GC_BEFORE_STRING matches golden"
+  else
+    bad "A5k: PNG dump of $FIXTURE_GC_BEFORE_STRING differs from $GOLDEN_PNG_GC_BEFORE_STRING"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_GC_BEFORE_STRING") actual=$(wc -c < /tmp/stele_a5k.png)"
+  fi
+
+  FIXTURE_GC_EMPTY_BOX="fixtures/gc-empty-box.html"
+  GOLDEN_PNG_GC_EMPTY_BOX="goldens/gc-empty-box.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5l: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_GC_EMPTY_BOX" /tmp/stele_a5l.png 2>/tmp/stele_a5l.err; then
+    bad "A5l: stele --headless --dump-png crashed on $FIXTURE_GC_EMPTY_BOX"
+    sed 's/^/    /' /tmp/stele_a5l.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5l.png "$GOLDEN_PNG_GC_EMPTY_BOX"
+    pass "A5l: blessed gc-empty-box PNG golden -> $GOLDEN_PNG_GC_EMPTY_BOX (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_GC_EMPTY_BOX" ]; then
+    bad "A5l: no golden at $GOLDEN_PNG_GC_EMPTY_BOX to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_GC_EMPTY_BOX" /tmp/stele_a5l.png; then
+    pass "A5l: PNG dump of $FIXTURE_GC_EMPTY_BOX matches golden"
+  else
+    bad "A5l: PNG dump of $FIXTURE_GC_EMPTY_BOX differs from $GOLDEN_PNG_GC_EMPTY_BOX"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_GC_EMPTY_BOX") actual=$(wc -c < /tmp/stele_a5l.png)"
+  fi
+
+  FIXTURE_GC_NONE="fixtures/gc-none.html"
+  GOLDEN_PNG_GC_NONE="goldens/gc-none.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5m: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_GC_NONE" /tmp/stele_a5m.png 2>/tmp/stele_a5m.err; then
+    bad "A5m: stele --headless --dump-png crashed on $FIXTURE_GC_NONE"
+    sed 's/^/    /' /tmp/stele_a5m.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5m.png "$GOLDEN_PNG_GC_NONE"
+    pass "A5m: blessed gc-none PNG golden -> $GOLDEN_PNG_GC_NONE (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_GC_NONE" ]; then
+    bad "A5m: no golden at $GOLDEN_PNG_GC_NONE to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_GC_NONE" /tmp/stele_a5m.png; then
+    pass "A5m: PNG dump of $FIXTURE_GC_NONE matches golden"
+  else
+    bad "A5m: PNG dump of $FIXTURE_GC_NONE differs from $GOLDEN_PNG_GC_NONE"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_GC_NONE") actual=$(wc -c < /tmp/stele_a5m.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
