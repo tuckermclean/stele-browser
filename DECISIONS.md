@@ -3,6 +3,24 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Rendering — <object> nested fallback (Acid2 Packet 6)
+
+### D60 -- <object> renders its decoded data image, else its (nested) fallback children
+Acid2 builds parts of the face from nested `<object>`s. **Realization:** `<object>` was already NOT in
+`box_tree::is_replaced`, so it already rendered its children (the fallback) -- only the PRIMARY representation
+was missing. **Design:** `images::walk` now fetches+decodes `<object data>` with the same resolve/dedup/budget/
+decode pipeline as `<img src>`, keyed by the object's `NodeId` (present only on a successful image decode); and
+`box_tree::build_node` gains an `<object>` branch -- if the map holds a decoded image for this object, render it
+as a `Replaced` box with EMPTY children (primary representation wins, fallback suppressed); otherwise fall
+through to the normal element path, which builds the children (the fallback). **Nesting is automatic:** a
+fallback child that is itself an `<object>` goes through the same path, so the cascade resolves to the
+innermost renderable representation -- verified by `object-nested` (outer `data:` isn't an image -> renders its
+child object -> the child's `data:` PNG resolves -> shows it). No `type`/`classid` negotiation (decode-or-
+fallback); reuses the P4/image pipeline (no new dependency). Golden-safe: a document with no `<object>` is
+unchanged, and an `<object>` whose `data` doesn't resolve renders its children exactly as before. **Out of
+scope:** `<object>` as a nested HTML browsing context (a `data` HTML document falls back, not renders);
+`<param>`/`<embed>`/applets.
+
 ## Layout — box constraints (Acid2 Packet 5)
 
 ### D59 -- min/max via taffy; overflow:hidden via a per-fragment clip rect; background-position deferred
