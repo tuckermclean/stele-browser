@@ -68,10 +68,14 @@ fn list_inside_inline_font_wrapper_puts_each_item_on_its_own_line() {
     assert_ne!(beta_line, gamma_line, "Beta and Gamma items must not share one line, got: {actual:?}");
     assert_ne!(alpha_line, gamma_line, "Alpha and Gamma items must not share one line, got: {actual:?}");
 
-    // Each item carries its own decimal marker (list markers, M6 discipline).
-    assert!(lines[alpha_line.unwrap()].contains("1. Alpha item"), "got: {actual:?}");
-    assert!(lines[beta_line.unwrap()].contains("2. Beta item"), "got: {actual:?}");
-    assert!(lines[gamma_line.unwrap()].contains("3. Gamma item"), "got: {actual:?}");
+    // Each item carries its own decimal marker on its own line (list markers,
+    // M6 discipline). Spacing-tolerant: Terminus's list-marker advance puts
+    // slightly more space after the marker than font8x8 did (a legitimate,
+    // intended reflow from the font swap), so assert marker AND text share the
+    // line without pinning the exact inter-marker gap.
+    assert!(lines[alpha_line.unwrap()].contains("1.") && lines[alpha_line.unwrap()].contains("Alpha item"), "got: {actual:?}");
+    assert!(lines[beta_line.unwrap()].contains("2.") && lines[beta_line.unwrap()].contains("Beta item"), "got: {actual:?}");
+    assert!(lines[gamma_line.unwrap()].contains("3.") && lines[gamma_line.unwrap()].contains("Gamma item"), "got: {actual:?}");
 
     // The bug's exact symptom must not appear: markers/items run together.
     assert!(!actual.contains("Alpha item2."), "list items must not run together onto one line, got: {actual:?}");
