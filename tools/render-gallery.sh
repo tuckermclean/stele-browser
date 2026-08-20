@@ -243,7 +243,7 @@ fi
 # default 800x3960 content-height sprawl) — for the P7 smiley measurement.
 if [ -f "$FIXTURES_DIR/acid2.html" ]; then
   renders_total=$((renders_total + 1))
-  if "$BIN" --headless --dump-png --viewport-height 600 "$FIXTURES_DIR/acid2.html" "$OUTDIR/acid2-viewport.png" 2>/dev/null \
+  if "$BIN" --headless --dump-png "$FIXTURES_DIR/acid2.html" "$OUTDIR/acid2-viewport.png" --viewport-height 600 2>/dev/null \
       && [ -s "$OUTDIR/acid2-viewport.png" ]; then
     renders_ok=$((renders_ok + 1))
   else
