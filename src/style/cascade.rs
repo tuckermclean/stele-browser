@@ -7,8 +7,9 @@ use std::sync::OnceLock;
 
 use crate::dom::{Dom, Node, NodeId};
 use crate::style::computed::{
-    BorderSide, BorderStyle, BoxSizing, Content, Dimension, Edges, GridRepetitionCount, GridTemplateComponent,
-    GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
+    BorderSide, BorderStyle, BoxSizing, Content, Dimension, Display, Edges, GridRepetitionCount,
+    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
+    Position,
 };
 use crate::style::selector::{ElementInfo, PseudoElement, Specificity};
 use crate::style::ua::UA_CSS;
@@ -391,7 +392,20 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         vertical_align: own!(vertical_align),
         list_style_type: inherited!(list_style_type),
 
-        display: own!(display),
+        // CSS 2.1 §9.7: an absolutely-positioned or `fixed` box is blockified —
+        // `display: inline` computes to `block` so it honors width/height and
+        // establishes a box (a `::before { content:""; position:absolute;
+        // width/height }` generated box, or any inline element that is
+        // absolutely positioned). Scoped to absolute/fixed (not float) —
+        // Acid2-sufficient, and no existing float fixture positions an inline.
+        display: {
+            let disp = own!(display);
+            if matches!(own!(position), Position::Absolute | Position::Fixed) && disp == Display::Inline {
+                Display::Block
+            } else {
+                disp
+            }
+        },
         width: resolve_dimension(d.width, font_size, default.width),
         height: resolve_dimension(d.height, font_size, default.height),
         margin: Edges {
@@ -701,6 +715,25 @@ mod tests {
         let styles = cascade(&d, &[]);
         assert_eq!(styles[find(&d, "div")].display, Display::Block);
         assert_eq!(styles[find(&d, "span")].display, Display::Inline);
+    }
+
+    #[test]
+    fn absolutely_positioned_inline_is_blockified() {
+        // CSS 2.1 §9.7: position:absolute/fixed blockifies an inline box so it
+        // honors width/height. A plain inline (or position:relative) stays inline.
+        let d = dom::parser::parse(
+            r#"<span id="a" style="position:absolute">a</span><span id="r" style="position:relative">r</span><span id="s">s</span>"#,
+        );
+        let styles = cascade(&d, &[]);
+        let by_id = |want: &str| {
+            find_all(&d, "span")
+                .into_iter()
+                .find(|&id| d.node(id).element().and_then(|e| e.attrs.get("id")) == Some(want))
+                .unwrap()
+        };
+        assert_eq!(styles[by_id("a")].display, Display::Block, "position:absolute blockifies inline");
+        assert_eq!(styles[by_id("r")].display, Display::Inline, "position:relative does NOT blockify");
+        assert_eq!(styles[by_id("s")].display, Display::Inline, "static inline stays inline");
     }
 
     #[test]
