@@ -1316,10 +1316,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // packet/text-min-8x8: text metrics never render below font8x8's
-    // native 8x8-at-16px resolution. Uses the REAL `text::BitmapFont`
-    // (not `FixedMetrics`, which ignores `size_px` entirely and so can't
-    // prove anything about a size-dependent floor).
+    // packet/terminus-font: text metrics snap to the NEAREST of Terminus's
+    // 5 embedded pixel-size buckets (12/16/20/24/32), replacing the old
+    // font8x8-era flat "never below 16px" floor -- `text_render_px`'s own
+    // long-standing "revisit-trigger" doc comment predicted exactly this
+    // moment. Uses the REAL `text::TerminusFont` (not `FixedMetrics`, which
+    // ignores `size_px` entirely and so can't prove anything about a
+    // size-dependent snap) -- `text_render_px` is a free function every
+    // `Metrics` call site routes through, so these tests still exercise its
+    // (now nearest-of-5) behavior even though `TerminusFont` ALSO re-snaps
+    // internally on every call -- the double application is idempotent
+    // (snapping an already-snapped bucket value is a no-op), so it doesn't
+    // change what these tests actually prove.
     // -----------------------------------------------------------------
 
     fn run_at_font_size(text: &str, font_size: f32) -> InlineRun {
@@ -1327,87 +1335,97 @@ mod tests {
     }
 
     #[test]
-    fn sub_16px_word_advance_matches_the_native_16px_advance() {
-        let font = crate::text::BitmapFont::vga_8x16();
-        let sub16 = [run_at_font_size("ab", 8.0)];
-        let native = [run_at_font_size("ab", 16.0)];
-        let out_sub16 = layout_runs(&sub16, 1000.0, TextAlign::Left, &font);
-        let out_native = layout_runs(&native, 1000.0, TextAlign::Left, &font);
-        assert_eq!(
-            out_sub16.lines[0].runs[0].width, out_native.lines[0].runs[0].width,
-            "an 8px-declared run must measure exactly like a 16px run -- the render floor, not the raw \
-             font-size, drives glyph advance"
-        );
-        assert_eq!(out_sub16.lines[0].runs[0].width, font.measure("ab", 16.0));
+    fn sub_bucket_word_advance_matches_the_snapped_bucket_advance() {
+        // 8px and 13px BOTH snap to the 12px bucket (nearest_terminus_size:
+        // 8 clamps up to the min bucket, 13 is nearer 12 than 16) -- they
+        // must measure identically, and identically to font_size=12 passed
+        // directly.
+        let font = crate::text::TerminusFont::new();
+        let at8 = [run_at_font_size("ab", 8.0)];
+        let at13 = [run_at_font_size("ab", 13.0)];
+        let at12 = [run_at_font_size("ab", 12.0)];
+        let out8 = layout_runs(&at8, 1000.0, TextAlign::Left, &font);
+        let out13 = layout_runs(&at13, 1000.0, TextAlign::Left, &font);
+        let out12 = layout_runs(&at12, 1000.0, TextAlign::Left, &font);
+        assert_eq!(out8.lines[0].runs[0].width, out12.lines[0].runs[0].width, "8px snaps to the 12px bucket");
+        assert_eq!(out13.lines[0].runs[0].width, out12.lines[0].runs[0].width, "13px also snaps to the 12px bucket");
+        assert_eq!(out8.lines[0].runs[0].width, font.measure("ab", 12.0));
     }
 
     #[test]
-    fn sub_16px_line_height_matches_the_native_16px_line_height() {
-        let font = crate::text::BitmapFont::vga_8x16();
-        let sub16 = [run_at_font_size("x", 10.0)];
-        let out = layout_runs(&sub16, 1000.0, TextAlign::Left, &font);
+    fn sub_bucket_line_height_matches_the_snapped_bucket_line_height() {
+        let font = crate::text::TerminusFont::new();
+        let sub_bucket = [run_at_font_size("x", 10.0)];
+        let out = layout_runs(&sub_bucket, 1000.0, TextAlign::Left, &font);
         assert_eq!(
             out.lines[0].rect.size.h,
-            font.line_height(16.0),
-            "LineHeight::Normal (the default) must resolve through the render floor, not raw font_size=10"
+            font.line_height(12.0),
+            "LineHeight::Normal (the default) must resolve through the nearest-of-5 snap (10px -> 12px \
+             bucket), not raw font_size=10 nor the old flat 16px floor"
         );
     }
 
     #[test]
-    fn above_16px_font_size_is_a_floor_no_op() {
-        // The floor is max(font_size, 16.0): at or above 16px, text metrics
-        // must be byte-identical to what they were before this packet.
-        let font = crate::text::BitmapFont::vga_8x16();
+    fn above_32px_font_size_clamps_down_to_the_32px_bucket() {
+        // packet/terminus-font: above the top bucket, size_px now CLAMPS
+        // DOWN to 32px instead of scaling up arbitrarily -- the symmetric
+        // counterpart to the below-12px clamp-up. `at32` (exactly on the
+        // bucket) and `at48` (above it) must measure identically.
+        let font = crate::text::TerminusFont::new();
         let at32 = [run_at_font_size("ab", 32.0)];
-        let out = layout_runs(&at32, 1000.0, TextAlign::Left, &font);
-        assert_eq!(out.lines[0].runs[0].width, font.measure("ab", 32.0));
-        assert_eq!(out.lines[0].rect.size.h, font.line_height(32.0));
+        let at48 = [run_at_font_size("ab", 48.0)];
+        let out32 = layout_runs(&at32, 1000.0, TextAlign::Left, &font);
+        let out48 = layout_runs(&at48, 1000.0, TextAlign::Left, &font);
+        assert_eq!(out32.lines[0].runs[0].width, font.measure("ab", 32.0));
+        assert_eq!(out48.lines[0].runs[0].width, out32.lines[0].runs[0].width, "48px clamps down to the 32px bucket");
+        assert_eq!(out48.lines[0].rect.size.h, out32.lines[0].rect.size.h);
     }
 
     #[test]
     fn explicit_css_line_height_generous_enough_to_dominate_stays_exactly_as_authored() {
         // An author-specified `line-height: <px>` is a resolved BOX value
         // (`style::cascade::resolve`), not a `Metrics` call -- `resolved_
-        // line_height` returns it verbatim, un-floored (see that fn's own
+        // line_height` returns it verbatim, un-snapped (see that fn's own
         // doc comment). When it's already generously larger than the
-        // floored glyph's ascent+descent (16.0 at any sub-16px font-size,
-        // by `BitmapFont`'s own `ascent+descent == size_px` invariant), it
-        // alone decides the final line box height.
+        // snapped glyph's ascent+descent (12.0 at font_size=10, which snaps
+        // to the 12px bucket, by `TerminusFont`'s own pinned metrics table
+        // where ascent+descent == size_px at every bucket), it alone
+        // decides the final line box height, regardless of which bucket
+        // 10px lands on.
         let runs = [run_with("x", |s| {
             s.font_size = 10.0;
             s.line_height = LH::Px(40.0);
         })];
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
         assert_eq!(out.lines[0].rect.size.h, 40.0, "explicit CSS line-height must stay exactly as authored");
     }
 
     #[test]
-    fn explicit_css_line_height_tighter_than_the_floored_ink_still_grows_to_fit_it() {
+    fn explicit_css_line_height_tighter_than_the_snapped_ink_still_grows_to_fit_it() {
         // The flip side of the test above: `layout_runs` has ALWAYS taken
         // `max(specified_line_height, ascent + descent)` (pre-dates this
         // packet — a line box must be tall enough to actually fit its own
         // content's ink). `resolved_line_height` itself still returns the
-        // CSS value UNFLOORED (10.0, not 16.0) -- but this packet's brief
-        // explicitly asks for "the line box is tall enough for the >=8px
-        // ink", so a tight 10px `line-height` on 10px-font text (whose
-        // glyph now renders at the floored 16px, i.e. ascent+descent==16.0)
-        // correctly grows the REALIZED line box to 16px. This is NOT the
-        // floor leaking into box/em resolution (`resolved_line_height`'s
-        // own return value is untouched -- see the sibling test above and
+        // CSS value UN-SNAPPED (10.0, not 12.0) -- but a tight 10px
+        // `line-height` on 10px-font text (which now snaps to the 12px
+        // bucket, i.e. ascent+descent==12.0, NOT the old flat-floored 16.0)
+        // correctly grows the REALIZED line box to 12px. This is NOT the
+        // snap leaking into box/em resolution (`resolved_line_height`'s own
+        // return value is untouched -- see the sibling test above and
         // `style::cascade`'s own regression guard) — it's the pre-existing
-        // "line box fits its content" safety net, now doing real work
-        // because the content's ink is taller.
+        // "line box fits its content" safety net, now sized off the
+        // (smaller) 12px-bucket ink instead of the old 16px floor.
         let runs = [run_with("x", |s| {
             s.font_size = 10.0;
             s.line_height = LH::Px(10.0);
         })];
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
         assert_eq!(
             out.lines[0].rect.size.h,
-            16.0,
-            "a line box must still be tall enough for its own (now floored-to-16px) glyph ink, even under a \
+            12.0,
+            "a line box must still be tall enough for its own (now snapped-to-12px) glyph ink, even under a \
              tighter explicit CSS line-height"
         );
     }

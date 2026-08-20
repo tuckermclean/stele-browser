@@ -1,52 +1,68 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Transliteration fallback for characters the glyph atlas still can't
-//! render after the Latin-1 extension (packet t2-glyph-fallback, closing
-//! the D2 bug report's second half — see `text::glyphs`' own doc comment
-//! for the atlas half).
+//! Transliteration fallback for characters the embedded font still can't
+//! render (packet t2-glyph-fallback, closing the D2 bug report's second
+//! half — see `text::terminus_glyphs`' own doc comment for the embedded
+//! subset's own coverage).
 //!
 //! ## The bug
 //!
 //! httpforever.com and most real prose lean on non-ASCII PUNCTUATION — em
 //! dash `—`, en dash `–`, curly quotes `‘ ’ “ ”`, ellipsis `…`, bullet `•`,
 //! the multiplication sign `×`, a right arrow `→` — none of which live in
-//! Latin-1 (`U+00A0..=U+00FF`, `text::glyphs`' newly-extended range); most
-//! of this punctuation is General Punctuation (`U+2000..=U+206F`), a block
-//! this project's compiled-in `font8x8`-derived atlas has never shipped
-//! glyphs for and has no public-domain source to embed one from either. So
-//! rather than paint the atlas's own hollow "tofu" box for every one of
-//! these (`text::glyphs::FALLBACK_GLYPH`) — which is what a document with
-//! this punctuation looked like before this packet — this module maps each
-//! one to a plain-ASCII stand-in that the atlas CAN always render.
+//! Latin-1 (`U+00A0..=U+00FF`, the embedded Terminus subset's own extended
+//! range); most of this punctuation is General Punctuation
+//! (`U+2000..=U+206F`), a block this project's embedded font has never
+//! shipped glyphs for and has no source to embed one from either. So rather
+//! than paint the font's own hollow "tofu" fallback box for every one of
+//! these — which is what a document with this punctuation looked like
+//! before packet t2-glyph-fallback — this module maps each one to a
+//! plain-ASCII stand-in the embedded font CAN always render.
 //!
 //! ## Resolution order (pins the whole packet — read before touching either
 //! backend's text path)
 //!
 //! For every `char` a `Text` fragment carries, in order:
 //!
-//! 1. **Atlas has a real glyph** (`text::glyphs::has_glyph`, ASCII or the
-//!    Latin-1 supplement) → render `ch` verbatim. This covers the ORDINARY
-//!    case (English prose) and, since packet t2-glyph-fallback's atlas
-//!    extension, NBSP and `×` too — both are ALSO listed in
-//!    [`TRANSLIT_TABLE`] below (the packet brief names them explicitly), but
-//!    in practice this atlas check wins for both before transliteration is
-//!    ever consulted; the table entries are a documented backstop (still
-//!    independently contract-tested against [`transliterate`] directly), not
-//!    dead weight — a future change that narrows the atlas's own coverage
-//!    would fall through to them automatically.
-//! 2. **No atlas glyph, but [`transliterate`] maps it** → render the ASCII
-//!    replacement string instead (itself always atlas-renderable — every
+//! 1. **The embedded font has a real glyph** — printable ASCII
+//!    (`0x20..=0x7E`) or the Latin-1 supplement (`0xA0..=0xFF`), the exact
+//!    191-glyph subset `text::terminus_glyphs` embeds (packet/terminus-font
+//!    narrowed this from font8x8's old `0x00..=0x7F` — control characters
+//!    and DEL are no longer in the embedded subset at all; see that
+//!    packet's own coverage-narrowing note below) → render `ch` verbatim.
+//!    This covers the ORDINARY case (English prose) and NBSP/`×` too — both
+//!    are ALSO listed in [`TRANSLIT_TABLE`] below (the packet brief names
+//!    them explicitly), but in practice this coverage check wins for both
+//!    before transliteration is ever consulted; the table entries are a
+//!    documented backstop (still independently contract-tested against
+//!    [`transliterate`] directly), not dead weight — a future change that
+//!    narrows the embedded font's own coverage further would fall through
+//!    to them automatically.
+//! 2. **No embedded glyph, but [`transliterate`] maps it** → render the
+//!    ASCII replacement string instead (itself always renderable — every
 //!    [`TRANSLIT_TABLE`] replacement is plain ASCII, contract-tested in this
 //!    module's own tests).
-//! 3. **Neither** → skip the character entirely (emit nothing — NOT the
-//!    atlas's tofu box) and increment the process's missing-glyph counter
-//!    (see "The `--stats` counter" below). CJK, emoji, and other genuinely
-//!    unrepresentable scripts land here.
+//! 3. **Neither** → skip the character entirely (emit nothing — NOT a tofu
+//!    box) and increment the process's missing-glyph counter (see "The
+//!    `--stats` counter" below). CJK, emoji, control characters, DEL, and
+//!    other genuinely unrepresentable scalars land here.
+//!
+//! **packet/terminus-font coverage narrowing:** font8x8 covered the FULL
+//! `0x00..=0x7F` range (control chars included, rendered as blank glyphs);
+//! the embedded Terminus subset covers only printable ASCII
+//! (`0x20..=0x7E`) — `0x00..=0x1F` and `0x7F` (DEL) are no longer
+//! "has a real glyph" and now fall through to step 2/3 like any other
+//! unrepresentable scalar. In practice this is inert: HTML whitespace/
+//! control handling strips literal control characters from text content
+//! long before layout, and no fixture in this repo's `fixtures/` directory
+//! carries one (grep-confirmed, see this module's own regression test) —
+//! but it IS a real, stated behavior change, not a silent one.
 //!
 //! [`resolve`] is the one function that walks all three steps over a whole
-//! string; both backends call ONLY it (never `transliterate`/`glyphs::
-//! has_glyph` directly from their own text paths) so fb and tty can never
-//! silently drift apart on what a given document's punctuation renders as:
+//! string; both backends call ONLY it (never `transliterate`/the embedded
+//! font's own coverage check directly from their own text paths) so fb and
+//! tty can never silently drift apart on what a given document's
+//! punctuation renders as:
 //!
 //! - `backend::tty::write_marker` sanitizes each `Text`/`Image`-placeholder
 //!   fragment's string through [`resolve`] before writing chars into grid
@@ -77,23 +93,22 @@
 
 use std::cell::Cell;
 
-use super::glyphs;
-
 /// One (source char, ASCII replacement) pair. `pub(crate)` visibility isn't
 /// needed — nothing outside this module reads the table directly; every
 /// caller goes through [`transliterate`] or [`resolve`].
 type TranslitEntry = (char, &'static str);
 
 /// The transliteration table (packet t2-glyph-fallback's brief, verbatim):
-/// every entry maps ONE non-atlas-covered `char` to a plain-ASCII string.
-/// Pure data — no logic here, just the mapping [`transliterate`] searches.
+/// every entry maps ONE char outside the embedded font's own coverage to a
+/// plain-ASCII string. Pure data — no logic here, just the mapping
+/// [`transliterate`] searches.
 ///
-/// `\u{00A0}` (NBSP) and `\u{00D7}` (multiplication sign) are BOTH also now
-/// real atlas glyphs (`text::glyphs`' Latin-1 extension) — see this module's
-/// own "Resolution order" doc section for why they're still listed here
-/// (a documented backstop, exercised directly by this table's own contract
-/// tests even though the real render pipeline's atlas check normally wins
-/// first).
+/// `\u{00A0}` (NBSP) and `\u{00D7}` (multiplication sign) are BOTH also
+/// real glyphs in the embedded Terminus subset's Latin-1 range — see this
+/// module's own "Resolution order" doc section for why they're still listed
+/// here (a documented backstop, exercised directly by this table's own
+/// contract tests even though the real render pipeline's coverage check
+/// normally wins first).
 const TRANSLIT_TABLE: &[TranslitEntry] = &[
     ('\u{2013}', "-"),    // – en dash
     ('\u{2014}', "-"),    // — em dash
@@ -147,13 +162,26 @@ fn record_missing_glyph() {
     MISSING_GLYPHS.with(|c| c.set(c.get().saturating_add(1)));
 }
 
+/// Whether the embedded Terminus subset has a real glyph for `ch` — total
+/// over all of `char`, a direct range check against exactly the two ranges
+/// `text::terminus_glyphs` embeds (printable ASCII `0x20..=0x7E`, Latin-1
+/// supplement `0xA0..=0xFF`; see that module's own doc comment). packet/
+/// terminus-font replaced the old `text::glyphs::has_glyph` (font8x8,
+/// `0x00..=0x7F` — control chars included) with this narrower check; see
+/// this module's own "packet/terminus-font coverage narrowing" doc note for
+/// why that's a deliberate, documented behavior change, not an oversight.
+fn has_embedded_glyph(ch: char) -> bool {
+    let code = ch as u32;
+    (0x20..=0x7E).contains(&code) || (0xA0..=0xFF).contains(&code)
+}
+
 /// Resolve `text` for rendering: walk every `char` through this module's own
 /// documented resolution order (module doc, "Resolution order") and return
-/// the sanitized, ALWAYS-atlas-renderable replacement string. Shared by
+/// the sanitized, ALWAYS-renderable replacement string. Shared by
 /// `backend::tty::write_marker` and `backend::raster::paint_text` — see the
 /// module doc's "Resolution order" section for why calling this (rather than
-/// `glyphs::has_glyph`/`transliterate` directly) is what keeps fb and tty in
-/// agreement.
+/// [`has_embedded_glyph`]/`transliterate` directly) is what keeps fb and tty
+/// in agreement.
 ///
 /// Total over any `&str` — every Unicode scalar (including 4-byte UTF-8
 /// ones like emoji) is handled by the same three-step resolution order, and
@@ -167,7 +195,7 @@ fn record_missing_glyph() {
 pub fn resolve(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        if glyphs::has_glyph(ch) {
+        if has_embedded_glyph(ch) {
             out.push(ch);
         } else if let Some(replacement) = transliterate(ch) {
             out.push_str(replacement);
@@ -242,6 +270,40 @@ mod tests {
         for &(ch, replacement) in TRANSLIT_TABLE {
             assert!(replacement.is_ascii(), "{ch:?}'s replacement {replacement:?} is not plain ASCII");
         }
+    }
+
+    // ------------------------------------------------- has_embedded_glyph
+
+    #[test]
+    fn has_embedded_glyph_covers_printable_ascii_and_latin1() {
+        for code in 0x20u32..=0x7E {
+            assert!(has_embedded_glyph(char::from_u32(code).unwrap()), "U+{code:04X} should be covered");
+        }
+        for code in 0xA0u32..=0xFF {
+            assert!(has_embedded_glyph(char::from_u32(code).unwrap()), "U+{code:04X} should be covered");
+        }
+    }
+
+    /// packet/terminus-font coverage-narrowing regression (module doc's own
+    /// "packet/terminus-font coverage narrowing" note): control characters
+    /// (`0x00..=0x1F`) and DEL (`0x7F`) were covered by font8x8's old
+    /// `0x00..=0x7F` atlas range (rendering as blank glyphs) but are OUTSIDE
+    /// the embedded Terminus subset's `0x20..=0x7E` range. This is a real,
+    /// stated behavior change: these scalars now fall through to
+    /// [`transliterate`] (none of them map) and land on step 3 (dropped,
+    /// counted) — never a panic, never silently different from the
+    /// documented resolution order.
+    #[test]
+    fn control_chars_and_del_are_outside_embedded_coverage_and_fall_through_to_step_3() {
+        for ch in ['\u{0}', '\u{1}', '\t', '\n', '\r', '\u{1B}', '\u{1F}', '\u{7F}'] {
+            assert!(!has_embedded_glyph(ch), "{ch:?} should be OUTSIDE the embedded font's coverage now");
+            assert_eq!(transliterate(ch), None, "{ch:?} has no transliteration mapping either");
+        }
+
+        reset_missing_glyph_count();
+        let out = resolve("a\u{0}\u{1F}\u{7F}b");
+        assert_eq!(out, "ab", "control chars and DEL must be dropped, not rendered as blank tofu glyphs");
+        assert_eq!(missing_glyph_count(), 3, "each dropped control/DEL char must be counted as a missing glyph");
     }
 
     // ---------------------------------------------------------- resolve

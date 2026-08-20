@@ -8,8 +8,9 @@
 //! `run_x11` (manual-verified, T3); everything HERE is unit-tested and,
 //! via the `--chrome` screenshot mode (T2), golden-tested too.
 
+use crate::style::computed::FontWeight;
 use crate::surface::{Color, Rect, Surface, TextRun};
-use crate::text::{BitmapFont, Metrics};
+use crate::text::{Metrics, TerminusFont};
 
 /// Height in pixels of the top bar (back button + address field + throbber).
 pub const TOP_H: u32 = 28;
@@ -200,7 +201,11 @@ fn draw_throbber(surface: &mut dyn Surface, rect: Rect, loading: bool, frame: u8
 /// into whatever draws next.
 fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, color: Color) {
     const PAD_X: i32 = 4;
-    let font = BitmapFont::vga_8x16();
+    // packet/terminus-font, Task 4: TerminusFont replaces BitmapFont::
+    // vga_8x16() everywhere -- numerically identical at TEXT_SIZE_PX (16px,
+    // the default bucket both agree on exactly), so this swap is a pure
+    // glyph-shape change here, not a metrics change (design doc §3).
+    let font = TerminusFont::new();
     // Cast the (target-stable) metrics to integers ONCE, then center with
     // pure integer arithmetic. A float `(rect.h - line_h) / 2.0` here rounds
     // differently under the i486 target's x87 80-bit intermediates than under
@@ -212,7 +217,8 @@ fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, 
     let baseline = text_top + ascent;
 
     surface.set_clip(Some(rect));
-    surface.draw_text(&TextRun { text, x: rect.x + PAD_X, baseline, size_px: TEXT_SIZE_PX, color });
+    // Chrome labels never carry an author `font-weight` -- always Normal.
+    surface.draw_text(&TextRun { text, x: rect.x + PAD_X, baseline, size_px: TEXT_SIZE_PX, color, weight: FontWeight::Normal });
     surface.set_clip(None);
 }
 
@@ -221,8 +227,8 @@ fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, 
 /// horizontally centered too since it's a single fixed-width glyph in a
 /// square box rather than a left-flowing text run.
 fn draw_centered_glyph(surface: &mut dyn Surface, rect: Rect, ch: char, color: Color) {
-    const CELL_W: i32 = 8; // BitmapFont::vga_8x16's native cell width.
-    let font = BitmapFont::vga_8x16();
+    const CELL_W: i32 = 8; // TerminusFont's 16px-bucket cell width (same as the old vga_8x16 cell).
+    let font = TerminusFont::new();
     // Integer centering (see draw_left_aligned_clipped): float math here
     // diverges between the i486 (x87) and host (SSE) targets and would break
     // the chrome golden's host==i486 byte-identity.
@@ -235,7 +241,7 @@ fn draw_centered_glyph(surface: &mut dyn Surface, rect: Rect, ch: char, color: C
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
     surface.set_clip(Some(rect));
-    surface.draw_text(&TextRun { text: s, x, baseline, size_px: TEXT_SIZE_PX, color });
+    surface.draw_text(&TextRun { text: s, x, baseline, size_px: TEXT_SIZE_PX, color, weight: FontWeight::Normal });
     surface.set_clip(None);
 }
 

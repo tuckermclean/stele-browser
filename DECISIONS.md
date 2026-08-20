@@ -3,6 +3,30 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Text — Terminus font replaces font8x8
+
+### D66 — embed a Terminus (OFL-1.1) subset as the render font, dropping font8x8
+The crude 8x8 `font8x8` (ASCII+Latin-1) is replaced everywhere by an embedded subset of Terminus 4.49.1
+(OFL-1.1): ASCII 0x20-0x7E + Latin-1 0xA0-0xFF, 5 pixel buckets (6x12/8x16/10x20/12x24/16x32) x normal+bold,
+generated from the upstream BDFs by `tools/gen-terminus-glyphs.py` (pinned URL + SHA-256
+`d961c1b781627bf417f9b340693d64fc219e0113ad3a3af1a3424c7aa373ef79`) into a committed
+`src/text/terminus_glyphs.rs`. `TerminusFont` SNAPS a requested `size_px` to the nearest of the 5 buckets
+(exact midpoints round UP) rather than continuously scaling one cell — Terminus ships discrete hinted bitmaps,
+not one shape to rescale — so `ascent/descent/line-height/advance` are step functions of size. `font-weight:
+bold` is now wired to Terminus's real bold weight (`TextRun` gained a weight field; bold was previously
+cascaded but never rendered). Glyphs place at `baseline - ascent` (BDF bitmaps encode a real ascent/descent
+split, unlike font8x8's bottom-aligned 8-row atlas). 16px (the default) metrics are byte-identical to the old
+`vga_8x16`, so non-text layout at the default size is unchanged; sub-14px text (UA h5/h6) now renders at the
+12px bucket instead of font8x8's floor-at-16, and >32px clamps to 32px — a deliberate fidelity change that
+re-blessed ~25 text goldens (kitchen-sink headings + a benign block-in-inline list-marker reflow).
+**Portability:** the embedded subset is the baseline (zero external font dependency on any OS, Linux or not).
+The Monolith now shipping full Terminus on disk is an OPTIONAL future enhancement (load fuller coverage/sizes
+from the system font where present) — noted, not built. **Licensing:** `third_party/terminus-font/OFL.TXT`
+(verbatim) + `NOTICE.md` attribute the subset under OFL-1.1 without misusing the reserved font name;
+user-facing attribution lands via the forthcoming attestation modal. **Size:** i486 binary 1,377,436 bytes =
+93% of the 1.44MB floppy (~97KB headroom; +~160KB over the ~1.22MB post-size-squeeze baseline). Charter: a font
+is a rendering substrate, not dialect surface — no C2 amendment.
+
 ## CSS / fetch — Acid2 eyes prerequisites (data: base64 + url() tokenization)
 
 ### D65 — data: base64 percent-decode, url() semicolon, dimension-unit case (Acid2 eyes prerequisites; fills/geometry deferred)

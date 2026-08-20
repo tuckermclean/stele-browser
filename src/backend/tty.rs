@@ -7,9 +7,9 @@
 //! ## Cell mapping (pins the golden — read before touching the math)
 //!
 //! Fragments live in continuous layout-pixel space; the grid is discrete
-//! 8x16 cells, matching `text::BitmapFont::vga_8x16` (the same font P6's
-//! inline engine measures text with, so a monospace document's fragment
-//! coordinates already fall near cell boundaries).
+//! 8x16 cells, matching `text::TerminusFont`'s 16px-bucket cell (the same
+//! font P6's inline engine measures text with, so a monospace document's
+//! fragment coordinates already fall near cell boundaries).
 //!
 //! - `col = round(rect.origin.x / CELL_W)`, `row = round(rect.origin.y / CELL_H)`.
 //! - **Top, not baseline**: a `Text` fragment's `rect.origin` is the
@@ -750,9 +750,10 @@ fn set_grid_ch(rows: &mut [Vec<Cell>], row: usize, col: usize, ch: char, fg: Col
 ///
 /// KNOWN LIMITATION (documented, not fixed — I2 in the P7 review, logged to
 /// DECISIONS by the orchestrator): this advances exactly one grid column per
-/// `char`, regardless of the fragment's own font size. `text::BitmapFont::
-/// advance` scales with `size_px` (e.g. an h1 at 32px is 16 real pixels —
-/// two cells — per character; an h2 at 24px is 12px, one and a half cells),
+/// `char`, regardless of the fragment's own font size. `text::TerminusFont::
+/// advance` varies by size bucket (e.g. an h1 at the 32px bucket is 16 real
+/// pixels — two cells — per character; an h2 at the 24px bucket is 12px,
+/// one and a half cells),
 /// but the fixed 8px tty cell can only place a run's *start* at a size-aware
 /// `origin.x` cell and then walks it forward one column at a time. Two
 /// `Text` fragments of *different* font sizes sharing one line box (e.g.
