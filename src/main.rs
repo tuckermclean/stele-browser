@@ -27,7 +27,7 @@ use stele::frames;
 use stele::layout::box_tree::build_box_tree_with_pseudo;
 use stele::layout::{self, Size};
 use stele::style::{self, cascade};
-use stele::surface::{Color, MemSurface, Surface};
+use stele::surface::{Color, MemSurface, Rect, Surface};
 use stele::text::translit;
 
 /// Default terminal width in character cells for `--dump-text` when
@@ -1296,6 +1296,14 @@ fn x11_max_scroll(doc_h: u32, win_h: u32) -> u32 {
 /// `Full` is chosen whenever the scroll delta is `>= win_h` — at that point
 /// NOTHING from the old frame is still on screen, so a `CopyArea` would just
 /// be dead weight in front of a full repaint anyway.
+///
+/// packet/browser-chrome (T3): no longer wired into [`x11_scroll_to`] — see
+/// that function's own doc comment for why (the chrome bars break the
+/// "document fills the whole window" assumption this plan relies on).
+/// `#[allow(dead_code)]` because the type and its computing function
+/// (`scroll_blit`) stay correct and unit-tested pure logic, kept for a
+/// possible future viewport-confined version rather than deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrollBlit {
     Full,
@@ -1322,6 +1330,9 @@ enum ScrollBlit {
 /// sends nothing over the wire rather than needing its own separate
 /// early-out. `win_h == 0` degenerates to `Full` (nothing sane to copy),
 /// never a panic/div-by-zero (this function does no division at all).
+/// See [`ScrollBlit`]'s own doc comment for why this is currently unused
+/// outside its own unit tests.
+#[allow(dead_code)]
 fn scroll_blit(old_scroll: u32, new_scroll: u32, win_h: u32) -> ScrollBlit {
     if new_scroll == old_scroll {
         return ScrollBlit::Partial { copy_src_y: 0, copy_dst_y: 0, copy_h: 0, strip_page_y: new_scroll, strip_dst_y: 0, strip_h: 0 };
@@ -1363,22 +1374,76 @@ const DEFAULT_X11_HEIGHT: u32 = 768;
 /// Pixels scrolled per arrow-key press / mouse-wheel notch.
 const X11_LINE_SCROLL: u32 = 60;
 
+/// Compose one full window-sized frame for the interactive `--x11` shell: a
+/// `chrome::layout(width, height)` for placement, the document band
+/// `[scroll_y, scroll_y + vh)` (`vh` = `lay.viewport.h`, NOT `height`)
+/// painted via [`paint_viewport_band`] and copied into the window surface at
+/// `lay.viewport`'s origin, then the top/status bars drawn over it via
+/// `chrome::draw(&mut window, &lay, chrome_state)`. Same compositing shape
+/// `dump_png_chrome_opts` (T2) uses for the static `--dump-png --chrome`
+/// path — a viewport-sized doc render copied into a window-sized surface,
+/// then the bars painted on top — just driven by a live scroll-offset band
+/// instead of a whole-document paint, so it's a separate function rather
+/// than a literal call-out to it (deliberately NOT shared with
+/// `dump_png_chrome_opts`, which is frozen per this packet's own brief).
+///
+/// Total: a `0`-sized `lay.viewport` (a degenerate tiny window) just skips
+/// the doc copy loop — `chrome::draw` itself is already total over any
+/// window size (see its own doc comment).
+fn compose_chrome_window(state: &RenderState, width: u32, height: u32, scroll_y: u32, chrome_state: &chrome::ChromeState) -> MemSurface {
+    let lay = chrome::layout(width, height);
+    let mut window = MemSurface::new(width, height, Color::WHITE);
+
+    if lay.viewport.w > 0 && lay.viewport.h > 0 {
+        let vh = lay.viewport.h;
+        let band = paint_viewport_band(state, width, scroll_y, vh);
+        let (band_w, band_h) = band.size();
+        let band_bytes = band.bytes();
+        let copy_w = lay.viewport.w.min(band_w);
+        let copy_h = lay.viewport.h.min(band_h);
+        for y in 0..copy_h {
+            for x in 0..copy_w {
+                let i = ((y as usize) * (band_w as usize) + (x as usize)) * 4;
+                let color = Color::rgba(band_bytes[i], band_bytes[i + 1], band_bytes[i + 2], band_bytes[i + 3]);
+                window.put_pixel(lay.viewport.x + x as i32, lay.viewport.y + y as i32, color);
+            }
+        }
+    }
+
+    chrome::draw(&mut window, &lay, chrome_state);
+    window
+}
+
 /// Full re-crop + re-convert + re-`PutImage` of the whole window at
 /// `scroll_y` — used for the initial paint, `Expose`'s first-focus setup,
-/// a resize (`ConfigureNotify`), and anything that changes the CONTENT
-/// (reload, navigate), where nothing already on screen is worth retaining
-/// via `CopyArea`. Paints through the server-side `pixmap` back buffer
-/// (`PutImage` into `pixmap`, then one `CopyArea` from `pixmap` to
-/// `window` to present) rather than the window directly — the window is
-/// NEVER `PutImage`d. Manual/interactive-only, like `run_x11` itself (see
-/// its own doc comment) — takes `pixmap`/`window`/`gc`/`depth`/`bpp`/
-/// `scanline_pad` as explicit params (rather than closing over them) since
-/// it's called from both `run_x11` and [`x11_scroll_to`]'s `Full`
-/// fallback.
+/// a resize (`ConfigureNotify`), a scroll (see [`x11_scroll_to`]'s own doc
+/// comment for why THAT no longer has its own optimized path), and anything
+/// that changes the CONTENT (reload, navigate), where nothing already on
+/// screen is worth retaining via `CopyArea`. Composes the document band +
+/// chrome bars via [`compose_chrome_window`], then paints through the
+/// server-side `pixmap` back buffer (`PutImage` into `pixmap`, then one
+/// `CopyArea` from `pixmap` to `window` to present) rather than the window
+/// directly — the window is NEVER `PutImage`d. Manual/interactive-only, like
+/// `run_x11` itself (see its own doc comment) — takes `pixmap`/`window`/
+/// `gc`/`depth`/`bpp`/`scanline_pad` as explicit params (rather than closing
+/// over them) since it's called from both `run_x11` and [`x11_scroll_to`].
 #[allow(clippy::too_many_arguments)]
-fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, state: &RenderState, pixmap: u32, window: u32, gc: u32, depth: u8, bpp: u32, scanline_pad: u32, width: u32, height: u32, scroll_y: u32) {
-    let band = paint_viewport_band(state, width, scroll_y, height);
-    let cropped = crop_surface_rows(&band, width, height, 0);
+fn x11_full_redraw(
+    conn: &mut stele::backend::x11::XConnection,
+    state: &RenderState,
+    pixmap: u32,
+    window: u32,
+    gc: u32,
+    depth: u8,
+    bpp: u32,
+    scanline_pad: u32,
+    width: u32,
+    height: u32,
+    scroll_y: u32,
+    chrome_state: &chrome::ChromeState,
+) {
+    let composed = compose_chrome_window(state, width, height, scroll_y, chrome_state);
+    let cropped = crop_surface_rows(&composed, width, height, 0);
     let stride = x11_row_stride(width, bpp, scanline_pad);
     let fb_info = fb::FbInfo { width, height, bpp, stride };
     match fb::convert_to_fb_bytes(&cropped, width, height, fb_info) {
@@ -1394,16 +1459,26 @@ fn x11_full_redraw(conn: &mut stele::backend::x11::XConnection, state: &RenderSt
     }
 }
 
-/// Repaint the window for a scroll from `old_scroll_y` to `new_scroll_y`,
-/// per [`scroll_blit`]'s plan: `ScrollBlit::Full` falls back to
-/// [`x11_full_redraw`] (nothing survives to copy); `ScrollBlit::Partial`
-/// server-side `CopyArea`s the retained rows WITHIN `pixmap` (skipped
-/// entirely when `copy_h == 0`) and re-crops + re-converts + `PutImage`s
-/// ONLY the newly-exposed strip at `strip_dst_y`, also into `pixmap`
-/// (skipped entirely when `strip_h == 0`, e.g. a no-op scroll) — never the
-/// whole window's worth of pixels. Either way, ends with exactly one
-/// `CopyArea` from `pixmap` to `window` to present the back buffer.
-/// Manual/interactive-only, like `run_x11` itself.
+/// Repaint the window for a scroll from `old_scroll_y` to `new_scroll_y`.
+///
+/// packet/browser-chrome (T3): now ALWAYS a full [`x11_full_redraw`], not
+/// [`scroll_blit`]'s `CopyArea`-the-retained-rows optimization. That
+/// optimization's whole premise was the document filling the ENTIRE window,
+/// so a vertical shift of the window's pixels was also a valid shift of the
+/// document's pixels; with the chrome bars framing a `viewport` band
+/// narrower than the window, a raw `CopyArea` of window rows would drag the
+/// top/status bars around with the scroll (or smear document rows into
+/// them) — wrong on every axis. Reusing/adapting `scroll_blit` to operate on
+/// viewport-relative rows instead is a legitimate nice-to-have (the bars
+/// never move, only `[TOP_H, TOP_H+vh)` needs the retained-rows treatment),
+/// but per this packet's own brief, correctness beats the optimization for
+/// `run_x11` (MANUAL-verify-only, no CI harness) — a full viewport-band
+/// redraw is one `paint_viewport_band` call of `vh` (not `height`) rows plus
+/// two cheap chrome bars, not the whole-document repaint the name might
+/// suggest. `old_scroll_y` is accepted but unused (kept so call sites don't
+/// need to change) — see [`scroll_blit`]'s own doc comment, which is now
+/// dead code kept for its still-correct, still-tested pure logic in case a
+/// future packet wants to wire up the viewport-confined version.
 #[allow(clippy::too_many_arguments)]
 fn x11_scroll_to(
     conn: &mut stele::backend::x11::XConnection,
@@ -1416,36 +1491,11 @@ fn x11_scroll_to(
     scanline_pad: u32,
     width: u32,
     height: u32,
-    old_scroll_y: u32,
+    _old_scroll_y: u32,
     new_scroll_y: u32,
+    chrome_state: &chrome::ChromeState,
 ) {
-    match scroll_blit(old_scroll_y, new_scroll_y, height) {
-        ScrollBlit::Full => x11_full_redraw(conn, state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y),
-        ScrollBlit::Partial { copy_src_y, copy_dst_y, copy_h, strip_page_y, strip_dst_y, strip_h } => {
-            if copy_h > 0 {
-                if let Err(e) = conn.copy_area(pixmap, pixmap, gc, 0, copy_src_y as i16, 0, copy_dst_y as i16, width as u16, copy_h as u16) {
-                    eprintln!("stele: --x11: CopyArea failed: {e}");
-                }
-            }
-            if strip_h > 0 {
-                let band = paint_viewport_band(state, width, strip_page_y, strip_h);
-                let cropped = crop_surface_rows(&band, width, strip_h, 0);
-                let stride = x11_row_stride(width, bpp, scanline_pad);
-                let fb_info = fb::FbInfo { width, height: strip_h, bpp, stride };
-                match fb::convert_to_fb_bytes(&cropped, width, strip_h, fb_info) {
-                    Ok(bytes) => {
-                        if let Err(e) = conn.put_image_at(pixmap, gc, width as u16, strip_h as u16, depth, &bytes, stride as usize, strip_dst_y as i16) {
-                            eprintln!("stele: --x11: PutImage (scroll strip) failed: {e}");
-                        }
-                    }
-                    Err(e) => eprintln!("stele: --x11: pixel conversion (scroll strip) failed: {e}"),
-                }
-            }
-            if let Err(e) = conn.copy_area(pixmap, window, gc, 0, 0, 0, 0, width as u16, height as u16) {
-                eprintln!("stele: --x11: CopyArea (present) failed: {e}");
-            }
-        }
-    }
+    x11_full_redraw(conn, state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, new_scroll_y, chrome_state);
 }
 
 /// Session-accumulated debug counters for `run_x11`, printed to stderr on
@@ -1481,6 +1531,30 @@ struct X11Stats {
     put_image_bytes: u64,
     /// Number of paint brackets (`begin_frame`/`end_frame` pairs).
     frames: u64,
+}
+
+/// Build the live `ChromeState` for one `run_x11` redraw from the shell's
+/// own history/status/loading/throbber state — `history.current()`'s URL
+/// (the display-only address bar), the caller-owned `status` line/`loading`
+/// flag, `throbber_frame`, and `history.can_go_back()`. A tiny free function
+/// rather than a closure so every one of `run_x11`'s several redraw sites
+/// can call it without fighting the borrow checker over `state`/`session`/
+/// `scroll_y`, which are ALSO mutated around the same call sites (a closure
+/// capturing `history`/`status` by reference would otherwise have to
+/// coexist with those other mutable borrows in scope).
+fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading: bool, throbber_frame: u8) -> chrome::ChromeState<'a> {
+    chrome::ChromeState { url: history.current().as_str(), status, loading, throbber_frame, can_go_back: history.can_go_back() }
+}
+
+/// Whether window-pixel point `(x, y)` falls inside `rect` — half-open on
+/// the right/bottom edges (`x < rect.x + rect.w`), matching every other
+/// `Rect` hit-test convention in this codebase. Used to test an `XIntent::
+/// Click`'s raw window coordinates against `chrome::layout`'s `back` rect,
+/// BEFORE any viewport-offset math — the chrome bars live in window space,
+/// not document space.
+fn x11_point_in_rect(rect: Rect, x: i16, y: i16) -> bool {
+    let (x, y) = (x as i32, y as i32);
+    x >= rect.x && x < rect.x + rect.w as i32 && y >= rect.y && y < rect.y + rect.h as i32
 }
 
 /// `stele --x11 <url>`: open a real X11 window (kdrive/Xfbdev, core
@@ -1606,11 +1680,22 @@ fn run_x11(source: &str) {
     });
     let min_keycode = conn.setup.min_keycode;
 
+    // Chrome state (packet/browser-chrome T3): `history` above already owns
+    // the current URL (the address bar's content); these three are the rest
+    // of what `chrome::ChromeState` needs each redraw. `throbber_frame`
+    // advances by one on EVERY redraw (see `x11_chrome_state`'s call
+    // sites below) -- `chrome::draw`'s own throbber only actually animates
+    // while `loading` is true, so the exact cadence elsewhere is harmless.
+    let mut status = String::from("Done");
+    let mut loading = false;
+    let mut throbber_frame: u8 = 0;
+
     let mut scroll_y: u32 = 0;
     let (mut session, mut state) = match load_x11_page(history.current(), width) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("stele: --x11: initial page load failed: {e}");
+            status = format!("Failed to load: {e}");
             (
                 X11Session { dom: dom::parser::parse(""), final_url: history.current().clone() },
                 RenderState { fragments: Vec::new(), bg_images: std::collections::HashMap::new(), doc_height: 1 },
@@ -1630,8 +1715,9 @@ fn run_x11(source: &str) {
         }
     };
 
+    throbber_frame = throbber_frame.wrapping_add(1);
     conn.begin_frame();
-    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
     let _ = conn.end_frame();
     stats.frames += 1;
     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1663,51 +1749,134 @@ fn run_x11(source: &str) {
                     break;
                 }
                 xproto::XIntent::ScrollBy(d) => {
-                    let max_scroll = x11_max_scroll(state.doc_height, height);
+                    // Scroll clamps to the VIEWPORT band's height (`vh`),
+                    // not the whole window -- the doc only ever paints
+                    // inside `chrome::layout`'s `viewport` rect.
+                    let vh = chrome::layout(width, height).viewport.h;
+                    let max_scroll = x11_max_scroll(state.doc_height, vh);
                     let old = scroll_y;
                     scroll_y = ((old as i64 + d as i64).clamp(0, max_scroll as i64)) as u32;
                     if scroll_y != old {
                         stats.scrolls += 1;
+                        throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y);
-                        let _ = conn.end_frame();
-                        stats.frames += 1;
-                    }
-                }
-                xproto::XIntent::Click { x, y } => {
-                    let doc_x = x.max(0) as f32;
-                    let doc_y = y.max(0) as f32 + scroll_y as f32;
-                    if let Some(href) = xproto::hit_test_pixel(&state.fragments, doc_x, doc_y) {
-                        let new_url = history.current().resolve(&href);
-                        history.navigate(new_url.clone());
-                        match load_x11_page(&new_url, width) {
-                            Ok((sess, s)) => {
-                                session = sess;
-                                state = s;
-                                scroll_y = 0;
-                            }
-                            Err(e) => eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}"),
-                        }
-                        // New content -- full repaint, same reasoning as
-                        // ConfigureNotify below.
-                        conn.begin_frame();
-                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
                     }
                 }
+                xproto::XIntent::Click { x, y } => {
+                    let lay = chrome::layout(width, height);
+                    if x11_point_in_rect(lay.back, x, y) && history.can_go_back() {
+                        // Back button: pop history, then reload whatever
+                        // that lands on -- same load path/status/throbber
+                        // treatment as a link click or F5, just sourced from
+                        // `history.back()` instead of `history.navigate()`.
+                        if history.back() {
+                            status = format!("Loading {}...", history.current().as_str());
+                            loading = true;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                            match load_x11_page(history.current(), width) {
+                                Ok((sess, s)) => {
+                                    session = sess;
+                                    state = s;
+                                    scroll_y = 0;
+                                    status = String::from("Done");
+                                }
+                                Err(e) => {
+                                    eprintln!("stele: --x11: back-navigation reload failed: {e}");
+                                    status = format!("Failed to load: {e}");
+                                }
+                            }
+                            loading = false;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+                        }
+                    } else if y >= chrome::TOP_H as i16 && (y as u32) < chrome::TOP_H + lay.viewport.h {
+                        // Inside the viewport band: hit-test in DOCUMENT
+                        // coordinates, offset by the top bar's height and
+                        // the current scroll position -- `x` is unchanged
+                        // (the viewport spans the window's full width).
+                        let doc_x = x.max(0) as f32;
+                        let doc_y = (y as u32 - chrome::TOP_H) as f32 + scroll_y as f32;
+                        if let Some(href) = xproto::hit_test_pixel(&state.fragments, doc_x, doc_y) {
+                            let new_url = history.current().resolve(&href);
+                            history.navigate(new_url.clone());
+
+                            status = format!("Loading {}...", new_url.as_str());
+                            loading = true;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                            match load_x11_page(&new_url, width) {
+                                Ok((sess, s)) => {
+                                    session = sess;
+                                    state = s;
+                                    scroll_y = 0;
+                                    status = String::from("Done");
+                                }
+                                Err(e) => {
+                                    eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}");
+                                    status = format!("Failed to load: {e}");
+                                }
+                            }
+                            loading = false;
+                            // New content -- full repaint, same reasoning as
+                            // ConfigureNotify below.
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+                        }
+                    }
+                    // Else: a click somewhere else in the chrome bars (the
+                    // address field, throbber, a disabled back button, or a
+                    // tiny/degenerate window's dead space) -- display-only,
+                    // ignored.
+                }
                 xproto::XIntent::Reload => {
+                    status = format!("Loading {}...", history.current().as_str());
+                    loading = true;
+                    throbber_frame = throbber_frame.wrapping_add(1);
+                    conn.begin_frame();
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                    let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.put_image_bytes += width as u64 * height as u64 * 4;
+
                     match load_x11_page(history.current(), width) {
                         Ok((sess, s)) => {
                             session = sess;
                             state = s;
                             scroll_y = 0;
+                            status = String::from("Done");
                         }
-                        Err(e) => eprintln!("stele: --x11: reload failed: {e}"),
+                        Err(e) => {
+                            eprintln!("stele: --x11: reload failed: {e}");
+                            status = format!("Failed to load: {e}");
+                        }
                     }
+                    loading = false;
+                    throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1735,11 +1904,15 @@ fn run_x11(source: &str) {
                         }
                         Err(e) => eprintln!("stele: --x11: reflow after resize failed: {e}"),
                     }
-                    scroll_y = scroll_y.min(x11_max_scroll(state.doc_height, height));
+                    // Clamp against the NEW viewport height, not the whole
+                    // window -- same reasoning as the `ScrollBy` handler.
+                    let vh = chrome::layout(width, height).viewport.h;
+                    scroll_y = scroll_y.min(x11_max_scroll(state.doc_height, vh));
                     // Content (and the window geometry itself) changed --
                     // nothing on screen is safe to retain via CopyArea.
+                    throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y);
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;

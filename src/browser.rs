@@ -1346,6 +1346,15 @@ impl History {
             false
         }
     }
+
+    /// Whether `back()` would actually go anywhere — i.e. there's more than
+    /// just the current entry on the stack. Read-only mirror of the same
+    /// `stack.len() > 1` check `back()` itself guards on; lets a caller
+    /// (the chrome's back button, T3) decide whether to render/act as
+    /// enabled WITHOUT mutating history just to find out.
+    pub fn can_go_back(&self) -> bool {
+        self.stack.len() > 1
+    }
 }
 
 // =========================================================================
@@ -1728,6 +1737,16 @@ mod tests {
         let mut h = History::new(Url::new("http://example.com/a".to_string()));
         assert!(!h.back());
         assert_eq!(h.current().as_str(), "http://example.com/a");
+    }
+
+    #[test]
+    fn can_go_back_false_at_the_first_entry_true_after_navigate_false_again_after_back() {
+        let mut h = History::new(Url::new("http://example.com/a".to_string()));
+        assert!(!h.can_go_back());
+        h.navigate(Url::new("http://example.com/b".to_string()));
+        assert!(h.can_go_back());
+        assert!(h.back());
+        assert!(!h.can_go_back());
     }
 
     #[test]
