@@ -1507,3 +1507,26 @@ Append-only running log. Newest at the bottom.
 - **Acid2 progress:** the last per-feature packet. Only Packet 7 remains -- assemble `fixtures/acid2.html`,
   render it, and pixel-verify the reference smiley (the KILL test), plus the deferred `background-position` if
   the face needs it.
+
+## 2026-08-20 -- Acid2 Packet 7: assembly + KILL-test status (the seven-packet program complete)
+
+- **Assembled** `fixtures/acid2.html` (canonical WaSP Acid2 from acid2.acidtests.org; one offline-CI
+  adaptation: the middle nested-object's external `http://www.damowmow.com/404/` -> local-missing
+  `data="404"`, identical fallback semantics, no network). It renders through the engine and **exercises
+  every mechanism the seven packets added** -- position x7, z-index x2, :before/:after x4, 8 `data:` URIs,
+  overflow + max-width, the nested `<object>` eyes cascade x3 -- with the full face palette
+  (red/black/blue/yellow/navy) present.
+- **Honest KILL-test status (pixel-measured + viewed, not rubber-stamped):** Acid2 does NOT yet compose the
+  compact reference smiley. The headless `--dump-png` renderer lays the root out at CONTENT height (no fixed
+  viewport clamp), so Acid2 renders 800x3960 -- the absolutely-positioned face parts sprawl down a tall
+  document rather than being clipped by `html{overflow:hidden}` into an 800x600 window and overlaid into a
+  face. This is a BROWSER-level gap (a fixed-viewport render mode + the D55 positioning-fidelity deferrals),
+  NOT a dialect gap -- every CSS 2.1 feature Acid2 uses is implemented and individually golden-verified
+  (P1-P6). See DECISIONS D61. Per charter S4, no false "smiley" golden is blessed and no pass is claimed.
+- **What ships:** the `acid2.html` fixture (rendered in the gallery for ongoing measurement) + a CI smoke
+  check (it renders to a non-empty PNG without crashing on the full 14 KB input). The pixel-verified smiley
+  golden + the A5 KILL gate wait until a fixed-viewport windowed render exists -- the natural home of which is
+  the interactive browser view (the windowed chrome, next).
+- **The dialect is done.** "What Stele Speaks" now covers every CSS 2.1 mechanism Acid2 exercises. Stele grew
+  from an 800x3976 flat flow (pre-P1) to a document engine that places, stacks, generates, decodes, clamps,
+  clips, and falls back -- the polite web's native constituency, rendered from scratch inside the floppy.

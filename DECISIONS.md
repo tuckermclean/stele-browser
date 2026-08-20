@@ -5,6 +5,30 @@ revisit-trigger. Newest first.
 
 ## Rendering — <object> nested fallback (Acid2 Packet 6)
 
+## Acid2 — assembly + KILL-test status (Acid2 Packet 7)
+
+### D61 -- Acid2 assembles and exercises every feature; the compact smiley awaits a fixed-viewport render
+`fixtures/acid2.html` (the canonical WaSP test, from acid2.acidtests.org; one offline adaptation -- the
+middle nested-object's external `http://www.damowmow.com/404/`, which always falls back to the inner eyes
+`data:` PNG, becomes a local-missing `data="404"` for deterministic no-network CI) now renders through the
+engine. **It exercises every P1-P6 mechanism it uses** -- position x7 (P1), z-index x2 (P2), :before/:after x4
+(P3), 8 `data:` URIs (P4), overflow + max-width (P5), the nested `<object>` eyes cascade x3 (P6) -- and the
+face palette (red/black/blue/yellow/navy) all renders. **But it does NOT compose the compact reference
+smiley.** Root cause, diagnosed honestly (not rubber-stamped -- render pixel-measured + viewed): the headless
+`--dump-png` renderer lays the root out at CONTENT height (`block.rs`: "height is always content-derived...
+no fixed viewport clamp"), so Acid2 renders 800x3960 -- the absolutely-positioned face parts sprawl down a
+tall document instead of being clipped by `html{overflow:hidden}` into an 800x600 window and overlaid into a
+face. **This is a BROWSER-level gap, not a dialect gap:** the missing piece is a fixed-viewport render mode
+(clamp the root height to the window; P5's `overflow:hidden` clip then composes the face), plus the
+already-recorded positioning-fidelity deferrals (D55 Finding A: `fixed` anchors to the body box, not the
+viewport). **Decision:** do NOT bless a false "smiley" golden and do NOT claim a pass (charter §4). The
+seven-packet DIALECT program is complete; the KILL-test pass is deferred to a fixed-viewport windowed render
+-- the natural home of which is the interactive browser view (the windowed chrome). `acid2.html` ships as a
+fixture and is smoke-checked in CI (renders to a non-empty PNG without crashing on the full 14 KB input);
+the pixel golden waits until the fixed-viewport render lands. **Revisit trigger:** when a windowed/fixed-
+viewport render exists, re-render Acid2 in it, pixel-verify the face against the WaSP reference, and only then
+bless the smiley golden + wire the A5 gate.
+
 ### D60 -- <object> renders its decoded data image, else its (nested) fallback children
 Acid2 builds parts of the face from nested `<object>`s. **Realization:** `<object>` was already NOT in
 `box_tree::is_replaced`, so it already rendered its children (the fallback) -- only the PRIMARY representation
