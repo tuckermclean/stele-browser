@@ -2472,12 +2472,22 @@ fn emit<M: Metrics>(
                         },
                         kind: f.kind,
                         interactive: f.interactive,
-                        // `f.id`/`f.is_fixed` (Acid2 scroll-to-fragment
-                        // packet, Task 1) were already computed correctly by
+                        // `f.id` (Acid2 scroll-to-fragment packet, Task 1)
+                        // was already computed correctly by
                         // `cell_content_layout`'s OWN isolated `emit` call —
                         // carried straight through, same as `f.kind` above.
                         id: f.id,
-                        is_fixed: f.is_fixed,
+                        // `is_fixed`, however, is NOT: `cell_content_layout`'s
+                        // isolated `emit` always runs with `is_fixed_ctx =
+                        // false` (a cell has no viewport frame of its own), so
+                        // `f.is_fixed` is always `false` here. If THIS table is
+                        // itself inside a `position:fixed` ancestor, its cell
+                        // contents inherit that — privilege the ambient
+                        // `is_fixed_ctx`, exactly as `clip` privileges the
+                        // ambient clip just below. (`|| f.is_fixed` keeps
+                        // headroom for a future "fixed nested inside a `<td>`"
+                        // fix that this packet does not attempt.)
+                        is_fixed: is_fixed_ctx || f.is_fixed,
                         // Acid2 Packet 5, Task 2: `f.clip` (if any) was
                         // computed by `cell_content_layout`'s OWN isolated
                         // `emit` call, rooted at local origin (0,0) -- it is

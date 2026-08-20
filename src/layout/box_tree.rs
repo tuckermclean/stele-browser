@@ -119,11 +119,21 @@ fn build_node<'a>(
     depth: usize,
     form_action: Option<&'a str>,
 ) -> Option<LayoutNode> {
-    let mut node = build_node_inner(dom, styles, images, pseudo, id, depth, form_action)?;
+    build_node_inner(dom, styles, images, pseudo, id, depth, form_action).map(|n| stamp_id(dom, id, n))
+}
+
+/// Stamp [`LayoutNode::id`] from the source DOM node's `id` attribute, when
+/// that node is an element carrying one. Applied at every recursion site (the
+/// top-level `build_node` wrapper AND the in-tree `build_node_inner` calls) so
+/// each DOM level costs exactly ONE `build_node_inner` stack frame. Recursing
+/// through the `build_node` wrapper instead would double the frames per level
+/// and regress `deeply_nested_dom_does_not_abort_and_returns` into a stack
+/// overflow. Case-sensitivity/trimming matches `build_node`'s own doc comment.
+fn stamp_id(dom: &Dom, id: NodeId, mut node: LayoutNode) -> LayoutNode {
     if let Node::Element(el) = dom.node(id) {
         node.id = el.attrs.get("id").map(|s| s.trim().to_string().into_boxed_str());
     }
-    Some(node)
+    node
 }
 
 /// `form_action` is the nearest enclosing `<form>`'s raw `action` attribute
@@ -202,7 +212,7 @@ fn build_node_inner<'a>(
                 } else {
                     el.children
                         .iter()
-                        .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, action))
+                        .filter_map(|&child| build_node_inner(dom, styles, images, pseudo, child, depth + 1, action).map(|n| stamp_id(dom, child, n)))
                         .collect()
                 };
                 return Some(LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None });
@@ -220,7 +230,7 @@ fn build_node_inner<'a>(
                 } else {
                     el.children
                         .iter()
-                        .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, form_action))
+                        .filter_map(|&child| build_node_inner(dom, styles, images, pseudo, child, depth + 1, form_action).map(|n| stamp_id(dom, child, n)))
                         .collect()
                 };
                 let mut node = LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None };
@@ -276,7 +286,7 @@ fn build_node_inner<'a>(
             } else {
                 el.children
                     .iter()
-                    .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, form_action))
+                    .filter_map(|&child| build_node_inner(dom, styles, images, pseudo, child, depth + 1, form_action).map(|n| stamp_id(dom, child, n)))
                     .collect()
             };
             // ::before / ::after generated boxes (Acid2 P3): prepend the
@@ -905,7 +915,7 @@ fn build_details_node<'a>(
     let summary_id = find_first_summary(dom, el);
 
     let summary_box = summary_id
-        .and_then(|sid| build_node(dom, styles, images, pseudo, sid, depth + 1, form_action))
+        .and_then(|sid| build_node_inner(dom, styles, images, pseudo, sid, depth + 1, form_action).map(|n| stamp_id(dom, sid, n)))
         .map(|mut node| {
             node.children.insert(0, marker_node(marker, &node.style));
             node
@@ -918,7 +928,7 @@ fn build_details_node<'a>(
             if Some(child) == summary_id {
                 continue; // already placed above, markered.
             }
-            if let Some(node) = build_node(dom, styles, images, pseudo, child, depth + 1, form_action) {
+            if let Some(node) = build_node_inner(dom, styles, images, pseudo, child, depth + 1, form_action).map(|n| stamp_id(dom, child, n)) {
                 children.push(node);
             }
         }
@@ -1079,7 +1089,7 @@ fn build_list_container_node<'a>(
     let mut children = Vec::with_capacity(el.children.len());
     for &child in &el.children {
         let tag_is_li = matches!(dom.node(child), Node::Element(e) if is_li(e));
-        let Some(mut node) = build_node(dom, styles, images, pseudo, child, depth + 1, form_action) else {
+        let Some(mut node) = build_node_inner(dom, styles, images, pseudo, child, depth + 1, form_action).map(|n| stamp_id(dom, child, n)) else {
             continue; // display:none (or any other total-absence case): no box, no number consumed.
         };
         // A marker (and the ordinal it would consume) is only for a box
