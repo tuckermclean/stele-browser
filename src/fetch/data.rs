@@ -46,6 +46,9 @@ trait StripSuffixCi {
 impl StripSuffixCi for str {
     fn strip_suffix_ci(&self, suffix: &str) -> Option<&str> {
         let n = self.len().checked_sub(suffix.len())?;
+        if !self.is_char_boundary(n) {
+            return None;
+        }
         if self[n..].eq_ignore_ascii_case(suffix) {
             Some(&self[..n])
         } else {
@@ -245,6 +248,17 @@ mod tests {
     fn fetch_non_data_scheme_is_protocol_error() {
         let err = fetch(&get("http://example.com")).unwrap_err();
         assert!(matches!(err, FetchError::Protocol(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn fetch_non_ascii_media_type_does_not_panic_on_char_boundary() {
+        // Regression: `meta` = "ñabcdef" is 8 bytes (ñ is 2 bytes), so
+        // `n = 8 - len(";base64") = 8 - 7 = 1` falls inside the 2-byte `ñ`.
+        // `strip_suffix_ci` must not panic when slicing at a non-char
+        // boundary; it should treat this as "no ;base64 suffix" instead.
+        let resp = fetch(&get("data:ñabcdef,test")).unwrap();
+        assert_eq!(resp.body, b"test");
+        assert_eq!(resp.header("content-type"), Some("ñabcdef"));
     }
 
     // Minimal base64 encoder used only by tests, to avoid hand-typing base64
