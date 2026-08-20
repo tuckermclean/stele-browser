@@ -1068,6 +1068,63 @@ else
     bad "A5g: PNG dump of $FIXTURE_POS_NESTED differs from $GOLDEN_PNG_POS_NESTED"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_POS_NESTED") actual=$(wc -c < /tmp/stele_a5g.png)"
   fi
+
+  FIXTURE_Z_ORDER="fixtures/z-order.html"
+  GOLDEN_PNG_Z_ORDER="goldens/z-order.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5h: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_Z_ORDER" /tmp/stele_a5h.png 2>/tmp/stele_a5h.err; then
+    bad "A5h: stele --headless --dump-png crashed on $FIXTURE_Z_ORDER"
+    sed 's/^/    /' /tmp/stele_a5h.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5h.png "$GOLDEN_PNG_Z_ORDER"
+    pass "A5h: blessed z-order PNG golden -> $GOLDEN_PNG_Z_ORDER (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_Z_ORDER" ]; then
+    bad "A5h: no golden at $GOLDEN_PNG_Z_ORDER to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_Z_ORDER" /tmp/stele_a5h.png; then
+    pass "A5h: PNG dump of $FIXTURE_Z_ORDER matches golden"
+  else
+    bad "A5h: PNG dump of $FIXTURE_Z_ORDER differs from $GOLDEN_PNG_Z_ORDER"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_Z_ORDER") actual=$(wc -c < /tmp/stele_a5h.png)"
+  fi
+
+  FIXTURE_Z_NEGATIVE="fixtures/z-negative.html"
+  GOLDEN_PNG_Z_NEGATIVE="goldens/z-negative.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5i: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_Z_NEGATIVE" /tmp/stele_a5i.png 2>/tmp/stele_a5i.err; then
+    bad "A5i: stele --headless --dump-png crashed on $FIXTURE_Z_NEGATIVE"
+    sed 's/^/    /' /tmp/stele_a5i.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5i.png "$GOLDEN_PNG_Z_NEGATIVE"
+    pass "A5i: blessed z-negative PNG golden -> $GOLDEN_PNG_Z_NEGATIVE (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_Z_NEGATIVE" ]; then
+    bad "A5i: no golden at $GOLDEN_PNG_Z_NEGATIVE to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_Z_NEGATIVE" /tmp/stele_a5i.png; then
+    pass "A5i: PNG dump of $FIXTURE_Z_NEGATIVE matches golden"
+  else
+    bad "A5i: PNG dump of $FIXTURE_Z_NEGATIVE differs from $GOLDEN_PNG_Z_NEGATIVE"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_Z_NEGATIVE") actual=$(wc -c < /tmp/stele_a5i.png)"
+  fi
+
+  FIXTURE_Z_TIE="fixtures/z-tie.html"
+  GOLDEN_PNG_Z_TIE="goldens/z-tie.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5j: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_Z_TIE" /tmp/stele_a5j.png 2>/tmp/stele_a5j.err; then
+    bad "A5j: stele --headless --dump-png crashed on $FIXTURE_Z_TIE"
+    sed 's/^/    /' /tmp/stele_a5j.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5j.png "$GOLDEN_PNG_Z_TIE"
+    pass "A5j: blessed z-tie PNG golden -> $GOLDEN_PNG_Z_TIE (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_Z_TIE" ]; then
+    bad "A5j: no golden at $GOLDEN_PNG_Z_TIE to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_Z_TIE" /tmp/stele_a5j.png; then
+    pass "A5j: PNG dump of $FIXTURE_Z_TIE matches golden"
+  else
+    bad "A5j: PNG dump of $FIXTURE_Z_TIE differs from $GOLDEN_PNG_Z_TIE"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_Z_TIE") actual=$(wc -c < /tmp/stele_a5j.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
