@@ -34,12 +34,12 @@ use crate::style::computed::FontWeight;
 /// rows are numerically identical to the raw BDF bytes.
 #[test]
 fn a_at_16px_normal_matches_the_hand_reversed_bdf_bytes() {
-    let expected: [u8; 16] =
+    const EXPECTED: [u8; 16] =
         [0x00, 0x00, 0x3C, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00];
     let g = terminus_glyphs::lookup(16.0, FontWeight::Normal, 'A');
     assert_eq!(g.cell_w, 8);
     assert_eq!(g.cell_h, 16);
-    assert_eq!(g.rows, GlyphRows::Narrow(&expected));
+    assert_eq!(g.rows, GlyphRows::Narrow(&EXPECTED));
 }
 
 /// `ter-u16b.bdf`'s `'A'`: `00 00 7C C6 C6 C6 C6 FE C6 C6 C6 C6 00 00 00 00`
@@ -48,12 +48,12 @@ fn a_at_16px_normal_matches_the_hand_reversed_bdf_bytes() {
 /// `0x63` (`0110 0011`); `0xFE` (`1111 1110`) -> `0x7F` (`0111 1111`).
 #[test]
 fn a_at_16px_bold_matches_the_hand_reversed_bdf_bytes() {
-    let expected: [u8; 16] =
+    const EXPECTED: [u8; 16] =
         [0x00, 0x00, 0x3E, 0x63, 0x63, 0x63, 0x63, 0x7F, 0x63, 0x63, 0x63, 0x63, 0x00, 0x00, 0x00, 0x00];
     let g = terminus_glyphs::lookup(16.0, FontWeight::Bold, 'A');
     assert_eq!(g.cell_w, 8);
     assert_eq!(g.cell_h, 16);
-    assert_eq!(g.rows, GlyphRows::Narrow(&expected));
+    assert_eq!(g.rows, GlyphRows::Narrow(&EXPECTED));
 
     // Bold really is different data from normal at the same char/size (not
     // an accidental alias) -- distinguishes this test from the (coincidentally
@@ -75,7 +75,7 @@ fn a_at_16px_bold_matches_the_hand_reversed_bdf_bytes() {
 /// settle separately.
 #[test]
 fn a_at_32px_normal_is_the_wide_u16_row_bucket_and_matches_hand_reversed_bytes() {
-    let expected: [u16; 32] = [
+    const EXPECTED: [u16; 32] = [
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0FF0, 0x1FF8, 0x381C, 0x300C, 0x300C, 0x300C, 0x300C,
         0x300C, 0x300C, 0x300C, 0x3FFC, 0x3FFC, 0x300C, 0x300C, 0x300C, 0x300C, 0x300C, 0x300C, 0x300C, 0x300C,
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
@@ -83,7 +83,7 @@ fn a_at_32px_normal_is_the_wide_u16_row_bucket_and_matches_hand_reversed_bytes()
     let g = terminus_glyphs::lookup(32.0, FontWeight::Normal, 'A');
     assert_eq!(g.cell_w, 16);
     assert_eq!(g.cell_h, 32);
-    assert_eq!(g.rows, GlyphRows::Wide(&expected));
+    assert_eq!(g.rows, GlyphRows::Wide(&EXPECTED));
 }
 
 /// Total over all of `char`: a scalar well outside both embedded ranges
@@ -99,14 +99,22 @@ fn glyph_outside_the_subset_returns_the_fallback_box_not_a_panic() {
         // The 16px hollow-box fallback, by construction (see this test
         // module's doc comment / the generator's `fallback_rows`): row 0 and
         // the last row blank, rows 1 and 14 a full horizontal bar (0x7E),
-        // rows 2..=13 just the two side columns (0x42).
+        // rows 2..=13 just the two side columns (0x42). Built with `let mut`
+        // (not `const`) since it's assembled via a runtime loop, so the
+        // comparison below matches on `g.rows` and compares the underlying
+        // slice VALUES (works across the `&'static` vs. stack-local lifetime
+        // difference) rather than constructing a fresh `GlyphRows::Narrow`
+        // (which would require promoting this array to `'static`).
         let mut expected = [0u8; 16];
         expected[1] = 0x7E;
         expected[14] = 0x7E;
         for row in expected.iter_mut().take(14).skip(2) {
             *row = 0x42;
         }
-        assert_eq!(g.rows, GlyphRows::Narrow(&expected), "unexpected fallback shape for {ch:?}");
+        match g.rows {
+            GlyphRows::Narrow(rows) => assert_eq!(rows, &expected[..], "unexpected fallback shape for {ch:?}"),
+            GlyphRows::Wide(_) => panic!("expected the Narrow (u8-row) 16px bucket for {ch:?}"),
+        }
     }
 }
 
@@ -124,7 +132,10 @@ fn fallback_box_at_the_12px_bucket_has_the_expected_inset_shape() {
     for row in expected.iter_mut().take(10).skip(2) {
         *row = 0x12; // bit1 | bit4
     }
-    assert_eq!(g.rows, GlyphRows::Narrow(&expected));
+    match g.rows {
+        GlyphRows::Narrow(rows) => assert_eq!(rows, &expected[..]),
+        GlyphRows::Wide(_) => panic!("expected the Narrow (u8-row) 12px bucket"),
+    }
 }
 
 /// Structural completeness: every one of the 191 (ASCII + Latin-1) glyphs is
