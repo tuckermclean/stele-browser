@@ -191,6 +191,18 @@ pub enum Float {
     Right,
 }
 
+/// CSS `position` (Acid2 Packet 1, C2 amendment). Non-inherited box property,
+/// same resolution shape as `float`/`clear`/`box_sizing`. `Static` is the CSS
+/// initial value. `Fixed` maps to absolute-vs-viewport in layout (no scroll in
+/// the static render — see the packet spec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Clear {
     None,
@@ -413,6 +425,16 @@ pub struct ComputedStyle {
     pub border_collapse: BorderCollapse,
     pub float: Float,
     pub clear: Clear,
+    /// `position: static | relative | absolute | fixed` (Acid2 Packet 1).
+    /// Non-inherited ("own") box property, same resolution shape as `float`/
+    /// `clear`/`box_sizing`. `Static` is the CSS initial value.
+    pub position: Position,
+    /// `top`/`right`/`bottom`/`left` (the "inset" properties, Acid2 Packet
+    /// 1) — same type `margin` uses (`Edges<LengthPercentageAuto>`), since
+    /// both share the identical `<length> | <percentage> | auto` grammar.
+    /// Only meaningful when `position` is not `Static`; defaults to `auto`
+    /// on all four edges (CSS's own initial value for each).
+    pub inset: Edges<LengthPercentageAuto>,
     /// `box-sizing` (packet/acid1-content-box) -- non-inherited ("own") box
     /// property, same resolution shape as `border_collapse`/`float`/`clear`
     /// right above. Defaults to `ContentBox` (`Default` impl below), CSS's
@@ -492,6 +514,8 @@ impl Default for ComputedStyle {
             border_collapse: BorderCollapse::Separate,
             float: Float::None,
             clear: Clear::None,
+            position: Position::Static,
+            inset: Edges::all(LengthPercentageAuto::Auto),
             box_sizing: BoxSizing::ContentBox,
 
             flex_direction: FlexDirection::Row,

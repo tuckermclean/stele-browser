@@ -6,8 +6,8 @@
 use crate::dom::AttrMap;
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Display, FlexDirection, FlexWrap, Float,
-    FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, TextAlign, TextDecoration, VerticalAlign,
-    WhiteSpace,
+    FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Position, TextAlign, TextDecoration,
+    VerticalAlign, WhiteSpace,
 };
 use crate::style::tokenizer::Token;
 use crate::surface::Color;
@@ -210,6 +210,12 @@ pub(crate) struct Declarations {
     pub border_collapse: Option<BorderCollapse>,
     pub float: Option<Float>,
     pub clear: Option<Clear>,
+    /// `position: static | relative | absolute | fixed` (Acid2 Packet 1) --
+    /// mirrors `float`'s own keyword-enum shape exactly.
+    pub position: Option<Position>,
+    /// `top`/`right`/`bottom`/`left` (Acid2 Packet 1) -- mirrors `margin`'s
+    /// own `EdgesRaw<RawLengthAuto>` shape exactly (same grammar per edge).
+    pub inset: EdgesRaw<RawLengthAuto>,
     /// `box-sizing: content-box | border-box` (packet/acid1-content-box) --
     /// `fixtures/grid.html`'s `* { box-sizing: border-box; }` is the one
     /// fixture that declares it today; `None` (not `Some(ContentBox)`) is
@@ -310,6 +316,7 @@ impl Declarations {
         ov!(border_collapse);
         ov!(float);
         ov!(clear);
+        ov!(position);
         ov!(box_sizing);
         ov!(flex_direction);
         ov!(flex_wrap);
@@ -322,6 +329,7 @@ impl Declarations {
         ov!(gap);
         ov!(column_gap);
         self.margin.overlay(&other.margin);
+        self.inset.overlay(&other.inset);
         self.padding.overlay(&other.padding);
         self.border_width.overlay(&other.border_width);
         // `background_image` isn't `Copy` (see its field doc comment), so it
@@ -1630,6 +1638,13 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
         "margin-right" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.margin.right = Some(l)).is_some(),
         "margin-bottom" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.margin.bottom = Some(l)).is_some(),
         "margin-left" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.margin.left = Some(l)).is_some(),
+        // `top`/`right`/`bottom`/`left` (Acid2 Packet 1 "inset" longhands) --
+        // same grammar and per-edge shape as `margin-top`/etc. above (a
+        // length, a percentage, or `auto`), mirrored verbatim.
+        "top" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.inset.top = Some(l)).is_some(),
+        "right" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.inset.right = Some(l)).is_some(),
+        "bottom" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.inset.bottom = Some(l)).is_some(),
+        "left" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.inset.left = Some(l)).is_some(),
         "padding" => apply_edges_shorthand(tokens, &mut d.padding, token_to_raw_length),
         "padding-top" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.top = Some(l)).is_some(),
         "padding-right" => tokens.first().and_then(token_to_raw_length).map(|l| d.padding.right = Some(l)).is_some(),
@@ -1690,6 +1705,27 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             Some("none") => {
                 d.float = Some(Float::None);
+                true
+            }
+            _ => false,
+        },
+        // `position` (Acid2 Packet 1): mirrors `float`'s keyword-enum arm
+        // shape exactly -- unrecognized/missing keyword returns false.
+        "position" => match keyword(tokens).as_deref() {
+            Some("static") => {
+                d.position = Some(Position::Static);
+                true
+            }
+            Some("relative") => {
+                d.position = Some(Position::Relative);
+                true
+            }
+            Some("absolute") => {
+                d.position = Some(Position::Absolute);
+                true
+            }
+            Some("fixed") => {
+                d.position = Some(Position::Fixed);
                 true
             }
             _ => false,
@@ -2148,6 +2184,32 @@ mod tests {
         let mut d = Declarations::default();
         assert!(apply_property("margin", &toks("auto"), &mut d));
         assert_eq!(d.margin.top, Some(RawLengthAuto::Auto));
+    }
+
+    #[test]
+    fn apply_property_parses_position_keyword() {
+        let mut d = Declarations::default();
+        assert!(apply_property("position", &toks("absolute"), &mut d));
+        assert_eq!(d.position, Some(Position::Absolute));
+        assert!(apply_property("position", &toks("relative"), &mut d));
+        assert_eq!(d.position, Some(Position::Relative));
+        assert!(apply_property("position", &toks("fixed"), &mut d));
+        assert_eq!(d.position, Some(Position::Fixed));
+        assert!(apply_property("position", &toks("static"), &mut d));
+        assert_eq!(d.position, Some(Position::Static));
+    }
+
+    #[test]
+    fn apply_property_parses_inset_offsets_like_margin() {
+        let mut d = Declarations::default();
+        assert!(apply_property("top", &toks("10px"), &mut d));
+        assert!(apply_property("left", &toks("-5px"), &mut d));
+        assert!(apply_property("right", &toks("auto"), &mut d));
+        assert!(apply_property("bottom", &toks("50%"), &mut d));
+        assert_eq!(d.inset.top, Some(RawLengthAuto::Length(RawLength::Px(10.0))));
+        assert_eq!(d.inset.left, Some(RawLengthAuto::Length(RawLength::Px(-5.0))));
+        assert_eq!(d.inset.right, Some(RawLengthAuto::Auto));
+        assert_eq!(d.inset.bottom, Some(RawLengthAuto::Length(RawLength::Percent(50.0))));
     }
 
     #[test]

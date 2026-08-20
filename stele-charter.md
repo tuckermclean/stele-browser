@@ -70,7 +70,10 @@ converge, not grow.
       + var() (packet T1a); block floats via the flex substrate
       (PR #65, +16 KB); CSS GRID, handed to taffy's own algorithm, not
       reimplemented (PR #69); box-model completion — box-sizing,
-      per-side borders, margin collapsing. Still candidates: <details>/
+      per-side borders, margin collapsing; CSS positioning — position
+      (static/relative/absolute/fixed) + top/right/bottom/left offsets,
+      on taffy's native Position/inset (Acid2 Packet 1). Still
+      candidates: <details>/
       <summary> interactive toggle (rendered as blocks today), MathML,
       static SVG. The dialect ships as a versioned one-page document:
       "What Stele Speaks."

@@ -122,7 +122,7 @@ use taffy::prelude::{
 // from `taffy::prelude` (only flexbox/grid additions are) -- pull them from
 // the crate root, same seam the proving spike (spike/taffy-float-layout)
 // used.
-use taffy::{BoxSizing as TBoxSizing, Clear as TClear, Float as TFloat};
+use taffy::{BoxSizing as TBoxSizing, Clear as TClear, Float as TFloat, Position as TPosition};
 
 use crate::layout::inline::{self, InlineContent, InlineRun};
 use crate::layout::table::{self, CellSpec, TableLayout, TableSpec};
@@ -131,7 +131,7 @@ use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode,
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, BoxSizing, Clear, Display, FlexDirection,
     FlexWrap, Float, GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize, JustifyContent,
-    LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, TextAlign,
+    LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, Position, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -1576,6 +1576,24 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
         float: map_float(cs.float),
         clear: map_clear(cs.clear),
         box_sizing: box_sizing_for(cs),
+        position: map_position(cs.position),
+        // CSS 2.1 §9.4.2: `top`/`right`/`bottom`/`left` have NO effect on a
+        // statically-positioned box. taffy has no `Static` (we map it to
+        // `Relative`, see `map_position`) and WOULD fold any inset into the
+        // flow offset, so a static box must map to taffy's auto/no-op insets
+        // regardless of its computed `inset`. Positioned boxes use the real
+        // offsets.
+        inset: if cs.position == Position::Static {
+            let auto = map_lpa(LengthPercentageAuto::Auto);
+            TRect { left: auto, right: auto, top: auto, bottom: auto }
+        } else {
+            TRect {
+                left: map_lpa(cs.inset.left),
+                right: map_lpa(cs.inset.right),
+                top: map_lpa(cs.inset.top),
+                bottom: map_lpa(cs.inset.bottom),
+            }
+        },
         ..Default::default()
     }
 }
@@ -1692,6 +1710,39 @@ fn map_clear(clear: Clear) -> TClear {
         Clear::Left => TClear::Left,
         Clear::Right => TClear::Right,
         Clear::Both => TClear::Both,
+    }
+}
+
+/// Maps Stele's `Position` (`src/style/computed.rs`) onto taffy's
+/// `Position`, which -- unlike CSS -- has only two variants: `Relative`
+/// (in-flow, offsets applied as a post-layout correction) and `Absolute`
+/// (out-of-flow, positioned against the nearest positioned ancestor).
+/// `Static` and `Relative` are both in-flow in CSS, so both map to taffy's
+/// `Relative`; `base_style` then forces a `Static` box's taffy `inset` to
+/// `Auto` (a no-op offset -- CSS 2.1 §9.4.2: offset properties have no
+/// effect on a statically-positioned box), so any declared
+/// `top`/`right`/`bottom`/`left` is ignored. Only `Relative`/`Absolute`/
+/// `Fixed` boxes receive their computed `cs.inset`. `Absolute` and `Fixed`
+/// are both out-of-flow, so both map to taffy's `Absolute`; `Fixed`'s
+/// viewport-relative containing block (as opposed to `Absolute`'s
+/// nearest-positioned-ancestor one) is handled in layout, not here (no
+/// scroll in the static render -- see the packet spec).
+fn map_position(p: Position) -> TPosition {
+    match p {
+        Position::Static | Position::Relative => TPosition::Relative,
+        Position::Absolute | Position::Fixed => TPosition::Absolute,
+    }
+}
+
+/// A `Built` node's CSS `position` for paint-order partitioning in `emit`
+/// (design §3). `Inline` runs are never positioned blocks, so they count as
+/// `Static` (in-flow).
+fn built_position(b: &Built) -> Position {
+    match b {
+        Built::Container { style, .. }
+        | Built::Replaced { style, .. }
+        | Built::Table { style, .. } => style.position,
+        Built::Inline { .. } => Position::Static,
     }
 }
 
@@ -1964,7 +2015,14 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: interactive.clone(),
             });
-            for child in children {
+            // Paint order (CSS 2.1 steps 3-6, no z-index yet -- that is
+            // Packet 2): in-flow (static) children first, then positioned
+            // (relative/absolute/fixed) children, stable within each group
+            // so same-group source order is preserved.
+            for child in children.iter().filter(|c| built_position(c) == Position::Static) {
+                emit(child, taffy, origin, metrics, out);
+            }
+            for child in children.iter().filter(|c| built_position(c) != Position::Static) {
                 emit(child, taffy, origin, metrics, out);
             }
         }
@@ -2279,5 +2337,61 @@ mod tests {
         let cs = ComputedStyle { box_sizing: BoxSizing::BorderBox, ..ComputedStyle::default() };
         let style = base_style(&cs);
         assert_eq!(style.box_sizing, TBoxSizing::BorderBox);
+    }
+
+    // ---- Acid2 P1 Task 2: `position`/`inset` -> taffy ----
+
+    #[test]
+    fn base_style_maps_position_and_inset_to_taffy() {
+        // Static (the default) and Relative are both in-flow in CSS, and
+        // taffy has no `Static` variant -- both map to taffy's `Relative`.
+        assert_eq!(base_style(&ComputedStyle::default()).position, TPosition::Relative);
+        let rel = ComputedStyle { position: Position::Relative, ..ComputedStyle::default() };
+        assert_eq!(base_style(&rel).position, TPosition::Relative);
+
+        // Absolute and Fixed are both out-of-flow -- both map to taffy's
+        // Absolute (Fixed's viewport containing block is a layout concern,
+        // not this mapping's).
+        let abs = ComputedStyle { position: Position::Absolute, ..ComputedStyle::default() };
+        assert_eq!(base_style(&abs).position, TPosition::Absolute);
+        let fixed = ComputedStyle { position: Position::Fixed, ..ComputedStyle::default() };
+        assert_eq!(base_style(&fixed).position, TPosition::Absolute);
+
+        // A static box's insets are all Auto (ComputedStyle::default()),
+        // which must map to taffy's own all-Auto default inset -- i.e. no
+        // offset, golden-safe for every existing (non-positioned) fixture.
+        let default_inset = base_style(&ComputedStyle::default()).inset;
+        let auto = map_lpa(LengthPercentageAuto::Auto);
+        assert_eq!(default_inset.top, auto);
+        assert_eq!(default_inset.right, auto);
+        assert_eq!(default_inset.bottom, auto);
+        assert_eq!(default_inset.left, auto);
+
+        // `inset.top` uses the SAME per-edge `LengthPercentageAuto` ->
+        // taffy conversion `margin` already uses -- setting both to the
+        // same length must produce identical taffy outputs.
+        let mut cs = ComputedStyle { position: Position::Absolute, ..ComputedStyle::default() };
+        cs.inset.top = LengthPercentageAuto::Px(10.0);
+        cs.margin.top = LengthPercentageAuto::Px(10.0);
+        let ts = base_style(&cs);
+        assert_eq!(ts.inset.top, ts.margin.top);
+        assert_eq!(ts.inset.top, TLengthPercentageAuto::length(10.0));
+    }
+
+    #[test]
+    fn static_box_ignores_inset_offsets() {
+        // CSS 2.1 §9.4.2: top/right/bottom/left have no effect on a static
+        // box, even though they have computed values. A static box must map
+        // to taffy's all-Auto inset regardless of what `cs.inset` says.
+        let mut cs = ComputedStyle::default(); // position defaults to Static
+        cs.inset.top = LengthPercentageAuto::Px(50.0);
+        cs.inset.left = LengthPercentageAuto::Px(10.0);
+        let auto = map_lpa(LengthPercentageAuto::Auto);
+        let ts = base_style(&cs);
+        assert_eq!(ts.position, TPosition::Relative);
+        assert_eq!(ts.inset.top, auto, "static box must ignore `top`");
+        assert_eq!(ts.inset.left, auto, "static box must ignore `left`");
+        assert_eq!(ts.inset.right, auto);
+        assert_eq!(ts.inset.bottom, auto);
     }
 }
