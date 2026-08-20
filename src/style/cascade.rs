@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 use crate::dom::{Dom, Node, NodeId};
 use crate::style::computed::{
-    BorderSide, BorderStyle, BoxSizing, Dimension, Edges, GridRepetitionCount, GridTemplateComponent, GridTrack,
-    GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
+    BorderSide, BorderStyle, BoxSizing, Content, Dimension, Edges, GridRepetitionCount, GridTemplateComponent,
+    GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
 };
 use crate::style::selector::{ElementInfo, Specificity};
 use crate::style::ua::UA_CSS;
@@ -325,6 +325,13 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         // Acid2 Packet 2: `z-index` is non-inherited ("own"), same shape
         // as `position` right above.
         z_index: own!(z_index),
+        // Acid2 Packet 3 (generated content): non-inherited ("own"), but
+        // `Content` isn't `Copy` (owns a `String`), so -- like
+        // `background_image` above -- it's hand-cloned rather than going
+        // through the `own!` macro. Unlike `background_image` (whose
+        // default is already `None`), `Content`'s CSS initial value is
+        // `Normal`, so the `unwrap_or` supplies that default explicitly.
+        content: d.content.clone().unwrap_or(Content::Normal),
         // Acid2 Packet 1: `inset` (top/right/bottom/left) is non-inherited,
         // resolved edge-by-edge exactly like `margin` above (same raw/
         // computed type, `LengthPercentageAuto`).

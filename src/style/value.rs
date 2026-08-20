@@ -5,8 +5,8 @@
 
 use crate::dom::AttrMap;
 use crate::style::computed::{
-    AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Display, FlexDirection, FlexWrap, Float,
-    FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Position, TextAlign, TextDecoration,
+    AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Content, Display, FlexDirection, FlexWrap,
+    Float, FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Position, TextAlign, TextDecoration,
     VerticalAlign, WhiteSpace, ZIndex,
 };
 use crate::style::tokenizer::Token;
@@ -216,6 +216,11 @@ pub(crate) struct Declarations {
     /// `z-index: auto | <integer>` (Acid2 Packet 2) -- mirrors `position`'s
     /// own `Option<Position>` shape exactly (non-inherited keyword/enum).
     pub z_index: Option<ZIndex>,
+    /// `content: normal | none | <string> | url(...)` (Acid2 Packet 3) --
+    /// NOT `Copy` (owns a `String`), so it's hand-cloned in `overlay`/
+    /// `cascade::resolve`, mirroring `background_image` (see its own doc
+    /// comment right below).
+    pub content: Option<Content>,
     /// `top`/`right`/`bottom`/`left` (Acid2 Packet 1) -- mirrors `margin`'s
     /// own `EdgesRaw<RawLengthAuto>` shape exactly (same grammar per edge).
     pub inset: EdgesRaw<RawLengthAuto>,
@@ -341,6 +346,10 @@ impl Declarations {
         // semantics, just spelled with an explicit `.clone()`.
         if other.background_image.is_some() {
             self.background_image = other.background_image.clone();
+        }
+        // `content` isn't `Copy` (owns a String) -- hand-clone like `background_image`.
+        if other.content.is_some() {
+            self.content = other.content.clone();
         }
         // packet/css-grid: `grid_template_columns`/`rows` are `Vec`-shaped
         // (not `Copy`), same reason as `background_image` right above.
@@ -1749,6 +1758,29 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             _ => false,
         },
+        // `content` (Acid2 Packet 3, generated content): `normal`, `none`, a
+        // quoted string (`Token::Str`, including `content:""` -- see
+        // `Content`'s own doc comment on why that still generates a box),
+        // or `url(...)` via the same `parse_url_function` helper
+        // `background-image` uses above.
+        "content" => match tokens.first() {
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("normal") => {
+                d.content = Some(Content::Normal);
+                true
+            }
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("none") => {
+                d.content = Some(Content::None);
+                true
+            }
+            Some(Token::Str(s)) => {
+                d.content = Some(Content::Str(s.clone()));
+                true
+            }
+            Some(Token::Function(name)) if name.eq_ignore_ascii_case("url") => {
+                parse_url_function(tokens, 0).map(|(u, _)| d.content = Some(Content::Url(u))).is_some()
+            }
+            _ => false,
+        },
         "clear" => match keyword(tokens).as_deref() {
             Some("left") => {
                 d.clear = Some(Clear::Left);
@@ -2254,6 +2286,42 @@ mod tests {
         assert_eq!(ZIndex::Layer(0).layer(), 0);
         assert_eq!(ZIndex::Layer(-2).layer(), -2);
         assert_eq!(ZIndex::Layer(7).layer(), 7);
+    }
+
+    #[test]
+    fn parses_content_property() {
+        let mut d = Declarations::default();
+        assert!(apply_property("content", &toks("normal"), &mut d));
+        assert_eq!(d.content, Some(Content::Normal));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("content", &toks("none"), &mut d));
+        assert_eq!(d.content, Some(Content::None));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("content", &toks("\"hi\""), &mut d));
+        assert_eq!(d.content, Some(Content::Str("hi".to_string())));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("content", &toks("\"\""), &mut d)); // empty string
+        assert_eq!(d.content, Some(Content::Str(String::new())));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("content", &toks("url(x.png)"), &mut d));
+        assert_eq!(d.content, Some(Content::Url("x.png".to_string())));
+
+        let mut d = Declarations::default();
+        assert!(!apply_property("content", &toks("42deg"), &mut d)); // garbage -> unset
+        assert_eq!(d.content, None);
+    }
+
+    #[test]
+    fn content_generates_box_only_for_str_and_url() {
+        assert!(Content::Str(String::new()).generates_box()); // content:"" DOES generate
+        assert!(Content::Str("x".into()).generates_box());
+        assert!(Content::Url("x".into()).generates_box());
+        assert!(!Content::Normal.generates_box());
+        assert!(!Content::None.generates_box());
     }
 
     #[test]

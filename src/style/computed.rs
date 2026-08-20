@@ -228,6 +228,21 @@ impl ZIndex {
     }
 }
 
+/// CSS `content` (Acid2 Packet 3, generated content). `Str("")` (i.e.
+/// `content:""`) STILL generates a box — only `Normal`/`None` suppress it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    Normal,
+    None,
+    Str(String),
+    Url(String),
+}
+impl Content {
+    pub fn generates_box(&self) -> bool {
+        matches!(self, Content::Str(_) | Content::Url(_))
+    }
+}
+
 /// CSS `box-sizing: content-box | border-box` (packet/acid1-content-box).
 /// `ContentBox` is the real CSS initial value (a declared `width`/`height`
 /// is the box's CONTENT size; padding/border add on top to reach the
@@ -450,6 +465,10 @@ pub struct ComputedStyle {
     /// box property, same resolution shape as `position`. `Auto` is the CSS
     /// initial value; see `ZIndex::layer` for how it collapses for paint.
     pub z_index: ZIndex,
+    /// `content` (Acid2 Packet 3, generated content). Non-inherited ("own")
+    /// property; `Normal` is the CSS initial value. Only meaningful on
+    /// `::before`/`::after` pseudo-element styles — see `Content::generates_box`.
+    pub content: Content,
     /// `top`/`right`/`bottom`/`left` (the "inset" properties, Acid2 Packet
     /// 1) — same type `margin` uses (`Edges<LengthPercentageAuto>`), since
     /// both share the identical `<length> | <percentage> | auto` grammar.
@@ -537,6 +556,7 @@ impl Default for ComputedStyle {
             clear: Clear::None,
             position: Position::Static,
             z_index: ZIndex::Auto,
+            content: Content::Normal,
             inset: Edges::all(LengthPercentageAuto::Auto),
             box_sizing: BoxSizing::ContentBox,
 
@@ -584,5 +604,7 @@ mod tests {
         // `gap` alone governs both axes until a two-value shorthand says
         // otherwise (see the field's own doc comment).
         assert_eq!(s.column_gap, None);
+        // Acid2 Packet 3: `content`'s CSS initial value is `normal`.
+        assert_eq!(s.content, Content::Normal);
     }
 }
