@@ -2620,7 +2620,13 @@ mod tests {
     /// `is_fixed == true`; an ordinary `position: static` sibling's must not.
     #[test]
     fn fixed_positioned_box_fragment_is_flagged_is_fixed() {
-        let fixed_style = ComputedStyle { position: Position::Fixed, ..ComputedStyle::default() };
+        // `position:fixed` blockifies (CSS 2.1 §9.7): a real fixed element is
+        // block-level (Acid2's scalp is a UA-block `<p>`). Without `display:
+        // Block` here, `ComputedStyle::default()`'s `Inline` display would make
+        // this text-only container fold into a `Built::Inline` (a text run, no
+        // Box fragment) — an impossible fixed+inline computed style the cascade
+        // never produces. Match the realistic (blockified) shape.
+        let fixed_style = ComputedStyle { display: Display::Block, position: Position::Fixed, ..ComputedStyle::default() };
         let mut fixed_child = container(fixed_style, vec![text_node("fixed")]);
         fixed_child.id = Some("fixed".into());
         let mut static_child = container(block_style(), vec![text_node("static")]);
