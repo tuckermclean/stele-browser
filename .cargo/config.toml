@@ -18,3 +18,17 @@ linker = "i486-linux-musl-gcc"
 # self-contained linking is OFF: the image's cross musl toolchain
 # (i486-linux-musl-gcc) supplies crt objects + static libc, and panic=abort
 # needs no unwinder. (No link-self-contained rustflag — this target rejects it.)
+
+# Give test threads a realistic stack. `cargo` forwards this env to the test
+# binaries it runs, and libtest sizes each per-test thread by RUST_MIN_STACK.
+# The `deeply_nested_*` recursion probes (box_tree, images, frames) build
+# DOMs far past DEPTH_CAP to prove the cap TRUNCATES rather than aborts; in an
+# unoptimized (debug) test build each `build_node_inner` frame is large, so
+# ~DEPTH_CAP (100) capped frames sit right at libtest's default ~2 MB thread
+# stack — marginal enough that a single added struct field can tip a probe
+# into a false stack overflow. Production is unaffected (release-sized frames +
+# the 8 MB main thread have ample margin for 100 frames); this only widens the
+# TEST threads so frame-size marginality can't masquerade as a cap failure.
+# 16 MiB. Release builds ignore it (it only sizes libtest's spawned threads).
+[env]
+RUST_MIN_STACK = "16777216"

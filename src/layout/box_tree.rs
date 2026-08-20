@@ -3050,18 +3050,6 @@ mod tests {
 
     #[test]
     fn deeply_nested_dom_does_not_abort_and_returns() {
-        // Run the probe on an explicit 16 MB stack. `build_box_tree`'s
-        // DEPTH_CAP (100) bounds the recursion (the truncation asserts below
-        // prove it fires), but each `build_node_inner` frame is large in an
-        // unoptimized (debug) test build, so ~100 capped frames sit right at
-        // the default ~2 MB test-thread stack; the Acid2 scroll-to-fragment
-        // packet's added `LayoutNode::id` field nudged them past it. Production
-        // (release-sized frames + the 8 MB main thread) keeps ample margin for
-        // 100 frames, so this is a debug-thread artifact, not a cap failure --
-        // a realistic stack lets the test verify the cap TRUNCATES the tree
-        // without a frame-size false overflow. (See DECISIONS: acid2 scroll-
-        // fixed packet.)
-        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
         let depth = 3000;
         let mut html = String::new();
         for _ in 0..depth {
@@ -3105,7 +3093,6 @@ mod tests {
             total <= DEPTH_CAP + 5,
             "expected the tree to be truncated near DEPTH_CAP ({DEPTH_CAP}), got {total} nodes — the depth cap may not be firing"
         );
-        }).unwrap().join().unwrap();
     }
 
     // ------------------------------------------------------------------
