@@ -131,7 +131,7 @@
 use crate::backend::tty::{self, TextGrid, CELL_H, CELL_W};
 use crate::dom::{Dom, Node, NodeId};
 use crate::fetch::{Request, Url};
-use crate::layout::box_tree::build_box_tree;
+use crate::layout::box_tree::build_box_tree_with_pseudo;
 use crate::layout::{self, Fragment, FragmentKind, Point, Rect, Size};
 use crate::style::cascade;
 use crate::style::ColorScheme;
@@ -409,10 +409,11 @@ fn render_single_document(dom: &Dom, base_url: &Url, cols: usize, scheme: ColorS
     let viewport_width = cols as f32 * CELL_W;
     let author_sheets = crate::stylesheets::collect_all_author_sheets(dom, base_url, viewport_width, scheme);
     let styles = cascade::cascade(dom, &author_sheets);
+    let pseudo = crate::style::cascade::cascade_pseudo(dom, &author_sheets);
     // Frames render to a tty text grid, never pixels — no fetch/decode work
     // for images here (mirrors main.rs's own `dump_text` scope), so an
     // empty images map is always correct.
-    let Some(root) = build_box_tree(dom, &styles, &std::collections::HashMap::new()) else {
+    let Some(root) = build_box_tree_with_pseudo(dom, &styles, &std::collections::HashMap::new(), &pseudo) else {
         return TextGrid::blank(cols, 0);
     };
     let viewport = Size { w: viewport_width, h: SUBDOC_VIEWPORT_HEIGHT };

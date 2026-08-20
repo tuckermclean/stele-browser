@@ -37,8 +37,9 @@ use crate::dom_util;
 use crate::img::RgbaImage;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, Interactive, LayoutNode, Size};
+use crate::style::cascade::PseudoStyles;
 use crate::style::computed::{
-    BorderCollapse, BorderSide, BorderStyle, Display, Edges, Float, LengthPercentage, ListStyleType,
+    BorderCollapse, BorderSide, BorderStyle, Content, Display, Edges, Float, LengthPercentage, ListStyleType,
 };
 use crate::style::ComputedStyle;
 use crate::surface::Color;
@@ -74,10 +75,27 @@ pub fn build_box_tree(
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
 ) -> Option<LayoutNode> {
+    build_box_tree_with_pseudo(dom, styles, images, &[])
+}
+
+/// Build the box tree WITH generated-content (`::before`/`::after`) boxes.
+/// `pseudo[id]` (from `style::cascade::cascade_pseudo`) supplies each
+/// element's generated-box styles; an empty slice (or a `PseudoStyles` with
+/// both fields `None`) means no generated content for that element. See
+/// [`build_box_tree`] for the back-compat 3-arg wrapper (used by pure-layout
+/// tests and callers that don't fetch author sheets) -- byte-identical to
+/// pre-Acid2-P3 behavior since `pseudo.get(id)` on an empty slice is always
+/// `None`.
+pub fn build_box_tree_with_pseudo(
+    dom: &Dom,
+    styles: &[ComputedStyle],
+    images: &HashMap<NodeId, Rc<RgbaImage>>,
+    pseudo: &[PseudoStyles],
+) -> Option<LayoutNode> {
     if dom.is_empty() {
         return None;
     }
-    build_node(dom, styles, images, dom.root(), 0, None)
+    build_node(dom, styles, images, pseudo, dom.root(), 0, None)
 }
 
 /// `form_action` is the nearest enclosing `<form>`'s raw `action` attribute
@@ -90,6 +108,7 @@ fn build_node<'a>(
     dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
+    pseudo: &[PseudoStyles],
     id: NodeId,
     depth: usize,
     form_action: Option<&'a str>,
@@ -133,7 +152,7 @@ fn build_node<'a>(
                 } else {
                     el.children
                         .iter()
-                        .filter_map(|&child| build_node(dom, styles, images, child, depth + 1, action))
+                        .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, action))
                         .collect()
                 };
                 return Some(LayoutNode { style, content: BoxContent::Container, children, interactive: None });
@@ -151,7 +170,7 @@ fn build_node<'a>(
                 } else {
                     el.children
                         .iter()
-                        .filter_map(|&child| build_node(dom, styles, images, child, depth + 1, form_action))
+                        .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, form_action))
                         .collect()
                 };
                 let mut node = LayoutNode { style, content: BoxContent::Container, children, interactive: None };
@@ -187,7 +206,7 @@ fn build_node<'a>(
                     // recursing into the disclosure logic at all.
                     LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None }
                 } else {
-                    build_details_node(dom, styles, images, el, style, depth, form_action)
+                    build_details_node(dom, styles, images, pseudo, el, style, depth, form_action)
                 };
                 return Some(node);
             }
@@ -198,7 +217,7 @@ fn build_node<'a>(
                     // into the marker-synthesis logic at all.
                     LayoutNode { style, content: BoxContent::Container, children: Vec::new(), interactive: None }
                 } else {
-                    build_list_container_node(dom, styles, images, el, style, depth, form_action)
+                    build_list_container_node(dom, styles, images, pseudo, el, style, depth, form_action)
                 };
                 return Some(node);
             }
@@ -207,9 +226,21 @@ fn build_node<'a>(
             } else {
                 el.children
                     .iter()
-                    .filter_map(|&child| build_node(dom, styles, images, child, depth + 1, form_action))
+                    .filter_map(|&child| build_node(dom, styles, images, pseudo, child, depth + 1, form_action))
                     .collect()
             };
+            // ::before / ::after generated boxes (Acid2 P3): prepend the
+            // before box, append the after box. Only elements get generated
+            // content.
+            let mut children = children;
+            if let Some(ps) = pseudo.get(id) {
+                if let Some(before) = ps.before.as_ref().and_then(generated_node) {
+                    children.insert(0, before);
+                }
+                if let Some(after) = ps.after.as_ref().and_then(generated_node) {
+                    children.push(after);
+                }
+            }
             let content = if style.display == Display::TableCell {
                 let (colspan, rowspan) = cell_spans(el);
                 BoxContent::TableCell { colspan, rowspan }
@@ -259,6 +290,29 @@ fn build_node<'a>(
             }
             Some(node)
         }
+    }
+}
+
+/// A `::before`/`::after` box for a pseudo style that generates one
+/// (`content.generates_box()`). A `Str` becomes a `Container` (the pseudo box
+/// -- it carries its OWN background/border/position/size/z-index) wrapping
+/// one `Text` child; empty string ⇒ empty text child (the box still lays out
+/// for its box model -- the Acid2/httpforever `content:""` pattern). `Url` is
+/// parsed but not rendered (Acid2 P3 scope note) ⇒ no box.
+fn generated_node(ps: &ComputedStyle) -> Option<LayoutNode> {
+    match &ps.content {
+        Content::Str(s) => Some(LayoutNode {
+            style: ps.clone(),
+            content: BoxContent::Container,
+            children: vec![LayoutNode {
+                style: ps.clone(),
+                content: BoxContent::Text(s.clone()),
+                children: Vec::new(),
+                interactive: None,
+            }],
+            interactive: None,
+        }),
+        Content::Url(_) | Content::Normal | Content::None => None,
     }
 }
 
@@ -790,6 +844,7 @@ fn build_details_node<'a>(
     dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
+    pseudo: &[PseudoStyles],
     el: &'a Element,
     style: ComputedStyle,
     depth: usize,
@@ -800,7 +855,7 @@ fn build_details_node<'a>(
     let summary_id = find_first_summary(dom, el);
 
     let summary_box = summary_id
-        .and_then(|sid| build_node(dom, styles, images, sid, depth + 1, form_action))
+        .and_then(|sid| build_node(dom, styles, images, pseudo, sid, depth + 1, form_action))
         .map(|mut node| {
             node.children.insert(0, marker_node(marker, &node.style));
             node
@@ -813,7 +868,7 @@ fn build_details_node<'a>(
             if Some(child) == summary_id {
                 continue; // already placed above, markered.
             }
-            if let Some(node) = build_node(dom, styles, images, child, depth + 1, form_action) {
+            if let Some(node) = build_node(dom, styles, images, pseudo, child, depth + 1, form_action) {
                 children.push(node);
             }
         }
@@ -964,6 +1019,7 @@ fn build_list_container_node<'a>(
     dom: &'a Dom,
     styles: &[ComputedStyle],
     images: &HashMap<NodeId, Rc<RgbaImage>>,
+    pseudo: &[PseudoStyles],
     el: &'a Element,
     style: ComputedStyle,
     depth: usize,
@@ -973,7 +1029,7 @@ fn build_list_container_node<'a>(
     let mut children = Vec::with_capacity(el.children.len());
     for &child in &el.children {
         let tag_is_li = matches!(dom.node(child), Node::Element(e) if is_li(e));
-        let Some(mut node) = build_node(dom, styles, images, child, depth + 1, form_action) else {
+        let Some(mut node) = build_node(dom, styles, images, pseudo, child, depth + 1, form_action) else {
             continue; // display:none (or any other total-absence case): no box, no number consumed.
         };
         // A marker (and the ordinal it would consume) is only for a box
@@ -1494,6 +1550,59 @@ mod tests {
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let text_node = find_text(&root, "hello").expect("text fragment present");
         assert!(matches!(&text_node.content, BoxContent::Text(t) if t == "hello"));
+    }
+
+    /// Locates the direct parent of a `Text(text)` leaf in a built
+    /// `LayoutNode` tree -- for `::before`/`::after` synthesis, this is
+    /// exactly the element's own box (its real text child sits directly
+    /// among its siblings, not nested further), robust to whatever
+    /// html/body wrapping `dom::parser::parse` does around the fixture.
+    fn find_parent_of_text<'a>(node: &'a LayoutNode, text: &str) -> Option<&'a LayoutNode> {
+        if node
+            .children
+            .iter()
+            .any(|c| matches!(&c.content, BoxContent::Text(t) if t == text))
+        {
+            return Some(node);
+        }
+        for c in &node.children {
+            if let Some(found) = find_parent_of_text(c, text) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn before_after_generate_prepended_and_appended_boxes() {
+        use crate::style::cascade::PseudoStyles;
+        use crate::style::computed::{Content, ComputedStyle};
+        // <p>x</p>
+        let d = dom::parser::parse("<p>x</p>");
+        let styles = cascade::cascade(&d, &[]);
+        let p = find(&d, "p").expect("<p> present");
+        let mut pseudo = vec![PseudoStyles::default(); d.len()];
+        let mk = |s: &str| {
+            let mut c = ComputedStyle::default();
+            c.content = Content::Str(s.into());
+            c
+        };
+        pseudo[p].before = Some(mk("B"));
+        pseudo[p].after = Some(mk("A"));
+        let root = build_box_tree_with_pseudo(&d, &styles, &HashMap::new(), &pseudo).expect("root present");
+
+        let p_node = find_parent_of_text(&root, "x").expect("<p> box present");
+        assert_eq!(p_node.children.len(), 3, "before box + real text + after box");
+
+        let before = &p_node.children[0];
+        assert!(matches!(before.content, BoxContent::Container));
+        assert!(matches!(&before.children[0].content, BoxContent::Text(t) if t == "B"));
+
+        assert!(matches!(&p_node.children[1].content, BoxContent::Text(t) if t == "x"));
+
+        let after = &p_node.children[2];
+        assert!(matches!(after.content, BoxContent::Container));
+        assert!(matches!(&after.children[0].content, BoxContent::Text(t) if t == "A"));
     }
 
     #[test]
