@@ -3,6 +3,30 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## CSS / fetch — Acid2 eyes prerequisites (data: base64 + url() tokenization)
+
+### D65 — data: base64 percent-decode, url() semicolon, dimension-unit case (Acid2 eyes prerequisites; fills/geometry deferred)
+Acid2's eyes/fills come from `background:url(data:image/png;base64,…)` PNGs (`.forehead` yellow, `.chin` red
+square, the CSS eye tiles) plus a nested `<object data=…>` eye image. Three real, independent bugs blocked
+them — all also hit real-world pages, not just Acid2:
+1. `fetch::data` decoded a `;base64` payload WITHOUT percent-decoding first — Acid2 (per RFC 3986) escapes
+   `+`/`/`/`=` as `%2B`/`%2F`/`%3D`, so every base64 data: image errored at the first escape.
+2. the CSS declaration scanner split on a raw `;` with no paren-depth tracking, truncating
+   `url(data:…;base64,…)` before its closing `)` (fixed both scan sites in `parser.rs` + `value::
+   unquoted_url_token_text`, which also failed closed on the internal `;`).
+3. the tokenizer lowercased a `Token::Dimension`'s unit; unquoted `url()` text is reconstructed from the token
+   stream, so base64 runs like `…F58BAAT…` (a digit-then-letters "dimension") got case-folded → base64
+   corrupt → PNG decode fails. Fixed by preserving unit case in the tokenizer and making the unit CONSUMERS
+   case-insensitive (CSS units ARE case-insensitive — strictly more correct).
+
+**Scope, honest:** these are PREREQUISITES. All 985 tests green, but the Acid2 face is NOT visibly improved
+yet — after parse/decode/tokenize, the bg-image collect→resolve→tile PAINT chain still has a gap, and beyond
+that the em/box-model/float GEOMETRY layer is ~33% oversized (the `font` shorthand doesn't size `em`). A real
+smiley is a large multi-gap effort; Milestone A (face composes, D64) stands as the Acid2 result. Fills +
+geometry are a deferred, separately-scoped effort (operator chose: ship these wins, pause Acid2). Revisit
+trigger: returning to Acid2 fidelity. Charter: no new dialect surface (no new property/keyword/element) —
+three bugfixes to existing parse/decode/tokenize paths, not a C2 amendment.
+
 ## Layout — scroll-to-fragment render + viewport-anchored `position:fixed`
 
 ### D64 — `--scroll-to <id>` + viewport-anchored `position:fixed` compose the Acid2 smiley (Milestone A only)

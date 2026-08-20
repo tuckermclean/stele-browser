@@ -615,7 +615,27 @@ fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Styles
                 }
                 skip_ws(tokens, pos);
                 let value_start = *pos;
-                while *pos < len && tokens[*pos] != Token::Semicolon && tokens[*pos] != Token::RBrace {
+                // Paren/function depth tracking (Acid2 eyes, Milestone B
+                // pt.1): mirrors the selector parser's own precedent
+                // earlier in this file (~line 448/474, skipping a
+                // functional pseudo-class's balanced parens). Without it, a
+                // raw `;` inside an unquoted `url(data:image/png;base64,…)`
+                // -- an ordinary `Token::Semicolon`, since the tokenizer has
+                // no special `url-token` lexing state -- would truncate the
+                // declaration's value before the url's own closing `)` is
+                // ever reached. Only exit on `;`/`}` when `depth == 0`; an
+                // unterminated `url(` (depth never returns to 0) still
+                // terminates the loop via `*pos < len`, so this stays total
+                // on hostile/unbalanced input.
+                let mut depth = 0i32;
+                while *pos < len
+                    && !(depth == 0 && (tokens[*pos] == Token::Semicolon || tokens[*pos] == Token::RBrace))
+                {
+                    match &tokens[*pos] {
+                        Token::Function(_) | Token::LParen => depth += 1,
+                        Token::RParen => depth = (depth - 1).max(0),
+                        _ => {}
+                    }
                     *pos += 1;
                 }
                 let value_tokens: Vec<Token> = tokens[value_start..*pos].iter().filter(|t| **t != Token::Whitespace).cloned().collect();
@@ -655,9 +675,24 @@ fn parse_declaration_block(tokens: &[Token], pos: &mut usize, sheet: &mut Styles
     }
 }
 
+/// Resync to the next declaration boundary after an unrecognized/malformed
+/// leading token (no colon-shaped `name: value` at all). Gets the IDENTICAL
+/// paren/function-depth treatment as `parse_declaration_block`'s own
+/// value-boundary scan right above (don't let the two drift) — an
+/// unrecognized declaration immediately followed by one whose value is a
+/// semicolon-bearing `url(data:...)` must not resync into the middle of
+/// that url's own content.
 fn skip_to_decl_boundary(tokens: &[Token], pos: &mut usize) {
     let len = tokens.len();
-    while *pos < len && tokens[*pos] != Token::Semicolon && tokens[*pos] != Token::RBrace {
+    let mut depth = 0i32;
+    while *pos < len
+        && !(depth == 0 && (tokens[*pos] == Token::Semicolon || tokens[*pos] == Token::RBrace))
+    {
+        match &tokens[*pos] {
+            Token::Function(_) | Token::LParen => depth += 1,
+            Token::RParen => depth = (depth - 1).max(0),
+            _ => {}
+        }
         *pos += 1;
     }
     if *pos < len && tokens[*pos] == Token::Semicolon {
@@ -1113,5 +1148,82 @@ mod tests {
         for i in inputs {
             let _ = parse(i);
         }
+    }
+
+    // ---- Acid2 eyes (Milestone B pt.1): depth-aware declaration-value scan
+    // A raw `;` inside an unquoted `url(data:image/png;base64,...)` must not
+    // truncate the declaration -- both `parse_declaration_block`'s
+    // named-declaration scan AND `skip_to_decl_boundary`'s
+    // malformed-declaration resync need the identical paren/function-depth
+    // tracking (see the design doc's Finding 2).
+
+    #[test]
+    fn url_with_internal_semicolon_does_not_truncate_the_declaration() {
+        let dom = crate::dom::parser::parse("<div>t</div>");
+        let sheet = parse("div { background: red url(data:image/png;base64,AAAA); color: green; }");
+        assert_eq!(sheet.ignored_declarations, 0);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let div = find(&dom, "div").unwrap();
+        assert_eq!(styles[div].background_color, Color::rgb(255, 0, 0));
+        assert_eq!(styles[div].background_image.as_deref(), Some("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn declaration_after_a_semicolon_bearing_url_still_applies() {
+        // Same fixture shape as above, but the assertion is specifically on
+        // the declaration AFTER the broken one: proves the parser resynced
+        // to the url()'s own closing `)` and didn't lose or corrupt
+        // whatever comes next (the "narrowly scoped" claim from the design
+        // doc's Finding 2, verified as an assertion, not just a comment).
+        let dom = crate::dom::parser::parse("<div>t</div>");
+        let sheet = parse("div { background: red url(data:image/png;base64,AAAA); color: green; }");
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let div = find(&dom, "div").unwrap();
+        assert_eq!(styles[div].color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn skip_to_decl_boundary_also_tracks_depth_past_an_unrecognized_leading_token() {
+        // A bare number where a property name is expected is unrecognized
+        // (falls to `parse_declaration_block`'s `_ =>` arm, which calls
+        // `skip_to_decl_boundary` -- a SEPARATE scan site from the
+        // named-declaration one exercised above). The declaration right
+        // after it still contains a semicolon-bearing `url(...)` and must
+        // still parse -- this exercises `skip_to_decl_boundary`'s own copy
+        // of the depth-tracking fix, not the main loop's.
+        let dom = crate::dom::parser::parse("<div>t</div>");
+        let sheet = parse("div { 123; background: url(data:image/png;base64,AAAA); }");
+        assert_eq!(sheet.ignored_declarations, 1, "the leading `123;` still counts as ignored");
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let div = find(&dom, "div").unwrap();
+        assert_eq!(styles[div].background_image.as_deref(), Some("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn unterminated_url_function_does_not_hang_or_panic() {
+        // Depth never returns to 0 (no closing paren before EOF/`}`) -- the
+        // scan must still terminate via `*pos < len`/`RBrace`, matching
+        // `tokenizer.rs`'s own "never panics on unterminated constructs"
+        // posture at the parser layer.
+        for css in [
+            "div { background: url(data:image/png;base64,AAAA",
+            "div { background: url(data:image/png;base64,AAAA }",
+            "div { background: url(unterminated",
+        ] {
+            let _ = parse(css);
+        }
+    }
+
+    #[test]
+    fn plain_declaration_with_no_parens_still_terminates_at_its_own_semicolon() {
+        // Regression/sanity: depth-tracking must not disturb the common
+        // case -- depth stays 0 throughout, and the declaration still ends
+        // exactly at its own `;`.
+        let dom = crate::dom::parser::parse("<p>t</p>");
+        let sheet = parse("p { color: red; }");
+        assert_eq!(sheet.ignored_declarations, 0);
+        let styles = crate::style::cascade::cascade(&dom, std::slice::from_ref(&sheet));
+        let p = find(&dom, "p").unwrap();
+        assert_eq!(styles[p].color, Color::rgb(255, 0, 0));
     }
 }

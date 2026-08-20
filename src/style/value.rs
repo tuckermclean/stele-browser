@@ -1029,10 +1029,26 @@ fn parse_background_color_component(tokens: &[Token]) -> Option<Color> {
 /// `Dot`, `Delim('/')`, ...), so reconstructing the original text means
 /// concatenating each token's own text back together. Covers exactly the
 /// token kinds a bare, unescaped URL can plausibly tokenize into; anything
-/// else (`Whitespace`, a nested `Function`, a brace/semicolon, ...) returns
-/// `None` and the caller treats the whole `url(...)` as malformed (charter
-/// C2: fails to parse, never guessed at) rather than silently dropping a
-/// token.
+/// else (`Whitespace`, a nested `Function`, a brace, ...) returns `None` and
+/// the caller treats the whole `url(...)` as malformed (charter C2: fails to
+/// parse, never guessed at) rather than silently dropping a token.
+///
+/// `Token::Semicolon` IS accepted (Acid2 eyes, Milestone B pt.1): a raw `;`
+/// is ordinary, legal `data:` URI content — the media-type/`;base64` flag
+/// separator (RFC 2397) — and the SAME general-purpose tokenizer that lexes
+/// the rest of the stylesheet lexes it here too (see this file's
+/// `parse_declaration_block`'s own doc comment on the paren/function-depth
+/// tracking this pairs with: that fix stops the declaration-boundary scan
+/// from truncating at this `;`; this one makes sure the reconstructed URL
+/// text keeps the `;` instead of failing closed on it).
+///
+/// Residual known lossiness (not exercised by Acid2, out of scope here): the
+/// `{n}` half of a reconstructed `Dimension` re-formats the *parsed* `f32`,
+/// not the original digit run, so a leading-zero digit run (e.g. `007`) or a
+/// value with trailing-zero precision lost to `f32` would round-trip
+/// differently even though the unit's case is now preserved exactly. Acid2's
+/// `data:` escapes (`%2F`/`%2B`/`%3D`) only ever produce single-digit,
+/// leading-zero-free numbers here, so this doesn't bite in practice today.
 fn unquoted_url_token_text(t: &Token) -> Option<String> {
     Some(match t {
         Token::Ident(s) => s.clone(),
@@ -1041,6 +1057,7 @@ fn unquoted_url_token_text(t: &Token) -> Option<String> {
         Token::Dimension(n, unit) => format!("{n}{unit}"),
         Token::Percentage(n) => format!("{n}%"),
         Token::Colon => ":".to_string(),
+        Token::Semicolon => ";".to_string(),
         Token::Comma => ",".to_string(),
         Token::Dot => ".".to_string(),
         Token::Star => "*".to_string(),
@@ -1167,7 +1184,11 @@ fn classify_font_family(tokens: &[Token]) -> Option<FontFamily> {
 /// property here still can't.
 fn token_to_raw_length(t: &Token) -> Option<RawLength> {
     match t {
-        Token::Dimension(v, unit) => match unit.as_str() {
+        // CSS units are case-insensitive per spec; the tokenizer preserves a
+        // dimension's original case (so `url(data:...)` reconstruction stays
+        // byte-exact — see `tokenizer::Token::Dimension`'s doc comment), so
+        // every match here must fold case itself rather than assume it.
+        Token::Dimension(v, unit) => match unit.to_ascii_lowercase().as_str() {
             "px" => Some(RawLength::Px(*v)),
             "pt" => Some(RawLength::Pt(*v)),
             "em" => Some(RawLength::Em(*v)),
@@ -1202,12 +1223,11 @@ fn token_to_raw_length(t: &Token) -> Option<RawLength> {
 /// the em/rem conflation is an acceptable, narrowly-scoped approximation
 /// here specifically.
 fn token_to_gap_length(t: &Token) -> Option<RawLength> {
-    // `tokenizer::tokenize` already lowercases every unit string (see its
-    // own doc comment), so a plain `==` matches the same way every other
-    // unit arm in `token_to_raw_length` does -- no case-insensitive
-    // comparison needed here either.
+    // `tokenizer::tokenize` preserves a dimension unit's original case (see
+    // `Token::Dimension`'s doc comment, packet/acid2-eyes), so this compares
+    // case-insensitively -- same as every unit arm in `token_to_raw_length`.
     if let Token::Dimension(v, unit) = t {
-        if unit == "rem" {
+        if unit.eq_ignore_ascii_case("rem") {
             return Some(RawLength::Em(*v));
         }
     }
@@ -2148,10 +2168,11 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
 /// than silently clamped).
 fn token_to_grid_track_size(t: &Token) -> Option<RawGridTrackSize> {
     if let Token::Dimension(v, unit) = t {
-        // `tokenizer::tokenize` already lowercases every unit string, so a
-        // plain `==` is enough (same reasoning `token_to_gap_length`'s own
-        // doc comment gives for its `"rem"` check).
-        if unit == "fr" && *v >= 0.0 {
+        // `tokenizer::tokenize` preserves a dimension unit's original case
+        // (see `Token::Dimension`'s doc comment, packet/acid2-eyes), so this
+        // compares case-insensitively (same reasoning `token_to_gap_length`
+        // gives for its `"rem"` check).
+        if unit.eq_ignore_ascii_case("fr") && *v >= 0.0 {
             return Some(RawGridTrackSize::Fr(*v));
         }
     }
@@ -2456,6 +2477,41 @@ mod tests {
 
         assert!(apply_property("max-height", &toks("auto"), &mut d));
         assert_eq!(d.max_height, Some(RawLengthAuto::Auto));
+    }
+
+    #[test]
+    fn dimension_units_resolve_case_insensitively() {
+        // CSS units are case-insensitive per spec (and packet/acid2-eyes
+        // stopped the tokenizer from lowercasing a dimension's unit, to keep
+        // `url(data:...)` reconstruction byte-exact -- see `Token::
+        // Dimension`'s doc comment) -- so an uppercase or mixed-case unit
+        // must still resolve to the exact same computed length as its
+        // lowercase spelling, across every unit-comparing consumer.
+        let mut lower = Declarations::default();
+        assert!(apply_property("width", &toks("10px"), &mut lower));
+        let mut upper = Declarations::default();
+        assert!(apply_property("width", &toks("10PX"), &mut upper));
+        assert_eq!(lower.width, upper.width);
+        assert_eq!(upper.width, Some(RawLengthAuto::Length(RawLength::Px(10.0))));
+
+        let mut lower = Declarations::default();
+        assert!(apply_property("margin-top", &toks("1.5em"), &mut lower));
+        let mut mixed = Declarations::default();
+        assert!(apply_property("margin-top", &toks("1.5Em"), &mut mixed));
+        assert_eq!(lower.margin.top, mixed.margin.top);
+        assert_eq!(mixed.margin.top, Some(RawLengthAuto::Length(RawLength::Em(1.5))));
+
+        // `gap` and CSS Grid track sizes take their own unit-comparing code
+        // paths (`token_to_gap_length`'s `"rem"` case, `token_to_grid_track_
+        // size`'s `"fr"` case) -- both must fold case too.
+        let mut d = Declarations::default();
+        assert!(apply_property("gap", &toks("2REM"), &mut d));
+        assert_eq!(d.gap, Some(RawLength::Em(2.0)));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("grid-template-columns", &toks("1FR 2fr"), &mut d));
+        let fr = |f: f32| RawGridTemplateComponent::Single(RawGridTrack::Bare(RawGridTrackSize::Fr(f)));
+        assert_eq!(d.grid_template_columns, Some(vec![fr(1.0), fr(2.0)]));
     }
 
     #[test]
@@ -2863,6 +2919,48 @@ mod tests {
         let mut d = Declarations::default();
         assert!(apply_property("background-image", &toks("url(images/tile.png)"), &mut d));
         assert_eq!(d.background_image.as_deref(), Some("images/tile.png"));
+    }
+
+    #[test]
+    fn background_image_parses_an_unquoted_data_url_with_an_internal_semicolon() {
+        // Acid2 eyes (Milestone B pt.1), companion to the depth-tracking fix
+        // in `style::parser::parse_declaration_block`/`skip_to_decl_boundary`:
+        // once the declaration-boundary scan stops truncating at a `;`
+        // inside `url(...)`, `parse_url_function` still has to actually
+        // RECONSTRUCT that `;` as part of the URL text -- `unquoted_url_
+        // token_text` must treat `Token::Semicolon` as ordinary literal URL
+        // content (like `Token::Colon`/`Token::Comma` right next to it),
+        // not as one of the "malformed" token kinds it fails closed on.
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks("url(data:image/png;base64,AAAA)"), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn background_image_round_trips_the_real_acid2_forehead_data_url_byte_for_byte() {
+        // Regression test for the tokenizer/value.rs unit-case-folding bug
+        // (packet/acid2-eyes): `Token::Dimension`'s unit used to be
+        // lowercased by the tokenizer, and `unquoted_url_token_text`
+        // reconstructs an unquoted `url(...)`'s text by concatenating each
+        // token's own text -- so a case-sensitive base64 run inside a
+        // `data:` URI that happened to tokenize as a `Dimension` (a digit
+        // run immediately followed by letters, e.g. `2F58BAAT` after the
+        // `%2F` escape below) got silently corrupted (`F58BAAT` ->
+        // `f58baat`), which broke PNG decoding and killed the `.forehead`
+        // background fill in `fixtures/acid2.html`. This is the literal
+        // `url(...)` value from `fixtures/acid2.html:37`, copied verbatim.
+        let url_text = "url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4%2F58BAAT%2FAf9jgNErAAAAAElFTkSuQmCC)";
+        let expected = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4%2F58BAAT%2FAf9jgNErAAAAAElFTkSuQmCC";
+        let mut d = Declarations::default();
+        assert!(apply_property("background-image", &toks(url_text), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some(expected));
+
+        // Same payload, reached through the `background` shorthand (the
+        // form `.forehead` actually uses in the fixture: `background: red
+        // url(...)`).
+        let mut d = Declarations::default();
+        assert!(apply_property("background", &toks(&format!("red {url_text}")), &mut d));
+        assert_eq!(d.background_image.as_deref(), Some(expected));
     }
 
     #[test]

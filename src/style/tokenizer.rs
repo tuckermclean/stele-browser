@@ -14,6 +14,10 @@ pub(crate) enum Token {
     Hash(String),
     Str(String),
     Number(f32),
+    /// A number immediately followed by a unit identifier. The unit's
+    /// original case is preserved (NOT lowercased) — see `tokenize`'s
+    /// comment at the call site that constructs this. Every consumer that
+    /// matches on the unit string must do so case-insensitively.
     Dimension(f32, String),
     Percentage(f32),
     Colon,
@@ -135,7 +139,20 @@ pub(crate) fn tokenize(input: &str) -> Vec<Token> {
                 while pos < len && is_ident_continue(chars[pos]) {
                     pos += 1;
                 }
-                let unit: String = chars[ustart..pos].iter().collect::<String>().to_ascii_lowercase();
+                // Unit case is preserved verbatim here (NOT lowercased): an
+                // unquoted `url(...)` is reconstructed byte-for-byte from its
+                // token stream (see `value.rs`'s `unquoted_url_token_text`),
+                // and `data:` URIs frequently contain a dimension-shaped run
+                // (a digit run immediately followed by base64 letters, e.g.
+                // `2F58BAAT` after a `%2F` escape) whose "unit" is actually
+                // case-sensitive payload — lowercasing it here used to
+                // silently corrupt the base64 and break decoding (Acid2 eyes
+                // packet). CSS units themselves ARE case-insensitive per
+                // spec, so every consumer that matches on this string must
+                // compare case-insensitively (`eq_ignore_ascii_case` /
+                // `.to_ascii_lowercase()` before matching) instead of relying
+                // on this function to normalize case for it.
+                let unit: String = chars[ustart..pos].iter().collect();
                 tokens.push(Token::Dimension(value, unit));
             } else {
                 tokens.push(Token::Number(value));
