@@ -77,7 +77,9 @@ pub(crate) fn nearest_terminus_size(px: f32) -> f32 {
         let (lo, hi) = (w[0], w[1]);
         if px >= lo && px <= hi {
             let mid = (lo + hi) / 2.0;
-            return if px <= mid { lo } else { hi };
+            // Exact midpoint rounds UP to the larger (more legible) bucket:
+            // strict `<` sends `px == mid` to `hi`, not `lo`.
+            return if px < mid { lo } else { hi };
         }
     }
     // Unreachable given the clamps above (every finite px in (SIZES[0],
