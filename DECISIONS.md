@@ -15,7 +15,12 @@ the current URL in the address field (clipped via the P5 surface scissor so a lo
 throbber, and the status line, all with the existing `Surface` primitives (no toolkit, disc-doctrine). **Why
 pure:** the `--x11` event loop is manual-verify-only (no CI), so everything testable lives in `layout`/`draw`
 (unit-tested) and a headless `--dump-png --chrome` SCREENSHOT mode renders a page inside the chrome to a PNG,
-pixel-goldened in CI (`goldens/chrome-basic.png`). Only click-routing, history, throbber animation, and status
+pixel-goldened in CI (`goldens/chrome-basic.png`, HOST build only via accept.sh's `--tty-only` -- unlike the
+document renderer, the chrome's text metrics still carry a float op the i486/x87 cross-build toolchain rounds a
+pixel differently, so the golden isn't byte-stable across build targets; the chrome is a host feature anyway
+[`--x11`/`--dump-png --chrome` run on the operator's machine, not the i486 floppy], so a host golden is the
+meaningful check, same spirit as A1/A4 being i486-only -- full target-determinism + a cross-build golden is a
+follow-up). Only click-routing, history, throbber animation, and status
 live in `run_x11` (manual). **This is a C5 (chair / interactive shell) feature, NOT a C2 dialect amendment.**
 `History` gained `can_go_back()`; the back button pops it and reloads; viewport clicks hit-test in document
 coords offset by the top bar + scroll. **Trade-off:** with the chrome bars framing a narrower viewport, the old
