@@ -318,7 +318,15 @@ enum NodeCtx<'a> {
 /// (by style reference) to emit the right fragment at the right rect once
 /// taffy has computed final layout.
 enum Built<'a> {
-    Container { style: &'a ComputedStyle, taffy_id: TNodeId, children: Vec<Built<'a>>, interactive: Option<Interactive> },
+    Container {
+        style: &'a ComputedStyle,
+        taffy_id: TNodeId,
+        children: Vec<Built<'a>>,
+        interactive: Option<Interactive>,
+        /// See [`LayoutNode::id`] — copied from the source node the same way
+        /// `interactive` is (Acid2 scroll-to-fragment packet, spec §1/§2).
+        id: Option<Box<str>>,
+    },
     Inline { taffy_id: TNodeId, runs: Vec<InlineRun>, text_align: TextAlign },
     Replaced {
         style: &'a ComputedStyle,
@@ -326,6 +334,8 @@ enum Built<'a> {
         intrinsic: Size,
         image: Option<std::rc::Rc<crate::img::RgbaImage>>,
         interactive: Option<Interactive>,
+        /// See [`Built::Container::id`]'s doc comment.
+        id: Option<Box<str>>,
     },
     /// A `display: table` box, translated as a single bespoke leaf (module
     /// docs). `emit` fetches the table's `LayoutNode`, nested-table budget,
@@ -438,12 +448,46 @@ fn layout_tree_impl<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M, 
         },
     );
 
+    // Acid2 scroll-to-fragment packet, Task 3: the initial containing
+    // block's origin is `(0, 0)` by definition -- the SAME value already
+    // passed as this call's `parent_origin` below, computed once up front so
+    // `emit`'s `Container` arm can reparent a `position:fixed` child onto it
+    // regardless of how deep that child sits. `viewport_clip` mirrors
+    // exactly what the root's OWN `Container` arm invocation would derive as
+    // `child_clip` for its immediate children (`intersect_clip`, with no
+    // ancestor clip to intersect against) -- i.e. the root's own border box,
+    // IF the root itself is `overflow: hidden`, else `None` (unclipped).
+    let viewport_origin = Point { x: 0.0, y: 0.0 };
+    let viewport_clip = built_style(&built).filter(|s| s.overflow == Overflow::Hidden).and_then(|_| {
+        taffy.layout(built.taffy_id()).ok().map(|l| Rect {
+            origin: viewport_origin,
+            size: Size { w: l.size.width.max(0.0), h: l.size.height.max(0.0) },
+        })
+    });
+
     let mut fragments = Vec::new();
-    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments, None);
+    emit(&built, &taffy, viewport_origin, metrics, &mut fragments, None, false, viewport_origin, viewport_clip);
     fragments
 }
 
-fn finite_nonneg(v: f32) -> f32 {
+/// A `Built` node's own `ComputedStyle`, when it has one (`Built::Inline`
+/// doesn't carry an independent style of its own -- see that variant's own
+/// doc comment) — used by [`layout_tree_impl`] to read the ROOT's own
+/// `overflow` when computing `viewport_clip` (Acid2 scroll-to-fragment
+/// packet, Task 3, spec §3).
+fn built_style<'a>(built: &'a Built) -> Option<&'a ComputedStyle> {
+    match built {
+        Built::Container { style, .. } | Built::Replaced { style, .. } | Built::Table { style, .. } => Some(style),
+        Built::Inline { .. } => None,
+    }
+}
+
+/// `pub(crate)` (not `pub`, and not just `fn`): Acid2 scroll-to-fragment
+/// packet's `layout::find_fragment_top` reuses this exact clamp for a
+/// `Fragment`'s border-top width, rather than re-deriving an equivalent
+/// helper — same totality posture (`is_finite() && >= 0.0`, floor to `0.0`
+/// otherwise) this module already applies to every other geometry input.
+pub(crate) fn finite_nonneg(v: f32) -> f32 {
     if v.is_finite() && v > 0.0 {
         v
     } else {
@@ -701,6 +745,7 @@ fn translate_any<'a>(
                 intrinsic: Size { w: iw, h: ih },
                 image: image.clone(),
                 interactive: node.interactive.clone(),
+                id: node.id.clone(),
             }
         }
         // A `display: table` box (real HTML `<table>`, or any element styled
@@ -770,7 +815,13 @@ fn translate_any<'a>(
             let id = taffy
                 .new_with_children(style, &child_ids)
                 .expect("taffy container alloc is infallible for a fresh tree");
-            Built::Container { style: &node.style, taffy_id: id, children, interactive: node.interactive.clone() }
+            Built::Container {
+                style: &node.style,
+                taffy_id: id,
+                children,
+                interactive: node.interactive.clone(),
+                id: node.id.clone(),
+            }
         }
     }
 }
@@ -1554,8 +1605,16 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
     let _ = taffy.compute_layout_with_measure(built.taffy_id(), available, |kd, av, id, ctx, style| {
         measure_node(kd, av, id, ctx, style, metrics)
     });
+    // Acid2 scroll-to-fragment packet, Task 3: a table cell has no
+    // independent viewport concept of its own -- `(Point::default(), None)`,
+    // same documented approximation as `f.clip`'s own re-origining carve-out
+    // just below this function's own caller (no fixture nests
+    // `position:fixed` inside a `<td>`). `is_fixed_ctx` starts `false` here
+    // too: a cell's own content starts outside any fixed subtree by
+    // definition (this cell IS the "viewport" as far as this isolated
+    // sub-layout is concerned).
     let mut fragments = Vec::new();
-    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments, None);
+    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments, None, false, Point { x: 0.0, y: 0.0 }, None);
     let size = taffy
         .layout(built.taffy_id())
         .map(|l| Size { w: finite_nonneg(l.size.width), h: finite_nonneg(l.size.height) })
@@ -2056,12 +2115,26 @@ fn push_replaced_fragment(
     style: &ComputedStyle,
     interactive: Option<Interactive>,
     clip: Option<Rect>,
+    id: Option<Box<str>>,
+    is_fixed: bool,
 ) {
     match image {
-        Some(img) => {
-            out.push(Fragment { rect, kind: FragmentKind::Image { image: (*img).clone() }, interactive, clip })
-        }
-        None => out.push(Fragment { rect, kind: FragmentKind::Box { style: style.clone() }, interactive, clip }),
+        Some(img) => out.push(Fragment {
+            rect,
+            kind: FragmentKind::Image { image: (*img).clone() },
+            interactive,
+            clip,
+            id,
+            is_fixed,
+        }),
+        None => out.push(Fragment {
+            rect,
+            kind: FragmentKind::Box { style: style.clone() },
+            interactive,
+            clip,
+            id,
+            is_fixed,
+        }),
     }
 }
 
@@ -2086,6 +2159,33 @@ fn intersect_clip(clip: Option<Rect>, r: Rect) -> Option<Rect> {
     }
 }
 
+/// `is_fixed_ctx`: Acid2 scroll-to-fragment packet, Task 3 (spec §2/§3) —
+/// `true` when THIS call is already inside a `position:fixed` subtree (this
+/// node's own ancestor chain, up to and including any `Fixed` node itself,
+/// has already been reparented onto the viewport). Threaded UNCHANGED
+/// through ordinary recursion (a `Fixed` element's own descendants share the
+/// SAME frame of reference it does — nesting `position:fixed` inside
+/// `position:fixed` is vanishingly rare and CSS still roots both at the
+/// ICB), and flipped to `true` for exactly the ONE recursive call the
+/// `Container` arm makes into a `position:fixed` child (see that arm's own
+/// paint-order loops below). Every `Fragment` this call (or any of its
+/// descendants) pushes is stamped `is_fixed: is_fixed_ctx` directly — this
+/// single ambient flag is strictly more correct than re-deriving
+/// `built_position(built) == Position::Fixed` locally at each push site
+/// (Task 1's placeholder): it already covers `Built::Inline`'s text/replaced
+/// runs (which have no independently-positioned `style` of their own to
+/// read `built_position` from at all) for free, with no separate carve-out
+/// needed.
+///
+/// `viewport_origin`/`viewport_clip`: the initial containing block's origin
+/// and (optional) clip, computed ONCE by the top-level caller
+/// (`layout_tree_impl`)/`cell_content_layout` and threaded UNCHANGED through
+/// every recursive call — the viewport is one fixed frame of reference, not
+/// a per-ancestor one. Consulted only by the `Container` arm, to reparent a
+/// `position:fixed` child's `parent_origin`/`clip` onto them instead of onto
+/// this node's own (DOM-parent-relative) `origin`/`child_clip` (spec §3;
+/// closes D55 Finding A: "`Fixed` anchors to its containing block [the body
+/// content box], not the viewport root").
 fn emit<M: Metrics>(
     built: &Built,
     taffy: &TaffyTree<NodeCtx>,
@@ -2093,18 +2193,23 @@ fn emit<M: Metrics>(
     metrics: &M,
     out: &mut Vec<Fragment>,
     clip: Option<Rect>,
+    is_fixed_ctx: bool,
+    viewport_origin: Point,
+    viewport_clip: Option<Rect>,
 ) {
     let Ok(layout) = taffy.layout(built.taffy_id()) else { return };
     let origin = Point { x: parent_origin.x + layout.location.x, y: parent_origin.y + layout.location.y };
     let size = Size { w: layout.size.width.max(0.0), h: layout.size.height.max(0.0) };
 
     match built {
-        Built::Container { style, children, interactive, .. } => {
+        Built::Container { style, children, interactive, id, .. } => {
             out.push(Fragment {
                 rect: Rect { origin, size },
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: interactive.clone(),
                 clip,
+                id: id.clone(),
+                is_fixed: is_fixed_ctx,
             });
             // Acid2 Packet 5, Task 2: `overflow:hidden` clips this
             // container's DESCENDANTS (not the container's own box fragment
@@ -2124,33 +2229,82 @@ fn emit<M: Metrics>(
             // by z-index approximates nested stacking contexts (no z-index
             // ⇒ every child z_layer==0 ⇒ identical to P1's [static][positioned]).
             let is_pos = |c: &&Built| built_position(c) != Position::Static;
+            // Acid2 scroll-to-fragment packet, Task 3 (spec §3): a
+            // `position:fixed` child's containing block is the viewport, NOT
+            // this container's own (DOM-parent-relative) `origin`/
+            // `child_clip` -- reparent exactly that ONE recursive call onto
+            // `viewport_origin`/`viewport_clip`, and flip `is_fixed_ctx` to
+            // `true` for it (propagating to every one of ITS OWN
+            // descendants, in-flow or not). A non-fixed child keeps the
+            // ordinary parent-relative `origin`/`child_clip`, and the
+            // ambient `is_fixed_ctx` unchanged (already `true` if THIS whole
+            // container is itself nested inside a fixed ancestor). Inlined
+            // (not a closure) at each of the four paint-order loops below --
+            // a closure capturing `out: &mut Vec<Fragment>` and re-invoked
+            // across multiple loops is exactly the kind of `&mut` reborrow
+            // subtlety this packet's own CI-only build/test loop (no local
+            // `cargo build`) can't afford to gamble on; a plain `if`
+            // reproduces the SAME parent-relative reborrow pattern the four
+            // loops already used before this packet, just conditionally.
             // 2. negative-z positioned, most-negative first (stable), BEFORE in-flow
             let mut neg: Vec<&Built> = children.iter().filter(|c| is_pos(c) && z_layer(c) < 0).collect();
             neg.sort_by_key(|c| z_layer(c));
             for child in neg {
-                emit(child, taffy, origin, metrics, out, child_clip);
+                if built_position(child) == Position::Fixed {
+                    emit(child, taffy, viewport_origin, metrics, out, viewport_clip, true, viewport_origin, viewport_clip);
+                } else {
+                    emit(child, taffy, origin, metrics, out, child_clip, is_fixed_ctx, viewport_origin, viewport_clip);
+                }
             }
-            // 3-5. in-flow (static) children, source order
+            // 3-5. in-flow (static) children, source order -- this bucket is
+            // filtered to `Position::Static` children ONLY, so it can never
+            // contain a `Fixed` one; no reparenting branch needed here.
             for child in children.iter().filter(|c| built_position(c) == Position::Static) {
-                emit(child, taffy, origin, metrics, out, child_clip);
+                emit(child, taffy, origin, metrics, out, child_clip, is_fixed_ctx, viewport_origin, viewport_clip);
             }
             // 6. z-index auto/0 positioned children, source order
             for child in children.iter().filter(|c| is_pos(c) && z_layer(c) == 0) {
-                emit(child, taffy, origin, metrics, out, child_clip);
+                if built_position(child) == Position::Fixed {
+                    emit(child, taffy, viewport_origin, metrics, out, viewport_clip, true, viewport_origin, viewport_clip);
+                } else {
+                    emit(child, taffy, origin, metrics, out, child_clip, is_fixed_ctx, viewport_origin, viewport_clip);
+                }
             }
             // 7. positive-z positioned children, least-positive first (stable)
             let mut pos: Vec<&Built> = children.iter().filter(|c| is_pos(c) && z_layer(c) > 0).collect();
             pos.sort_by_key(|c| z_layer(c));
             for child in pos {
-                emit(child, taffy, origin, metrics, out, child_clip);
+                if built_position(child) == Position::Fixed {
+                    emit(child, taffy, viewport_origin, metrics, out, viewport_clip, true, viewport_origin, viewport_clip);
+                } else {
+                    emit(child, taffy, origin, metrics, out, child_clip, is_fixed_ctx, viewport_origin, viewport_clip);
+                }
             }
         }
-        Built::Replaced { style, image, interactive, .. } => {
-            push_replaced_fragment(out, Rect { origin, size }, image.clone(), style, interactive.clone(), clip);
+        Built::Replaced { style, image, interactive, id, .. } => {
+            push_replaced_fragment(
+                out,
+                Rect { origin, size },
+                image.clone(),
+                style,
+                interactive.clone(),
+                clip,
+                id.clone(),
+                is_fixed_ctx,
+            );
         }
         Built::Inline { runs, text_align, .. } => {
             let available_w = size.w;
             let laid_out = inline::layout_runs(runs, available_w, *text_align, metrics);
+            // Acid2 scroll-to-fragment packet, Task 3: every fragment pushed
+            // in this arm shares the ambient `is_fixed_ctx` (see `emit`'s
+            // own doc comment) — this resolves Task 1's TODO placeholder:
+            // `built_position(built)` on a `Built::Inline` is unconditionally
+            // `Position::Static` and could never see a `position:fixed`
+            // ANCESTOR's fixed-ness, but `is_fixed_ctx` was already
+            // correctly propagated down to this call by the `Container`
+            // arm's per-child branch above, regardless of tree depth.
+            let is_fixed = is_fixed_ctx;
             for line in &laid_out.lines {
                 for run in &line.runs {
                     let run_origin =
@@ -2166,6 +2320,13 @@ fn emit<M: Metrics>(
                                 },
                                 interactive: runs[run.run_index].interactive.clone(),
                                 clip,
+                                // No per-run `id` carrier exists for inline
+                                // text/replaced runs (documented scope limit
+                                // — `find_fragment_top`/`--scroll-to` only
+                                // ever need to resolve a Container/Replaced/
+                                // Table box's own id, not an inline run's).
+                                id: None,
+                                is_fixed,
                             });
                         }
                         // A non-floated replaced atom (M4 part 2, the D14
@@ -2198,6 +2359,8 @@ fn emit<M: Metrics>(
                                 &runs[run.run_index].style,
                                 runs[run.run_index].interactive.clone(),
                                 clip,
+                                None, // no per-run `id` carrier for inline text/replaced runs (see the Text push's own comment above).
+                                is_fixed,
                             );
                         }
                     }
@@ -2218,12 +2381,25 @@ fn emit<M: Metrics>(
                         &runs[f.run_index].style,
                         runs[f.run_index].interactive.clone(),
                         clip,
+                        None, // no per-run `id` carrier for inline text/replaced runs (see the Text push's own comment above).
+                        is_fixed,
                     ),
                     InlineContent::Text(_) => {} // not reachable: only `Replaced` runs are ever floated.
                 }
             }
         }
         Built::Table { style, .. } => {
+            // Fetch this leaf's `node`/`table_budget`/cache straight out of
+            // the taffy tree's own node-context storage (see `Built::Table`'s
+            // doc comment) rather than duplicating them on `Built` — moved
+            // ABOVE the table's own box push (below) so `node.id` is in hand
+            // for it (Acid2 scroll-to-fragment packet, Task 1).
+            let Some(NodeCtx::Table(node, table_budget, cache)) = taffy.get_node_context(built.taffy_id()) else {
+                return; // not reachable given how `built` is constructed; degrade rather than panic regardless.
+            };
+            let node: &LayoutNode = *node;
+            let budget = *table_budget;
+
             // The table's own box first (paint order: table, then cells).
             // Tables aren't themselves interactive in this design (only a
             // link/form-control INSIDE a cell is — see that cell's own
@@ -2236,16 +2412,9 @@ fn emit<M: Metrics>(
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: None,
                 clip,
+                id: node.id.clone(),
+                is_fixed: is_fixed_ctx,
             });
-
-            // Fetch this leaf's `node`/`table_budget`/cache straight out of
-            // the taffy tree's own node-context storage (see `Built::Table`'s
-            // doc comment) rather than duplicating them on `Built`.
-            let Some(NodeCtx::Table(node, table_budget, cache)) = taffy.get_node_context(built.taffy_id()) else {
-                return; // not reachable given how `built` is constructed; degrade rather than panic regardless.
-            };
-            let node: &LayoutNode = *node;
-            let budget = *table_budget;
 
             let content_origin =
                 Point { x: parent_origin.x + layout.content_box_x(), y: parent_origin.y + layout.content_box_y() };
@@ -2303,6 +2472,22 @@ fn emit<M: Metrics>(
                         },
                         kind: f.kind,
                         interactive: f.interactive,
+                        // `f.id` (Acid2 scroll-to-fragment packet, Task 1)
+                        // was already computed correctly by
+                        // `cell_content_layout`'s OWN isolated `emit` call —
+                        // carried straight through, same as `f.kind` above.
+                        id: f.id,
+                        // `is_fixed`, however, is NOT: `cell_content_layout`'s
+                        // isolated `emit` always runs with `is_fixed_ctx =
+                        // false` (a cell has no viewport frame of its own), so
+                        // `f.is_fixed` is always `false` here. If THIS table is
+                        // itself inside a `position:fixed` ancestor, its cell
+                        // contents inherit that — privilege the ambient
+                        // `is_fixed_ctx`, exactly as `clip` privileges the
+                        // ambient clip just below. (`|| f.is_fixed` keeps
+                        // headroom for a future "fixed nested inside a `<td>`"
+                        // fix that this packet does not attempt.)
+                        is_fixed: is_fixed_ctx || f.is_fixed,
                         // Acid2 Packet 5, Task 2: `f.clip` (if any) was
                         // computed by `cell_content_layout`'s OWN isolated
                         // `emit` call, rooted at local origin (0,0) -- it is
@@ -2330,7 +2515,7 @@ mod tests {
     use super::*;
 
     fn text_node(s: &str) -> LayoutNode {
-        LayoutNode { style: ComputedStyle::default(), content: BoxContent::Text(s.to_string()), children: Vec::new(), interactive: None }
+        LayoutNode { style: ComputedStyle::default(), content: BoxContent::Text(s.to_string()), children: Vec::new(), interactive: None, id: None }
     }
 
     fn block_style() -> ComputedStyle {
@@ -2345,7 +2530,7 @@ mod tests {
     }
 
     fn container(style: ComputedStyle, children: Vec<LayoutNode>) -> LayoutNode {
-        LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+        LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
     }
 
     fn replaced(style: ComputedStyle) -> LayoutNode {
@@ -2353,7 +2538,7 @@ mod tests {
             style,
             content: BoxContent::Replaced { intrinsic: Size { w: 10.0, h: 10.0 }, image: None },
             children: Vec::new(),
-            interactive: None,
+            interactive: None, id: None,
         }
     }
 
@@ -2406,6 +2591,176 @@ mod tests {
             child_text.clip,
             Some(container_box.rect),
             "the child must be clipped to the container's own border box"
+        );
+    }
+
+    // ---- Acid2 scroll-to-fragment packet, Task 1: `id`/`is_fixed` carriers ----
+
+    /// A `<div id="target">`'s id must land on exactly one `Fragment` — its
+    /// own `Box` fragment — never on a descendant text run's `Fragment`
+    /// (`find_fragment_top`, Task 2, relies on this to unambiguously resolve
+    /// an id to a single box).
+    #[test]
+    fn emit_stamps_id_onto_the_owning_box_fragment_only() {
+        let mut target = container(block_style(), vec![text_node("hi")]);
+        target.id = Some("target".into());
+        let root = container(block_style(), vec![target]);
+        let font = crate::text::BitmapFont::vga_8x16();
+        let fragments = layout_tree(&root, Size { w: 200.0, h: 100.0 }, &font);
+
+        let matches: Vec<&Fragment> = fragments.iter().filter(|f| f.id.as_deref() == Some("target")).collect();
+        assert_eq!(matches.len(), 1, "exactly one fragment should carry #target's id, got {}", matches.len());
+        assert!(
+            matches!(matches[0].kind, FragmentKind::Box { .. }),
+            "#target's id must land on its own Box fragment, not a descendant text run"
+        );
+    }
+
+    /// A `position: fixed` node's own `Box` fragment must carry
+    /// `is_fixed == true`; an ordinary `position: static` sibling's must not.
+    #[test]
+    fn fixed_positioned_box_fragment_is_flagged_is_fixed() {
+        // `position:fixed` blockifies (CSS 2.1 §9.7): a real fixed element is
+        // block-level (Acid2's scalp is a UA-block `<p>`). Without `display:
+        // Block` here, `ComputedStyle::default()`'s `Inline` display would make
+        // this text-only container fold into a `Built::Inline` (a text run, no
+        // Box fragment) — an impossible fixed+inline computed style the cascade
+        // never produces. Match the realistic (blockified) shape.
+        let fixed_style = ComputedStyle { display: Display::Block, position: Position::Fixed, ..ComputedStyle::default() };
+        let mut fixed_child = container(fixed_style, vec![text_node("fixed")]);
+        fixed_child.id = Some("fixed".into());
+        let mut static_child = container(block_style(), vec![text_node("static")]);
+        static_child.id = Some("static".into());
+        // `id`s (not paint-order position) locate each child's own box below
+        // -- a `position:fixed` child is a POSITIONED child, so CSS 2.1
+        // Appendix E's paint order (`emit`'s own z-index bucketing) emits it
+        // AFTER the in-flow static sibling, regardless of source order.
+        let root = container(block_style(), vec![fixed_child, static_child]);
+        let font = crate::text::BitmapFont::vga_8x16();
+        let fragments = layout_tree(&root, Size { w: 200.0, h: 100.0 }, &font);
+
+        let box_with_id = |id: &str| -> &Fragment {
+            fragments
+                .iter()
+                .find(|f| f.id.as_deref() == Some(id) && matches!(f.kind, FragmentKind::Box { .. }))
+                .unwrap_or_else(|| panic!("expected a Box fragment with id {id:?}"))
+        };
+        assert!(box_with_id("fixed").is_fixed, "the position:fixed child's own box must be flagged is_fixed");
+        assert!(!box_with_id("static").is_fixed, "the position:static sibling's own box must NOT be flagged is_fixed");
+    }
+
+    // ---- Acid2 scroll-to-fragment packet, Task 3: viewport-anchored position:fixed ----
+
+    fn relative_style(width: f32, height: f32) -> ComputedStyle {
+        ComputedStyle { display: Display::Block, position: Position::Relative, width: CssDimension::Px(width), height: CssDimension::Px(height), ..ComputedStyle::default() }
+    }
+
+    /// A `position:fixed;top:N;left:M` box with no `right`/`bottom` --
+    /// mirrors `fixtures/pos-nested.html`'s own shape (a leading spacer
+    /// pushes a `position:relative` ancestor away from the viewport origin,
+    /// which then wraps the fixed descendant).
+    fn fixed_box(id: &str, top: f32, left: f32, size: f32) -> LayoutNode {
+        let mut style = ComputedStyle {
+            display: Display::Block,
+            position: Position::Fixed,
+            width: CssDimension::Px(size),
+            height: CssDimension::Px(size),
+            ..ComputedStyle::default()
+        };
+        style.inset.top = LengthPercentageAuto::Px(top);
+        style.inset.left = LengthPercentageAuto::Px(left);
+        let mut node = container(style, Vec::new());
+        node.id = Some(id.into());
+        node
+    }
+
+    fn find_box<'a>(fragments: &'a [Fragment], id: &str) -> &'a Fragment {
+        fragments
+            .iter()
+            .find(|f| f.id.as_deref() == Some(id) && matches!(f.kind, FragmentKind::Box { .. }))
+            .unwrap_or_else(|| panic!("expected a Box fragment with id {id:?}"))
+    }
+
+    /// The core D55 Finding A regression test: a `position:fixed` box
+    /// nested inside a `position:relative` ancestor that itself sits far
+    /// from the viewport origin (pushed down by 300px of leading flow
+    /// content, mirroring `pos-nested.html`) must resolve to its OWN
+    /// `top`/`left` insets, viewport-relative -- NOT
+    /// `ancestor_origin + (left, top)`, today's wrong parent-relative answer
+    /// (this test is red against pre-Task-3 `emit`).
+    #[test]
+    fn position_fixed_anchors_to_the_viewport_not_the_dom_parent() {
+        let spacer_tall = {
+            let mut s = block_style();
+            s.height = CssDimension::Px(300.0);
+            container(s, Vec::new())
+        };
+        let fixed = fixed_box("fixed", 20.0, 15.0, 50.0);
+        let relative_ancestor = container(relative_style(200.0, 200.0), vec![fixed]);
+        let root = container(block_style(), vec![spacer_tall, relative_ancestor]);
+
+        let font = crate::text::BitmapFont::vga_8x16();
+        let fragments = layout_tree(&root, Size { w: 400.0, h: 800.0 }, &font);
+
+        let fixed_frag = find_box(&fragments, "fixed");
+        assert_eq!(
+            fixed_frag.rect.origin,
+            Point { x: 15.0, y: 20.0 },
+            "a position:fixed box's origin must be its OWN top/left insets, viewport-relative -- \
+             NOT offset by its (300px-pushed-down) DOM ancestor's own origin"
+        );
+    }
+
+    /// Same shape, but the fixed descendant sits TWO `position:relative`
+    /// levels deep (fixed inside relative inside relative), each pushed
+    /// further from the origin -- proves `viewport_origin`/`viewport_clip`
+    /// really do pass through `emit`'s recursion UNCHANGED regardless of
+    /// depth, not just one level.
+    #[test]
+    fn position_fixed_anchoring_is_unaffected_by_ancestor_nesting_depth() {
+        let spacer_tall = {
+            let mut s = block_style();
+            s.height = CssDimension::Px(300.0);
+            container(s, Vec::new())
+        };
+        let fixed = fixed_box("fixed", 20.0, 15.0, 50.0);
+        let inner_relative = container(relative_style(150.0, 150.0), vec![fixed]);
+        let outer_relative = container(relative_style(250.0, 250.0), vec![inner_relative]);
+        let root = container(block_style(), vec![spacer_tall, outer_relative]);
+
+        let font = crate::text::BitmapFont::vga_8x16();
+        let fragments = layout_tree(&root, Size { w: 400.0, h: 900.0 }, &font);
+
+        let fixed_frag = find_box(&fragments, "fixed");
+        assert_eq!(
+            fixed_frag.rect.origin,
+            Point { x: 15.0, y: 20.0 },
+            "two levels of position:relative ancestor nesting must not change a fixed \
+             descendant's viewport-anchored origin"
+        );
+    }
+
+    /// The clip half of §3 (load-bearing for Task 4's own clip-gate test):
+    /// a `position:fixed` element inside an `overflow:hidden` root (via
+    /// `layout_viewport`'s clamped-height path, reused from packet/
+    /// fixed-viewport) must carry the VIEWPORT's own clip rect, not `None`
+    /// and not some intermediate ancestor's clip.
+    #[test]
+    fn position_fixed_inside_an_overflow_hidden_root_gets_the_viewport_clip() {
+        let hidden_root_style = ComputedStyle { display: Display::Block, overflow: Overflow::Hidden, ..ComputedStyle::default() };
+        let fixed = fixed_box("fixed", 10.0, 10.0, 20.0);
+        let root = container(hidden_root_style, vec![fixed]);
+
+        let font = crate::text::BitmapFont::vga_8x16();
+        let viewport = Size { w: 200.0, h: 150.0 };
+        let fragments = layout_tree_viewport(&root, viewport, &font);
+
+        let fixed_frag = find_box(&fragments, "fixed");
+        let expected_viewport_rect = Rect { origin: Point { x: 0.0, y: 0.0 }, size: viewport };
+        assert_eq!(
+            fixed_frag.clip,
+            Some(expected_viewport_rect),
+            "a position:fixed descendant of an overflow:hidden root must carry the viewport's own clip"
         );
     }
 

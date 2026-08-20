@@ -71,7 +71,7 @@ fn text_node(s: &str) -> LayoutNode {
         style: ComputedStyle::default(),
         content: BoxContent::Text(s.to_string()),
         children: Vec::new(),
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -93,7 +93,7 @@ fn px_border_all(v: f32) -> Edges<BorderSide> {
 }
 
 fn container(style: ComputedStyle, children: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style, content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style, content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 fn leaf_container(style: ComputedStyle) -> LayoutNode {
@@ -105,7 +105,7 @@ fn replaced(style: ComputedStyle, w: f32, h: f32) -> LayoutNode {
         style,
         content: BoxContent::Replaced { intrinsic: Size { w, h }, image: None },
         children: Vec::new(),
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -114,7 +114,7 @@ fn replaced_with_image(style: ComputedStyle, w: f32, h: f32, image: Rc<RgbaImage
         style,
         content: BoxContent::Replaced { intrinsic: Size { w, h }, image: Some(image) },
         children: Vec::new(),
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -517,7 +517,7 @@ fn empty_text_child_does_not_break_flow() {
             style: ComputedStyle::default(),
             content: BoxContent::Text(String::new()),
             children: Vec::new(),
-            interactive: None,
+            interactive: None, id: None,
         }],
     );
     let fragments = layout(&root, Size { w: 200.0, h: 100.0 });

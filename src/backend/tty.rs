@@ -958,7 +958,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Text { text: text.to_string(), baseline: h * 0.75, style: ComputedStyle::default() },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -966,7 +966,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Box { style: ComputedStyle::default() },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -974,7 +974,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Box { style: ComputedStyle { background_color: bg, ..ComputedStyle::default() } },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -988,7 +988,7 @@ mod tests {
             kind: FragmentKind::Box {
                 style: ComputedStyle { border: Edges { top: border, ..Edges::all(Default::default()) }, ..ComputedStyle::default() },
             },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
                 baseline: h * 0.75,
                 style: ComputedStyle { color: fg, ..ComputedStyle::default() },
             },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -1008,7 +1008,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w: 32.0, h: 32.0 } },
             kind: FragmentKind::Image { image: RgbaImage::new(1, 1) },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
         let fragments = vec![Fragment {
             rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 24.0, h: 16.0 } },
             kind: FragmentKind::Box { style: ComputedStyle { border: Edges::all(side), ..ComputedStyle::default() } },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }];
         let grid = render(&fragments, 10);
         assert_eq!(grid.row_text(0).trim_end(), "", "a fully-bordered box must draw no tty rule line");
@@ -1179,7 +1179,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: FragmentKind::Box { style: ComputedStyle { display, border, ..ComputedStyle::default() } },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }
     }
 
@@ -1224,7 +1224,7 @@ mod tests {
             kind: FragmentKind::Box {
                 style: ComputedStyle { display: Display::Table, border, border_collapse: BorderCollapse::Collapse, ..ComputedStyle::default() },
             },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         }];
         let grid = render(&fragments, 10);
         // packet/collapse-geometry: the right/bottom rule now lands AT the

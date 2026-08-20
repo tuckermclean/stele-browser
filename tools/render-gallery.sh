@@ -265,6 +265,21 @@ if [ -f "$FIXTURES_DIR/acid2.html" ]; then
   fi
 fi
 
+# Acid2 scrolled to #top (--scroll-to composes the smiley at the window top,
+# instead of the clipped-away-below shape acid2-viewport.png shows above) --
+# same viewport-anchored position:fixed handling as accept.sh's A5w gate.
+# Identical command to A5w so this gallery PNG byte-matches what A5w compares.
+if [ -f "$FIXTURES_DIR/acid2.html" ]; then
+  renders_total=$((renders_total + 1))
+  if "$BIN" --headless --dump-png "$FIXTURES_DIR/acid2.html" "$OUTDIR/acid2-scrolled.png" --viewport-height 600 --scroll-to top 2>/dev/null \
+      && [ -s "$OUTDIR/acid2-scrolled.png" ]; then
+    renders_ok=$((renders_ok + 1))
+  else
+    echo "render-gallery: warning: acid2-scrolled (--scroll-to top) render failed" >&2
+    failures=$((failures + 1))
+  fi
+fi
+
 cat >> "$INDEX" <<HTML
 </div>
 </body>

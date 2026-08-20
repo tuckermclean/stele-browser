@@ -156,6 +156,19 @@ struct Args {
     /// this packet — same "trailing flag, no/bad value is a no-op" totality
     /// `--cols`/`--color-scheme` already have.
     viewport_height: Option<u32>,
+    /// `--scroll-to <id>` (Acid2 scroll-to-fragment packet): opts a
+    /// `--dump-png` render into a SCROLLED headless composite -- the final
+    /// paint shifts every non-fixed fragment up so `id`'s own padding-top
+    /// edge (`layout::find_fragment_top`) lands at the window's y=0, instead
+    /// of the default unscrolled (`scroll_y = 0.0`) render. Effect is gated
+    /// on `viewport_height` ALSO being `Some` (scrolling only means
+    /// something inside a fixed window) -- `--scroll-to` alone is a
+    /// documented no-op, same "unused flag combo, silent no-op" posture
+    /// `chrome` already has outside `--dump-png`. `None` (flag absent, OR an
+    /// id that doesn't resolve to any fragment) degrades to `scroll_y =
+    /// 0.0` -- never a panic, never a hard CLI error, same totality posture
+    /// every other flag here already has.
+    scroll_to_id: Option<String>,
 }
 
 impl Default for Args {
@@ -175,6 +188,7 @@ impl Default for Args {
             audit_contrast: None,
             chrome: false,
             viewport_height: None,
+            scroll_to_id: None,
         }
     }
 }
@@ -227,6 +241,15 @@ fn parse_args(argv: &[String]) -> Args {
                 let mut j = i + 1;
                 let mut chrome_seen = false;
                 let mut viewport_height: Option<u32> = None;
+                // Acid2 scroll-to-fragment packet: `--scroll-to <id>` gets
+                // the exact same "any slot between `--dump-png` and its
+                // `<src> <out.png>` pair" treatment as `--chrome`/
+                // `--viewport-height` right above -- otherwise `--dump-png
+                // --scroll-to top --viewport-height 600 <src> <out.png>`
+                // would silently swallow `top` as `<src>` (the exact trap
+                // this loop's own comment already documents for the other
+                // two flags).
+                let mut scroll_to: Option<String> = None;
                 let mut positionals: Vec<String> = Vec::new();
                 while positionals.len() < 2 && j < argv.len() {
                     if argv[j] == "--chrome" {
@@ -244,6 +267,14 @@ fn parse_args(argv: &[String]) -> Args {
                             viewport_height = Some(v);
                             j += 1;
                         }
+                    } else if argv[j] == "--scroll-to" {
+                        // Same "value flag, missing value is a no-op" rule
+                        // as `--viewport-height` right above.
+                        j += 1;
+                        if let Some(v) = argv.get(j) {
+                            scroll_to = Some(v.clone());
+                            j += 1;
+                        }
                     } else {
                         positionals.push(argv[j].clone());
                         j += 1;
@@ -255,6 +286,9 @@ fn parse_args(argv: &[String]) -> Args {
                     }
                     if let Some(v) = viewport_height {
                         out.viewport_height = Some(v);
+                    }
+                    if let Some(v) = scroll_to {
+                        out.scroll_to_id = Some(v);
                     }
                     i = j - 1;
                     out.dump_png = Some((positionals[0].clone(), positionals[1].clone()));
@@ -307,6 +341,16 @@ fn parse_args(argv: &[String]) -> Args {
                 // `None` (same "trailing flag, no/bad value is a no-op"
                 // totality `--cols` already has) — never a panic, never a
                 // hard CLI error.
+            }
+            "--scroll-to" => {
+                i += 1;
+                if let Some(v) = argv.get(i) {
+                    out.scroll_to_id = Some(v.clone());
+                }
+                // A trailing `--scroll-to` with no value leaves
+                // `scroll_to_id` at `None` (same "trailing flag, no value is
+                // a no-op" totality `--dump-text`/`--audit-contrast` already
+                // have) — never a panic, never a hard CLI error.
             }
             other => {
                 // packet/shell-keyboard: the first bare token (doesn't start
@@ -671,7 +715,7 @@ fn blank_png() -> Vec<u8> {
 /// not this packet's job.
 #[cfg(test)]
 fn dump_png(source: &str) -> Vec<u8> {
-    dump_png_opts(source, false, style::ColorScheme::Light, false, None)
+    dump_png_opts(source, false, style::ColorScheme::Light, false, None, None)
 }
 
 /// [`dump_png`]'s real implementation, parameterized over `no_bg_images`
@@ -692,12 +736,43 @@ fn dump_png(source: &str) -> Vec<u8> {
 /// `prefers-color-scheme` fallback) — could never be PNG-screenshotted in
 /// its dark theme at all. t1d-httpforever's own dark-theme fidelity fixture
 /// needs exactly that, so this packet finishes the wiring.
-fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool, viewport_height: Option<u32>) -> Vec<u8> {
+/// `scroll_to` (Acid2 scroll-to-fragment packet): when both this AND
+/// `viewport_height` are `Some`, the final paint is SCROLLED so `scroll_to`'s
+/// own padding-top edge (`layout::find_fragment_top`) lands at the window's
+/// y=0, instead of the default unscrolled `raster::paint` (`y_offset ==
+/// 0.0`). `build_dump_png_render`'s own fetch->parse->cascade->box-tree-
+/// >layout pipeline is IDENTICAL either way — `layout::layout_viewport`
+/// doesn't need to know about scrolling at all; scrolling is purely a
+/// PAINT-time transform over the already-correct, viewport-anchored
+/// fragments Task 3 produces. Gated on `viewport_height` also being `Some`
+/// (scrolling only means something inside a fixed window) — `scroll_to`
+/// alone (`viewport_height: None`) is a documented no-op, same posture
+/// `chrome` already has outside `--dump-png`. A `scroll_to` id that doesn't
+/// resolve to any fragment (`find_fragment_top` returns `None`) degrades to
+/// `scroll_y = 0.0` — the same unscrolled render as no `--scroll-to` at all,
+/// never a panic.
+fn dump_png_opts(
+    source: &str,
+    no_bg_images: bool,
+    scheme: style::ColorScheme,
+    stamp: bool,
+    viewport_height: Option<u32>,
+    scroll_to: Option<&str>,
+) -> Vec<u8> {
     match build_dump_png_render(source, no_bg_images, scheme, stamp, viewport_height) {
         None => blank_png(),
         Some(r) => {
             let mut surface = MemSurface::new(DEFAULT_PNG_WIDTH, r.height, Color::WHITE);
-            raster::paint(&mut surface, &r.fragments, &r.bg_images, Color::WHITE);
+            let scroll_y = if viewport_height.is_some() {
+                scroll_to.and_then(|id| layout::find_fragment_top(&r.fragments, id)).unwrap_or(0.0).max(0.0)
+            } else {
+                0.0
+            };
+            // `paint_at(.., -0.0)` is byte-identical to `paint(..)` (`-0.0 ==
+            // 0.0` for `f32`, and `paint` is already defined as `paint_at(..,
+            // 0.0)`) -- always calling `paint_at` here, rather than branching
+            // on `scroll_y != 0.0`, is simpler and changes no existing render.
+            raster::paint_at(&mut surface, &r.fragments, &r.bg_images, Color::WHITE, -scroll_y);
             raster::encode_png(&surface)
         }
     }
@@ -836,7 +911,7 @@ fn build_dump_png_render(
 /// directory, a hostile/invalid `out_path`).
 #[cfg(test)]
 fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
-    write_dump_png_opts(source, out_path, false, style::ColorScheme::Light, false, None)
+    write_dump_png_opts(source, out_path, false, style::ColorScheme::Light, false, None, None)
 }
 
 /// [`write_dump_png`]'s real implementation, parameterized over
@@ -844,7 +919,8 @@ fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
 /// the same wrapper-over-parameterized-impl rationale and the
 /// packet-t1d-httpforever `scheme`/`stamp` wiring specifically — and, as of
 /// packet/fixed-viewport, `viewport_height` (see [`build_dump_png_render`]'s
-/// own doc comment).
+/// own doc comment) and, as of the Acid2 scroll-to-fragment packet,
+/// `scroll_to` (see [`dump_png_opts`]'s own doc comment).
 fn write_dump_png_opts(
     source: &str,
     out_path: &str,
@@ -852,8 +928,9 @@ fn write_dump_png_opts(
     scheme: style::ColorScheme,
     stamp: bool,
     viewport_height: Option<u32>,
+    scroll_to: Option<&str>,
 ) -> Result<(), String> {
-    let bytes = dump_png_opts(source, no_bg_images, scheme, stamp, viewport_height);
+    let bytes = dump_png_opts(source, no_bg_images, scheme, stamp, viewport_height, scroll_to);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
@@ -2569,6 +2646,7 @@ fn main() {
                     args.color_scheme,
                     args.color_scheme_given,
                     args.viewport_height,
+                    args.scroll_to_id.as_deref(),
                 )
             };
             if let Err(e) = result {
@@ -2955,15 +3033,15 @@ mod tests {
         // path must be byte-identical to the pre-t1d two-argument call --
         // same rationale as dump_text's own
         // `color_scheme_default_does_not_stamp_and_matches_the_pre_t1b_golden_path`.
-        let via_opts = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, None);
+        let via_opts = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, None, None);
         let golden: &[u8] = include_bytes!("../goldens/basic.png");
         assert_eq!(via_opts.as_slice(), golden, "the default (unstamped, Light) PNG path must not have changed");
     }
 
     #[test]
     fn dump_png_color_scheme_dark_stamped_changes_the_rendered_pixels() {
-        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false, None);
-        let dark = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None);
+        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false, None, None);
+        let dark = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None, None);
         assert_ne!(light, dark, "--color-scheme dark (stamped) must change which paragraphs paint, hence the PNG bytes");
 
         let (_, light_h) = decode_png_dims(&light);
@@ -2977,8 +3055,8 @@ mod tests {
         // attribute stamp) are independently wired on the pixel path too --
         // mirrors dump_text's own
         // `color_scheme_dark_without_stamping_only_affects_media_queries_not_attribute_selectors`.
-        let dark_no_stamp = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, false, None);
-        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false, None);
+        let dark_no_stamp = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, false, None, None);
+        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false, None, None);
         assert_ne!(dark_no_stamp, light, "prefers-color-scheme is scheme-driven independent of stamping, so the render must still differ");
     }
 
@@ -2987,9 +3065,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("stele-write-dump-png-color-scheme-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let out = dir.join("dark.png");
-        write_dump_png_opts("fixtures/color-scheme.html", &out.to_string_lossy(), false, style::ColorScheme::Dark, true, None).expect("write should succeed");
+        write_dump_png_opts("fixtures/color-scheme.html", &out.to_string_lossy(), false, style::ColorScheme::Dark, true, None, None).expect("write should succeed");
         let on_disk = std::fs::read(&out).expect("png should be written");
-        assert_eq!(on_disk, dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None));
+        assert_eq!(on_disk, dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3286,15 +3364,129 @@ mod tests {
     /// matching it.
     #[test]
     fn dump_png_with_viewport_height_clamps_the_encoded_png_to_the_requested_height() {
-        let default_bytes = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, None);
+        let default_bytes = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, None, None);
         let (_, default_h) = decode_png_dims(&default_bytes);
         assert!(default_h > 10, "fixture must be taller than the clamp under test for this to be meaningful");
 
-        let clamped_bytes = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, Some(10));
+        let clamped_bytes = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, Some(10), None);
         assert!(clamped_bytes.starts_with(&[0x89, b'P', b'N', b'G']));
         let (w, h) = decode_png_dims(&clamped_bytes);
         assert_eq!(w, DEFAULT_PNG_WIDTH);
         assert_eq!(h, 10);
+    }
+
+    // -------------------------------------------------------- --scroll-to (Acid2 scroll-to-fragment packet)
+
+    /// A small synthetic fixture with (a) a `position:fixed` marker pinned
+    /// to the top-left corner, (b) a 400px spacer, (c) a `<div id="mark">`
+    /// partway down -- written to a temp file, same pattern
+    /// `dump_png_applies_an_external_link_stylesheet` already uses (a
+    /// `file://`-free literal path, `dump_png`'s own fetch resolves a bare
+    /// filesystem path directly). `body { margin: 0 }` keeps the geometry
+    /// exact (no UA 8px margin to account for).
+    fn scroll_to_fixture_dir() -> std::path::PathBuf {
+        // Unique dir per call. Three tests share this helper and cargo runs
+        // them in parallel; a per-process shared path let one test's
+        // truncate+rewrite (`fs::write`) race another test's two reads — the
+        // second read seeing a half-written fixture, rendering a different
+        // (shorter) PNG and failing an `assert_eq`. An atomic counter gives
+        // each caller its own isolated fixture directory.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("stele-scroll-to-{}-{}", std::process::id(), seq));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("scroll-to.html"),
+            r#"<!doctype html><body style="margin:0">
+<div style="position:fixed;top:0;left:0;width:20px;height:20px;background:rgb(10,20,220)"></div>
+<div style="height:400px"></div>
+<div id="mark" style="width:50px;height:50px;background:rgb(220,30,10)"></div>
+</body>"#,
+        )
+        .expect("write fixture html");
+        dir
+    }
+
+    /// The composition this packet delivers, end to end: `#mark` (well
+    /// below the fold) scrolls into view at the window's top, WHILE the
+    /// `position:fixed` marker stays pinned at the top-left corner, unmoved
+    /// by the scroll. Both assertions land in one test since that's the
+    /// actual behavior being delivered (design's own framing). Red against
+    /// pre-Task-5 `main.rs` (the flag doesn't exist / isn't parsed / isn't
+    /// wired into the paint call).
+    #[test]
+    fn scroll_to_composes_the_target_at_top_with_a_fixed_marker_unmoved() {
+        let dir = scroll_to_fixture_dir();
+        let src = dir.join("scroll-to.html").to_string_lossy().to_string();
+
+        let bytes = dump_png_opts(&src, false, style::ColorScheme::Light, false, Some(200), Some("mark"));
+        let (w, h) = decode_png_dims(&bytes);
+        assert_eq!((w, h), (DEFAULT_PNG_WIDTH, 200));
+        let pixels = decode_png_pixels(&bytes);
+        let row_bytes = w as usize * 4;
+        let band = |y0: usize, y1: usize| -> &[u8] { &pixels[y0 * row_bytes..(y1 * row_bytes).min(pixels.len())] };
+
+        // (i) #mark's red scrolled into view near the window's top -- its
+        // padding-top edge lands at exactly y=0 (find_fragment_top's own
+        // contract), so scan generously (the top 60 rows of a 200px window)
+        // rather than pinning an exact row.
+        assert!(
+            band(0, 60).chunks(4).any(|p| p == [220, 30, 10, 255]),
+            "#mark's own background color should appear near the top of the scrolled window"
+        );
+        // (ii) the fixed marker's blue is STILL at the top-left corner,
+        // unmoved by the scroll.
+        assert!(
+            band(0, 20).chunks(4).any(|p| p == [10, 20, 220, 255]),
+            "the position:fixed marker's own background color must still be visible near the top, unmoved by the scroll"
+        );
+    }
+
+    #[test]
+    fn parse_args_reads_scroll_to() {
+        let a = parse_args(&args(&["--dump-png", "--scroll-to", "mark", "--viewport-height", "200", "src.html", "out.png"]));
+        assert_eq!(a.scroll_to_id, Some("mark".to_string()));
+        assert_eq!(a.dump_png, Some(("src.html".to_string(), "out.png".to_string())));
+        assert_eq!(a.viewport_height, Some(200));
+    }
+
+    /// The exact "swallow-as-positional" trap this loop's own comment
+    /// documents for `--chrome`/`--viewport-height`: `--scroll-to`'s VALUE
+    /// token, sitting between `--dump-png` and its `<src> <out.png>` pair,
+    /// must not get silently consumed as one of the two positionals.
+    #[test]
+    fn parse_args_scroll_to_after_the_dump_png_positionals_still_parses() {
+        let a = parse_args(&args(&["--dump-png", "src.html", "out.png", "--scroll-to", "mark", "--viewport-height", "200"]));
+        assert_eq!(a.scroll_to_id, Some("mark".to_string()));
+        assert_eq!(a.dump_png, Some(("src.html".to_string(), "out.png".to_string())));
+        assert_eq!(a.viewport_height, Some(200));
+    }
+
+    /// `--scroll-to` alone (no `--viewport-height`) is a documented no-op:
+    /// the render must be byte-identical to a call with NEITHER flag.
+    #[test]
+    fn scroll_to_without_viewport_height_is_a_no_op() {
+        let dir = scroll_to_fixture_dir();
+        let src = dir.join("scroll-to.html").to_string_lossy().to_string();
+
+        let neither = dump_png_opts(&src, false, style::ColorScheme::Light, false, None, None);
+        let scroll_to_only = dump_png_opts(&src, false, style::ColorScheme::Light, false, None, Some("mark"));
+        assert_eq!(neither, scroll_to_only, "--scroll-to with no --viewport-height must render exactly like neither flag");
+    }
+
+    /// A `--scroll-to` id that doesn't resolve to any fragment degrades to
+    /// `scroll_y = 0.0` -- byte-identical to an ordinary `--viewport-height`
+    /// -only render (`find_fragment_top`'s own `None` case, Task 2) --
+    /// never a panic, never an error.
+    #[test]
+    fn scroll_to_unknown_id_degrades_to_an_unscrolled_viewport_render() {
+        let dir = scroll_to_fixture_dir();
+        let src = dir.join("scroll-to.html").to_string_lossy().to_string();
+
+        let viewport_only = dump_png_opts(&src, false, style::ColorScheme::Light, false, Some(200), None);
+        let unknown_id = dump_png_opts(&src, false, style::ColorScheme::Light, false, Some(200), Some("nonexistent-id"));
+        assert_eq!(viewport_only, unknown_id, "an unresolvable --scroll-to id must degrade to scroll_y = 0.0, not panic");
     }
 
     // -------------------------------------------------------- bg-image (--no-bg-images)
@@ -3332,8 +3524,8 @@ mod tests {
     /// red tile pixels.
     #[test]
     fn no_bg_images_flag_produces_a_distinct_image_free_render() {
-        let with_images = dump_png_opts("fixtures/bg-image.html", false, style::ColorScheme::Light, false, None);
-        let without_images = dump_png_opts("fixtures/bg-image.html", true, style::ColorScheme::Light, false, None);
+        let with_images = dump_png_opts("fixtures/bg-image.html", false, style::ColorScheme::Light, false, None, None);
+        let without_images = dump_png_opts("fixtures/bg-image.html", true, style::ColorScheme::Light, false, None, None);
 
         assert_ne!(with_images, without_images, "--no-bg-images must change the render");
 
@@ -3633,7 +3825,7 @@ mod tests {
         let text_fragment = |s: &str| layout::Fragment {
             rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 8.0, h: 16.0 } },
             kind: layout::FragmentKind::Text { text: s.to_string(), baseline: 12.0, style: ComputedStyle::default() },
-            interactive: None, clip: None,
+            interactive: None, clip: None, id: None, is_fixed: false,
         };
         // One emoji (missing) in the first fragment, an ASCII-only second
         // fragment (nothing missing), a CJK pair (two missing) in the third.
@@ -3650,12 +3842,12 @@ mod tests {
             layout::Fragment {
                 rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 10.0, h: 10.0 } },
                 kind: layout::FragmentKind::Box { style: ComputedStyle::default() },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
             },
             layout::Fragment {
                 rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: LSize { w: 32.0, h: 32.0 } },
                 kind: layout::FragmentKind::Image { image: RgbaImage::new(1, 1) },
-                interactive: None, clip: None,
+                interactive: None, clip: None, id: None, is_fixed: false,
             },
         ];
         assert_eq!(count_missing_glyphs(&fragments), 0, "non-Text fragments carry no char content to count");

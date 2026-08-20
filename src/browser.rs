@@ -1573,12 +1573,12 @@ mod tests {
             Fragment {
                 rect: Rect { origin: Point { x: 40.0, y: 320.0 }, size: Size { w: 280.0, h: 16.0 } },
                 kind: FragmentKind::Text { text: "a".repeat(35), baseline: 12.0, style: ComputedStyle::default() },
-                interactive: Some(Interactive::Link { href: href.clone() }), clip: None,
+                interactive: Some(Interactive::Link { href: href.clone() }), clip: None, id: None, is_fixed: false,
             },
             Fragment {
                 rect: Rect { origin: Point { x: 0.0, y: 336.0 }, size: Size { w: 120.0, h: 16.0 } },
                 kind: FragmentKind::Text { text: "b".repeat(15), baseline: 12.0, style: ComputedStyle::default() },
-                interactive: Some(Interactive::Link { href }), clip: None,
+                interactive: Some(Interactive::Link { href }), clip: None, id: None, is_fixed: false,
             },
         ]
     }

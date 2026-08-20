@@ -18,7 +18,7 @@ fn text_node(s: &str) -> LayoutNode {
         style: ComputedStyle::default(),
         content: BoxContent::Text(s.to_string()),
         children: Vec::new(),
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
@@ -27,20 +27,20 @@ fn cell(colspan: u16, rowspan: u16, text: &str) -> LayoutNode {
         style: styled(Display::TableCell),
         content: BoxContent::TableCell { colspan, rowspan },
         children: vec![text_node(text)],
-        interactive: None,
+        interactive: None, id: None,
     }
 }
 
 fn row(cells: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::TableRow), content: BoxContent::Container, children: cells, interactive: None }
+    LayoutNode { style: styled(Display::TableRow), content: BoxContent::Container, children: cells, interactive: None, id: None }
 }
 
 fn row_group(rows: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::TableRowGroup), content: BoxContent::Container, children: rows, interactive: None }
+    LayoutNode { style: styled(Display::TableRowGroup), content: BoxContent::Container, children: rows, interactive: None, id: None }
 }
 
 fn table(children: Vec<LayoutNode>) -> LayoutNode {
-    LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children, interactive: None }
+    LayoutNode { style: styled(Display::Table), content: BoxContent::Container, children, interactive: None, id: None }
 }
 
 /// A plain 2x2 table (no groups, no spans): cells land exactly where their

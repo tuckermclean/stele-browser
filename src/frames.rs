@@ -432,7 +432,7 @@ fn placeholder(cols: usize, text: &str) -> TextGrid {
     let frag = Fragment {
         rect: Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: cols as f32 * CELL_W, h: CELL_H } },
         kind: FragmentKind::Text { text: text.to_string(), baseline: CELL_H * 0.75, style: ComputedStyle::default() },
-        interactive: None, clip: None,
+        interactive: None, clip: None, id: None, is_fixed: false,
     };
     tty::render(std::slice::from_ref(&frag), cols)
 }
