@@ -206,31 +206,55 @@ fn parse_args(argv: &[String]) -> Args {
                 // ANY slot between `--dump-png` and its `<src> <out.png>`
                 // pair — `--dump-png --chrome <src> <out.png>` (the form
                 // accept.sh's `chrome-basic` golden uses), and equally
-                // `--dump-png <src> --chrome <out.png>` — this arm eagerly
-                // grabs the NEXT two non-`--chrome` tokens as positionals,
-                // so a `--chrome` sitting anywhere in that stretch has to be
-                // recognized and skipped explicitly here or it would
-                // silently BECOME `<src>`/`<out.png>` (shifting the real
-                // positional(s) over) instead of setting the flag. `--chrome`
-                // AFTER the full `<src> <out.png>` pair (or before
-                // `--dump-png` entirely) still works too — this loop stops
-                // as soon as it has collected two positionals, so a trailing
-                // `--chrome` is left untouched for the ordinary standalone
-                // `"--chrome"` match arm below to catch (no double-consume).
+                // `--dump-png <src> --chrome <out.png>`. packet/fixed-
+                // viewport final review: `--viewport-height <N>` gets the
+                // same "any slot" treatment — `--dump-png --viewport-height
+                // 120 <src> <out.png>` was silently mis-parsing `120` and
+                // `<src>` as the positionals (the flag never took effect,
+                // a *silent* blank-PNG failure) because this arm eagerly
+                // grabs the NEXT two non-flag tokens as positionals, so any
+                // recognized inline flag sitting anywhere in that stretch
+                // has to be skipped explicitly here or it silently BECOMES
+                // `<src>`/`<out.png>` (shifting the real positional(s)
+                // over) instead of setting the flag. Both `--chrome` and
+                // `--viewport-height <N>` are handled in any position here;
+                // either flag AFTER the full `<src> <out.png>` pair (or
+                // before `--dump-png` entirely) still works too — this loop
+                // stops as soon as it has collected two positionals, so a
+                // trailing flag is left untouched for the ordinary
+                // standalone `"--chrome"`/`"--viewport-height"` match arms
+                // below to catch (no double-consume).
                 let mut j = i + 1;
                 let mut chrome_seen = false;
+                let mut viewport_height: Option<u32> = None;
                 let mut positionals: Vec<String> = Vec::new();
                 while positionals.len() < 2 && j < argv.len() {
                     if argv[j] == "--chrome" {
                         chrome_seen = true;
+                        j += 1;
+                    } else if argv[j] == "--viewport-height" {
+                        // Value flag: skip the flag token, then try the
+                        // next token as the value. Missing/non-numeric
+                        // value: skip only the flag itself, leaving
+                        // `viewport_height` at `None` — total, never a
+                        // panic, matching the standalone arm's own
+                        // "trailing flag, no/bad value is a no-op" rule.
+                        j += 1;
+                        if let Some(v) = argv.get(j).and_then(|s| s.parse::<u32>().ok()) {
+                            viewport_height = Some(v);
+                            j += 1;
+                        }
                     } else {
                         positionals.push(argv[j].clone());
+                        j += 1;
                     }
-                    j += 1;
                 }
                 if positionals.len() == 2 {
                     if chrome_seen {
                         out.chrome = true;
+                    }
+                    if let Some(v) = viewport_height {
+                        out.viewport_height = Some(v);
                     }
                     i = j - 1;
                     out.dump_png = Some((positionals[0].clone(), positionals[1].clone()));
@@ -3099,6 +3123,52 @@ mod tests {
         let a = parse_args(&args(&["--dump-png", "fixtures/basic.html", "/tmp/out.png", "--chrome"]));
         assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
         assert!(a.chrome);
+    }
+
+    // packet/fixed-viewport final review: `--viewport-height` inline within
+    // `--dump-png`'s <src> <out> stretch must not get mis-parsed as a
+    // positional (the footgun this fix closes).
+
+    #[test]
+    fn parse_args_dump_png_viewport_height_before_src_sets_flag_and_positionals() {
+        let a = parse_args(&args(&["--dump-png", "--viewport-height", "120", "fixtures/basic.html", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert_eq!(a.viewport_height, Some(120));
+    }
+
+    #[test]
+    fn parse_args_dump_png_chrome_and_viewport_height_before_src_sets_both_and_positionals() {
+        let a = parse_args(&args(&[
+            "--dump-png",
+            "--chrome",
+            "--viewport-height",
+            "90",
+            "fixtures/basic.html",
+            "/tmp/out.png",
+        ]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert!(a.chrome);
+        assert_eq!(a.viewport_height, Some(90));
+    }
+
+    #[test]
+    fn parse_args_dump_png_viewport_height_after_out_still_sets_flag_and_positionals() {
+        let a = parse_args(&args(&[
+            "--dump-png",
+            "fixtures/basic.html",
+            "/tmp/out.png",
+            "--viewport-height",
+            "120",
+        ]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert_eq!(a.viewport_height, Some(120));
+    }
+
+    #[test]
+    fn parse_args_dump_png_no_viewport_height_leaves_it_none() {
+        let a = parse_args(&args(&["--dump-png", "fixtures/basic.html", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert_eq!(a.viewport_height, None);
     }
 
     fn decode_png_dims(bytes: &[u8]) -> (u32, u32) {
