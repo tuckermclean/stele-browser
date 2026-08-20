@@ -238,6 +238,20 @@ if [ -f "$FIXTURES_DIR/basic.html" ]; then
   fi
 fi
 
+# Acid2 in a FIXED 800x600 viewport (--viewport-height clamps the root so
+# html{overflow:hidden} clips the positioned face into a window instead of the
+# default 800x3960 content-height sprawl) — for the P7 smiley measurement.
+if [ -f "$FIXTURES_DIR/acid2.html" ]; then
+  renders_total=$((renders_total + 1))
+  if "$BIN" --headless --dump-png --viewport-height 600 "$FIXTURES_DIR/acid2.html" "$OUTDIR/acid2-viewport.png" 2>/dev/null \
+      && [ -s "$OUTDIR/acid2-viewport.png" ]; then
+    renders_ok=$((renders_ok + 1))
+  else
+    echo "render-gallery: warning: acid2-viewport (--viewport-height) render failed" >&2
+    failures=$((failures + 1))
+  fi
+fi
+
 cat >> "$INDEX" <<HTML
 </div>
 </body>
