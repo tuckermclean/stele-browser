@@ -1833,7 +1833,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: crate::layout::FragmentKind::Box { style: crate::style::ComputedStyle::default() },
-            interactive: Some(Interactive::Link { href: href.into() }),
+            interactive: Some(Interactive::Link { href: href.into() }), clip: None,
         }
     }
 
@@ -1841,7 +1841,7 @@ mod tests {
         Fragment {
             rect: Rect { origin: Point { x, y }, size: Size { w, h } },
             kind: crate::layout::FragmentKind::Box { style: crate::style::ComputedStyle::default() },
-            interactive: None,
+            interactive: None, clip: None,
         }
     }
 

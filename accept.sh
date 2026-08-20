@@ -1201,6 +1201,44 @@ else
     bad "A5n: PNG dump of $FIXTURE_DATA_IMG differs from $GOLDEN_PNG_DATA_IMG"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_DATA_IMG") actual=$(wc -c < /tmp/stele_a5n.png)"
   fi
+
+  FIXTURE_BC_MINMAX="fixtures/bc-minmax.html"
+  GOLDEN_PNG_BC_MINMAX="goldens/bc-minmax.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5o: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_BC_MINMAX" /tmp/stele_a5o.png 2>/tmp/stele_a5o.err; then
+    bad "A5o: stele --headless --dump-png crashed on $FIXTURE_BC_MINMAX"
+    sed 's/^/    /' /tmp/stele_a5o.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5o.png "$GOLDEN_PNG_BC_MINMAX"
+    pass "A5o: blessed bc-minmax PNG golden -> $GOLDEN_PNG_BC_MINMAX (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_BC_MINMAX" ]; then
+    bad "A5o: no golden at $GOLDEN_PNG_BC_MINMAX to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_BC_MINMAX" /tmp/stele_a5o.png; then
+    pass "A5o: PNG dump of $FIXTURE_BC_MINMAX matches golden"
+  else
+    bad "A5o: PNG dump of $FIXTURE_BC_MINMAX differs from $GOLDEN_PNG_BC_MINMAX"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_BC_MINMAX") actual=$(wc -c < /tmp/stele_a5o.png)"
+  fi
+
+  FIXTURE_BC_OVERFLOW="fixtures/bc-overflow.html"
+  GOLDEN_PNG_BC_OVERFLOW="goldens/bc-overflow.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5p: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_BC_OVERFLOW" /tmp/stele_a5p.png 2>/tmp/stele_a5p.err; then
+    bad "A5p: stele --headless --dump-png crashed on $FIXTURE_BC_OVERFLOW"
+    sed 's/^/    /' /tmp/stele_a5p.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5p.png "$GOLDEN_PNG_BC_OVERFLOW"
+    pass "A5p: blessed bc-overflow PNG golden -> $GOLDEN_PNG_BC_OVERFLOW (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_BC_OVERFLOW" ]; then
+    bad "A5p: no golden at $GOLDEN_PNG_BC_OVERFLOW to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_BC_OVERFLOW" /tmp/stele_a5p.png; then
+    pass "A5p: PNG dump of $FIXTURE_BC_OVERFLOW matches golden"
+  else
+    bad "A5p: PNG dump of $FIXTURE_BC_OVERFLOW differs from $GOLDEN_PNG_BC_OVERFLOW"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_BC_OVERFLOW") actual=$(wc -c < /tmp/stele_a5p.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

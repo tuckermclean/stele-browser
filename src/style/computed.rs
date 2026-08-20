@@ -211,6 +211,18 @@ pub enum Clear {
     Both,
 }
 
+/// CSS `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2). Non-
+/// inherited box property. `Visible` is the CSS initial value (no clip).
+/// `Hidden` covers every non-visible keyword (`hidden`/`scroll`/`auto`/
+/// `clip`) -- a static render (no scrollbars, no scrolling) clips for all of
+/// them alike, so this engine collapses them onto one clipping value. See
+/// `value::apply_property`'s `overflow`/`overflow-x`/`overflow-y` parse arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overflow {
+    Visible,
+    Hidden,
+}
+
 /// `z-index: auto | <integer>` (Acid2 Packet 2). Non-inherited. `Auto` and
 /// `Layer(0)` paint in the same CSS 2.1 Appendix-E step; `layer()` collapses
 /// `Auto` to 0 for the paint-order sort (see layout::block).
@@ -404,6 +416,25 @@ pub struct ComputedStyle {
     pub display: Display,
     pub width: Dimension,
     pub height: Dimension,
+    /// `min-width`/`max-width`/`min-height`/`max-height` (Acid2 Packet 5,
+    /// Task 1). Same `Dimension` shape as `width`/`height` -- `layout::
+    /// block::base_style` maps all four straight onto taffy's own native
+    /// `min_size`/`max_size` (`layout::block::map_dimension` unchanged,
+    /// reused as-is). `Dimension::Auto` is the default for ALL FOUR: that is
+    /// CSS's real initial value for `min-width`/`min-height` (`auto`), and
+    /// for `max-width`/`max-height` (`none`) -- `Dimension` has no separate
+    /// "none" variant, so `value::apply_property` maps a literal `none`
+    /// token for the max-* properties onto this same `Auto` value (see that
+    /// module's own doc comment on the max-width/max-height parse arms).
+    /// Taffy's own `Size::auto()` (its default for `min_size`/`max_size`)
+    /// means "no constraint" either way, so `Dimension::Auto` -> `auto()`
+    /// is the correct mapping for both min's and max's "unset" case, and an
+    /// element that never declares any of the four resolves byte-identically
+    /// to before this packet (no golden churn).
+    pub min_width: Dimension,
+    pub max_width: Dimension,
+    pub min_height: Dimension,
+    pub max_height: Dimension,
     pub margin: Edges<LengthPercentageAuto>,
     pub padding: Edges<LengthPercentage>,
     pub border: Edges<BorderSide>,
@@ -461,6 +492,12 @@ pub struct ComputedStyle {
     /// Non-inherited ("own") box property, same resolution shape as `float`/
     /// `clear`/`box_sizing`. `Static` is the CSS initial value.
     pub position: Position,
+    /// `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2). Non-
+    /// inherited ("own") box property, same resolution shape as `position`.
+    /// `Visible` is the CSS initial value (no paint clipping); see
+    /// `Overflow`'s own doc comment for how the non-visible keywords
+    /// collapse onto `Hidden`.
+    pub overflow: Overflow,
     /// `z-index: auto | <integer>` (Acid2 Packet 2). Non-inherited ("own")
     /// box property, same resolution shape as `position`. `Auto` is the CSS
     /// initial value; see `ZIndex::layer` for how it collapses for paint.
@@ -539,6 +576,12 @@ impl Default for ComputedStyle {
             display: Display::Inline, // CSS initial; UA sheet makes blocks block
             width: Dimension::Auto,
             height: Dimension::Auto,
+            // Acid2 Packet 5, Task 1: `auto`/`none` -- see the field doc
+            // comments above for why both collapse to the same `Auto` value.
+            min_width: Dimension::Auto,
+            max_width: Dimension::Auto,
+            min_height: Dimension::Auto,
+            max_height: Dimension::Auto,
             margin: Edges::all(LengthPercentageAuto::Px(0.0)),
             padding: Edges::all(LengthPercentage::Px(0.0)),
             border: Edges::all(BorderSide::default()),
@@ -555,6 +598,7 @@ impl Default for ComputedStyle {
             float: Float::None,
             clear: Clear::None,
             position: Position::Static,
+            overflow: Overflow::Visible,
             z_index: ZIndex::Auto,
             content: Content::Normal,
             inset: Edges::all(LengthPercentageAuto::Auto),
@@ -606,5 +650,8 @@ mod tests {
         assert_eq!(s.column_gap, None);
         // Acid2 Packet 3: `content`'s CSS initial value is `normal`.
         assert_eq!(s.content, Content::Normal);
+        // Acid2 Packet 5, Task 2: `overflow`'s CSS initial value is
+        // `visible` -- no paint clipping by default.
+        assert_eq!(s.overflow, Overflow::Visible);
     }
 }

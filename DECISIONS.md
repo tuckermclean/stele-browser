@@ -3,6 +3,28 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Layout — box constraints (Acid2 Packet 5)
+
+### D59 -- min/max via taffy; overflow:hidden via a per-fragment clip rect; background-position deferred
+Acid2 needs `min/max-width/height` (x7), `overflow:hidden` (x3), and `background-position`. **min/max:** pure
+taffy plumbing -- four `Dimension` fields mapped onto taffy's native `min_size`/`max_size` in `base_style`
+(`map_dimension`, same as `width`/`height`); taffy does the clamp. Defaults (`min:auto`/`max:none`) map to
+taffy's no-constraint, so a document not using them is byte-identical. **overflow:hidden:** the fragment stream
+is FLAT (no paint tree), so clipping is stamped at `emit` time -- `Fragment` gains a `clip: Option<Rect>`, and
+when a container is `overflow:hidden`, `emit` intersects the ambient clip with the container's border box and
+stamps every descendant fragment (not the container's own box). The painter sets the surface clip per fragment;
+`MemSurface` (the sole `Surface` impl) checks it in `put_pixel` -- the choke point every draw op (`fill_rect`,
+`blit`, `draw_text`) already routes through -- so one check clips all of them. `scroll`/`auto`/`clip` render as
+`hidden` for the static paint; the tty backend ignores clip (default no-op `set_clip`). Verified: `bc-minmax`
+(80/100-px clamps) and `bc-overflow` (a 200x200 child clipped to exactly 60x60). **Deferred (revisit at P7 if
+the Acid2 face needs it):** `background-position` -- lowest Acid2 value and, because our backgrounds always
+tile (no `background-repeat:no-repeat` support), it would only shift the tile phase, not place a single image;
+also deferred: `overflow:hidden` INSIDE a `<td>` (table-cell subfragments get the ambient clip, not a nested
+one -- wrong coordinate space), `overflow:hidden` declared directly on a `<table>` ELEMENT (the `Built::Table`
+emit arm does not compute a child clip -- only `Built::Container` boxes clip their descendants; a table's own
+cells are not clipped by the table's own overflow), and independent `overflow-x`/`-y` (one clip field). None
+are exercised by Acid2.
+
 ## Networking — data: URI scheme (Acid2 Packet 4)
 
 ### D58 -- data: served as one fetch::fetch arm with in-repo base64/percent decoders

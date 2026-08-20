@@ -121,6 +121,16 @@ pub struct Fragment {
     /// content; painters ignore it (no rendering change from this field's
     /// presence).
     pub interactive: Option<Interactive>,
+    /// The nearest ancestor `overflow:hidden` container's border box, in the
+    /// same layout-`Rect` coordinate space as `rect`, intersected through
+    /// every such ancestor (Acid2 Packet 5, Task 2) — `None` means
+    /// unclipped. Stamped by `layout::block::emit`'s threaded `clip`
+    /// parameter; painted by `backend::raster::paint_at` via
+    /// `Surface::set_clip`. A box is never clipped by its OWN `overflow:
+    /// hidden` (only its descendants are), so this is the clip IN FORCE at
+    /// the point `emit` pushes the fragment, not one derived from the
+    /// fragment's own style.
+    pub clip: Option<Rect>,
 }
 
 pub enum FragmentKind {

@@ -1474,3 +1474,20 @@ Append-only running log. Newest at the bottom.
   1,279,132 -- **86.75 % of the 1.44 MB floppy** (195,428 B headroom).
 - **Acid2 progress:** embedded `data:` images now decode. Still ahead (Packets 5-7): min/max/overflow/
   background-position, `<object>` fallback, then final assembly + the smiley golden.
+
+## 2026-08-20 -- Acid2 Packet 5: box constraints (min/max, overflow:hidden)
+
+- **Landed** `min-width`/`max-width`/`min-height`/`max-height` (taffy-native `min_size`/`max_size` in
+  `base_style` -- taffy clamps) and `overflow: hidden` paint clipping. Clipping is stamped at `emit` time onto
+  each `Fragment` (`clip: Option<Rect>`, intersected with a container's border box when it is `overflow:hidden`)
+  and honored in `MemSurface::put_pixel` -- the single choke point all draw ops route through, so `fill_rect`,
+  `blit`, and `draw_text` all clip uniformly. `scroll`/`auto` render as `hidden`; tty ignores clip. See D59.
+- **Verified** (pixel-measured): `bc-minmax` -- a `width:40;min-width:80` box renders 80px wide, a
+  `width:300;max-width:100` box 100px wide; `bc-overflow` -- a 200x200 green child clipped to exactly 60x60 by
+  its `overflow:hidden` parent (3600 px, not 40000).
+- **Deferred** (D59, revisit triggers): `background-position` (only shifts our always-tiling bg phase --
+  awkward without `no-repeat`; lowest Acid2 value); `overflow:hidden` inside table cells; independent overflow-x/y.
+- **Size:** the i486 binary is **1,283,228 bytes** (`stele-i486` artifact), **+4,096 B (+0.32 %)** vs P4's
+  1,279,132 -- **87.02 % of the 1.44 MB floppy** (191,332 B headroom).
+- **Acid2 progress:** boxes clamp and clip. Still ahead (Packets 6-7): `<object>` fallback, then final assembly
+  + the smiley golden (and the deferred `background-position` if the face needs it).

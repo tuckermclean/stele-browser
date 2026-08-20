@@ -6,8 +6,8 @@
 use crate::dom::AttrMap;
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Content, Display, FlexDirection, FlexWrap,
-    Float, FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Position, TextAlign, TextDecoration,
-    VerticalAlign, WhiteSpace, ZIndex,
+    Float, FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Overflow, Position, TextAlign,
+    TextDecoration, VerticalAlign, WhiteSpace, ZIndex,
 };
 use crate::style::tokenizer::Token;
 use crate::surface::Color;
@@ -151,6 +151,19 @@ pub(crate) struct Declarations {
     pub display: Option<Display>,
     pub width: Option<RawLengthAuto>,
     pub height: Option<RawLengthAuto>,
+    /// `min-width`/`max-width`/`min-height`/`max-height` (Acid2 Packet 5,
+    /// Task 1) -- same `RawLengthAuto` shape as `width`/`height` (length,
+    /// percentage, or `auto`). `apply_property` additionally accepts a
+    /// literal `none` token for the max-* pair (real CSS's own initial
+    /// value/"no constraint" keyword for `max-width`/`max-height`, which
+    /// `auto` is NOT -- but this curated dialect has no distinct "none"
+    /// representation, so it's parsed onto the same `RawLengthAuto::Auto`
+    /// `cascade::resolve_dimension` already turns into `Dimension::Auto`,
+    /// i.e. "no constraint" -- see `token_to_raw_length_auto_or_none`).
+    pub min_width: Option<RawLengthAuto>,
+    pub max_width: Option<RawLengthAuto>,
+    pub min_height: Option<RawLengthAuto>,
+    pub max_height: Option<RawLengthAuto>,
     pub margin: EdgesRaw<RawLengthAuto>,
     pub padding: EdgesRaw<RawLength>,
     pub border: Option<BorderRaw>,
@@ -213,6 +226,13 @@ pub(crate) struct Declarations {
     /// `position: static | relative | absolute | fixed` (Acid2 Packet 1) --
     /// mirrors `float`'s own keyword-enum shape exactly.
     pub position: Option<Position>,
+    /// `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2) --
+    /// mirrors `position`'s own keyword-enum shape exactly. A SINGLE field
+    /// backs all three properties (see `Overflow`'s own doc comment and the
+    /// `"overflow"`/`"overflow-x"`/`"overflow-y"` parse arms below) -- the
+    /// last of the three to be declared wins per the normal cascade, which
+    /// is Acid2-sufficient.
+    pub overflow: Option<Overflow>,
     /// `z-index: auto | <integer>` (Acid2 Packet 2) -- mirrors `position`'s
     /// own `Option<Position>` shape exactly (non-inherited keyword/enum).
     pub z_index: Option<ZIndex>,
@@ -315,6 +335,10 @@ impl Declarations {
         ov!(display);
         ov!(width);
         ov!(height);
+        ov!(min_width);
+        ov!(max_width);
+        ov!(min_height);
+        ov!(max_height);
         ov!(border);
         ov!(border_top);
         ov!(border_style);
@@ -325,6 +349,7 @@ impl Declarations {
         ov!(float);
         ov!(clear);
         ov!(position);
+        ov!(overflow);
         ov!(z_index);
         ov!(box_sizing);
         ov!(flex_direction);
@@ -1207,6 +1232,22 @@ fn token_to_raw_length_auto(t: &Token) -> Option<RawLengthAuto> {
     token_to_raw_length(t).map(RawLengthAuto::Length)
 }
 
+/// `max-width`/`max-height` (Acid2 Packet 5, Task 1): identical to
+/// `token_to_raw_length_auto` except a literal `none` token -- real CSS's
+/// own initial value / "no constraint" keyword for `max-width`/`max-height`
+/// -- ALSO parses, onto the same `RawLengthAuto::Auto` an `auto` token
+/// would (this curated dialect has no separate "none" representation; see
+/// `Declarations::max_width`'s own doc comment for why that's the correct
+/// collapse).
+fn token_to_raw_length_auto_or_none(t: &Token) -> Option<RawLengthAuto> {
+    if let Token::Ident(s) = t {
+        if s.eq_ignore_ascii_case("none") {
+            return Some(RawLengthAuto::Auto);
+        }
+    }
+    token_to_raw_length_auto(t)
+}
+
 /// Real CSS invalidates a whole shorthand declaration if any single
 /// component fails to parse (it does not silently drop the bad token and
 /// reinterpret the rest as a shorthand with fewer values) — so this returns
@@ -1646,6 +1687,14 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
         },
         "width" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.width = Some(l)).is_some(),
         "height" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.height = Some(l)).is_some(),
+        // Acid2 Packet 5, Task 1: min-width/min-height take the exact same
+        // grammar as width/height (length | percentage | auto). max-width/
+        // max-height additionally accept `none` (see
+        // `token_to_raw_length_auto_or_none`'s own doc comment).
+        "min-width" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.min_width = Some(l)).is_some(),
+        "max-width" => tokens.first().and_then(token_to_raw_length_auto_or_none).map(|l| d.max_width = Some(l)).is_some(),
+        "min-height" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.min_height = Some(l)).is_some(),
+        "max-height" => tokens.first().and_then(token_to_raw_length_auto_or_none).map(|l| d.max_height = Some(l)).is_some(),
         "margin" => apply_edges_shorthand(tokens, &mut d.margin, token_to_raw_length_auto),
         "margin-top" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.margin.top = Some(l)).is_some(),
         "margin-right" => tokens.first().and_then(token_to_raw_length_auto).map(|l| d.margin.right = Some(l)).is_some(),
@@ -1739,6 +1788,23 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             Some("fixed") => {
                 d.position = Some(Position::Fixed);
+                true
+            }
+            _ => false,
+        },
+        // `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2):
+        // `visible` is the only non-clipping keyword; `hidden`/`scroll`/
+        // `auto`/`clip` all collapse to `Hidden` (see `Overflow`'s own doc
+        // comment) -- a static render clips for all of them alike. All
+        // three properties overlay the SAME `Declarations::overflow` field
+        // (last-writer-wins per the normal cascade).
+        "overflow" | "overflow-x" | "overflow-y" => match keyword(tokens).as_deref() {
+            Some("visible") => {
+                d.overflow = Some(Overflow::Visible);
+                true
+            }
+            Some("hidden") | Some("scroll") | Some("auto") | Some("clip") => {
+                d.overflow = Some(Overflow::Hidden);
                 true
             }
             _ => false,
@@ -2251,6 +2317,40 @@ mod tests {
     }
 
     #[test]
+    fn apply_property_parses_overflow_keyword() {
+        // `overflow: hidden` -> Hidden.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("hidden"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+
+        // `overflow: visible` -> Visible.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("visible"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Visible));
+
+        // `scroll`/`auto` are non-visible -> also collapse to Hidden.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("scroll"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("auto"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+
+        // `overflow-x`/`overflow-y` share the same field.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow-x", &toks("hidden"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow-y", &toks("hidden"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+
+        // Garbage keyword: unset, doesn't apply.
+        let mut d = Declarations::default();
+        assert!(!apply_property("overflow", &toks("bogus"), &mut d));
+        assert_eq!(d.overflow, None);
+    }
+
+    #[test]
     fn parses_z_index_keyword_and_integers() {
         let mut d = Declarations::default();
         assert!(apply_property("z-index", &toks("auto"), &mut d));
@@ -2335,6 +2435,27 @@ mod tests {
         assert_eq!(d.inset.left, Some(RawLengthAuto::Length(RawLength::Px(-5.0))));
         assert_eq!(d.inset.right, Some(RawLengthAuto::Auto));
         assert_eq!(d.inset.bottom, Some(RawLengthAuto::Length(RawLength::Percent(50.0))));
+    }
+
+    #[test]
+    fn min_max_width_height_parse_like_width_height_plus_none() {
+        // Acid2 Packet 5, Task 1: min-width/min-height take the same
+        // length|percentage|auto grammar as width/height; max-width/
+        // max-height additionally accept `none`, which collapses onto the
+        // same `RawLengthAuto::Auto` an `auto` token would (see
+        // `token_to_raw_length_auto_or_none`'s doc comment).
+        let mut d = Declarations::default();
+        assert!(apply_property("min-width", &toks("80px"), &mut d));
+        assert_eq!(d.min_width, Some(RawLengthAuto::Length(RawLength::Px(80.0))));
+
+        assert!(apply_property("max-width", &toks("none"), &mut d));
+        assert_eq!(d.max_width, Some(RawLengthAuto::Auto));
+
+        assert!(apply_property("min-height", &toks("50%"), &mut d));
+        assert_eq!(d.min_height, Some(RawLengthAuto::Length(RawLength::Percent(50.0))));
+
+        assert!(apply_property("max-height", &toks("auto"), &mut d));
+        assert_eq!(d.max_height, Some(RawLengthAuto::Auto));
     }
 
     #[test]

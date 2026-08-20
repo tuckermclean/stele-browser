@@ -12,6 +12,14 @@ pub struct MemSurface {
     height: u32,
     /// `width * height * 4` bytes, row-major, RGBA.
     pixels: Vec<u8>,
+    /// The current clip rectangle (Acid2 Packet 5, Task 2), in the same
+    /// pixel-`Rect` space as `fill_rect`/`blit` -- `None` means unclipped.
+    /// Set per-fragment by `backend::raster::paint_at` via `set_clip`;
+    /// checked in `put_pixel`, the choke point every draw op (`fill_rect`,
+    /// `blit`, `draw_glyph`) already routes through, so one check there
+    /// clips all of them uniformly (see this module's own top-of-file doc
+    /// comment and the brief's "key design insight").
+    clip: Option<Rect>,
 }
 
 impl MemSurface {
@@ -21,6 +29,7 @@ impl MemSurface {
             width,
             height,
             pixels: vec![0; (width as usize) * (height as usize) * 4],
+            clip: None,
         };
         s.fill_rect(
             Rect { x: 0, y: 0, w: width, h: height },
@@ -53,6 +62,15 @@ impl Surface for MemSurface {
     fn put_pixel(&mut self, x: i32, y: i32, color: Color) {
         if !self.in_bounds(x, y) {
             return;
+        }
+        // Acid2 Packet 5, Task 2: `overflow:hidden` paint clipping. Every
+        // draw op (`fill_rect`'s loop, `blit`'s per-pixel blend, `draw_text`/
+        // `draw_glyph`) funnels through `put_pixel`, so this one check clips
+        // all of them uniformly -- see `clip`'s own field doc comment.
+        if let Some(c) = self.clip {
+            if x < c.x || y < c.y || x >= c.x + c.w as i32 || y >= c.y + c.h as i32 {
+                return;
+            }
         }
         let i = self.index(x, y);
         // Straight-alpha source-over. Opaque is the common path; blend the rest.
@@ -165,6 +183,10 @@ impl Surface for MemSurface {
                 break; // pathologically long run at a pathological advance: stop rather than loop on inf/NaN math.
             }
         }
+    }
+
+    fn set_clip(&mut self, clip: Option<Rect>) {
+        self.clip = clip;
     }
 }
 
@@ -284,6 +306,35 @@ mod tests {
         s.put_pixel(-1, 0, Color::BLACK);
         s.put_pixel(0, 5, Color::BLACK);
         assert_eq!(&s.bytes()[0..4], &[255, 255, 255, 255]);
+    }
+
+    /// Acid2 Packet 5, Task 2: `set_clip` scissors every draw op that routes
+    /// through `put_pixel` -- `fill_rect`'s loop is the simplest probe (a
+    /// large fill against a small clip should only paint the overlap).
+    #[test]
+    fn set_clip_restricts_fill_rect_to_the_clip_rectangle() {
+        let mut s = MemSurface::new(10, 10, Color::WHITE);
+        s.set_clip(Some(Rect { x: 2, y: 2, w: 3, h: 3 })); // covers pixels [2,5) x [2,5)
+        s.fill_rect(Rect { x: 0, y: 0, w: 10, h: 10 }, Color::BLACK);
+
+        // Inside the clip: painted.
+        assert_eq!(&s.bytes()[((3 * 10 + 3) * 4)..((3 * 10 + 3) * 4 + 4)], &[0, 0, 0, 255], "inside the clip must paint");
+        // Outside the clip (but inside the fill_rect's own bounds): untouched.
+        assert_eq!(
+            &s.bytes()[((0 * 10 + 0) * 4)..((0 * 10 + 0) * 4 + 4)],
+            &[255, 255, 255, 255],
+            "outside the clip must stay the background color"
+        );
+        assert_eq!(
+            &s.bytes()[((7 * 10 + 7) * 4)..((7 * 10 + 7) * 4 + 4)],
+            &[255, 255, 255, 255],
+            "outside the clip (past its far edge) must stay the background color"
+        );
+
+        // `set_clip(None)` clears it -- a subsequent fill covers everything again.
+        s.set_clip(None);
+        s.fill_rect(Rect { x: 0, y: 0, w: 10, h: 10 }, Color::BLACK);
+        assert_eq!(&s.bytes()[0..4], &[0, 0, 0, 255], "clearing the clip must restore unclipped painting");
     }
 
     // --------------------------------------------------------------- draw_text

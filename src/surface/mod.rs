@@ -71,4 +71,9 @@ pub trait Surface {
 
     /// Paint a positioned run of text.
     fn draw_text(&mut self, run: &TextRun);
+
+    /// Set the current clip rectangle (in surface pixels); `None` clears it.
+    /// Drawing outside the clip is suppressed. Default: no-op (backends that
+    /// don't clip, e.g. tty, ignore it).
+    fn set_clip(&mut self, _clip: Option<Rect>) {}
 }
