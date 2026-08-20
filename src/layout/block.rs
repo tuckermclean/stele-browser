@@ -1746,6 +1746,20 @@ fn built_position(b: &Built) -> Position {
     }
 }
 
+/// A `Built` child's z-index paint layer: a positioned element's computed
+/// z-index (`Auto` == 0 via `ZIndex::layer`), or 0 for a static/inline child
+/// (z-index has no effect on non-positioned boxes; static children are emitted
+/// in the in-flow pass regardless). Used only to bucket/sort positioned
+/// children in `emit`'s CSS 2.1 Appendix-E paint order.
+fn z_layer(b: &Built) -> i32 {
+    match b {
+        Built::Container { style, .. }
+        | Built::Replaced { style, .. }
+        | Built::Table { style, .. } => style.z_index.layer(),
+        Built::Inline { .. } => 0,
+    }
+}
+
 fn apply_flex(style: &mut TStyle, cs: &ComputedStyle) {
     style.flex_direction = match cs.flex_direction {
         FlexDirection::Row => TFlexDirection::Row,
@@ -2015,14 +2029,31 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: interactive.clone(),
             });
-            // Paint order (CSS 2.1 steps 3-6, no z-index yet -- that is
-            // Packet 2): in-flow (static) children first, then positioned
-            // (relative/absolute/fixed) children, stable within each group
-            // so same-group source order is preserved.
+            // CSS 2.1 Appendix E stacking order (back to front). z-index
+            // affects only positioned children; static children paint in the
+            // in-flow pass regardless. emit() paints each child's whole
+            // subtree contiguously (atomic), so ordering positioned siblings
+            // by z-index approximates nested stacking contexts (no z-index
+            // ⇒ every child z_layer==0 ⇒ identical to P1's [static][positioned]).
+            let is_pos = |c: &&Built| built_position(c) != Position::Static;
+            // 2. negative-z positioned, most-negative first (stable), BEFORE in-flow
+            let mut neg: Vec<&Built> = children.iter().filter(|c| is_pos(c) && z_layer(c) < 0).collect();
+            neg.sort_by_key(|c| z_layer(c));
+            for child in neg {
+                emit(child, taffy, origin, metrics, out);
+            }
+            // 3-5. in-flow (static) children, source order
             for child in children.iter().filter(|c| built_position(c) == Position::Static) {
                 emit(child, taffy, origin, metrics, out);
             }
-            for child in children.iter().filter(|c| built_position(c) != Position::Static) {
+            // 6. z-index auto/0 positioned children, source order
+            for child in children.iter().filter(|c| is_pos(c) && z_layer(c) == 0) {
+                emit(child, taffy, origin, metrics, out);
+            }
+            // 7. positive-z positioned children, least-positive first (stable)
+            let mut pos: Vec<&Built> = children.iter().filter(|c| is_pos(c) && z_layer(c) > 0).collect();
+            pos.sort_by_key(|c| z_layer(c));
+            for child in pos {
                 emit(child, taffy, origin, metrics, out);
             }
         }

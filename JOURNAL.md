@@ -1402,3 +1402,36 @@ Append-only running log. Newest at the bottom.
 - **Acid2 progress:** the Acid2 render moves off the flat 800×3976 px flow toward placed boxes.
   Still ahead (Packets 2–7): z-index/stacking, generated content, `data:` URIs, min/max/overflow/
   background-position, `<object>` fallback, then final assembly + the smiley golden.
+
+## 2026-08-20 — Acid2 Packet 2: stacking contexts + `z-index`
+
+- **Landed** CSS `z-index: auto | <integer>` on positioned elements + CSS 2.1 Appendix-E paint order.
+  A `ZIndex { Auto, Layer(i32) }` computed field (parsed/cascaded like `position`, non-inherited, total —
+  a non-integer like `1.5` degrades to `auto`) plus a paint-ordering refinement of P1's `emit` partition:
+  the `[static][positioned]` two-pass becomes the five-pass Appendix-E order `[own box][negative-z, most-
+  negative first][static in-flow][z-auto/0, source order][positive-z, least-positive first]`, positioned
+  children stable-sorted by z-index (`ZIndex::layer()`, `Auto`==0). No layout-geometry change. See DECISIONS D56.
+- **Model:** `emit` already emits each child's whole subtree contiguously and recurses, so per-container
+  z-index ordering of positioned siblings *is* a taffy-native approximation of nested stacking contexts — no
+  separate stacking-context tree.
+- **Golden safety:** with no `z-index` declared, every child is layer 0 → the negative/positive passes are
+  empty and passes 3+4 reproduce P1's order byte-for-byte. (The one existing golden that moved, httpforever,
+  moved *because* it uses z-index — see below.)
+- **Verified** (pixel-measured micro-fixtures): `z-order` (overlap solid red — `z-index:2` paints over
+  `z-index:1` despite blue being later in source), `z-tie` (identical geometry, overlap solid blue — equal
+  `z-index:5` falls back to tree order via the stable sort; `cmp` confirms the two goldens differ), `z-negative`
+  (green `z-index:-1` box visible over the container's gray background but behind its in-flow text — Appendix-E
+  step 2 < step 3). The stacking-context risk (Task 3 Step 5) verified: the atomic-positioned-subtree model
+  orders overlapping *sibling* positioned boxes correctly (Acid2's z-index×2 pattern); no skip-level `auto`-
+  context escape is exercised — deferred to P7 assembly, verify-then-correct, no bespoke hoisting.
+- **httpforever re-bless:** its `.switcher` (`z-index:20`) and `.hero__inner` (`z-index:1`) were ignored in
+  P1 (switcher painted under the header, hidden); P2 honors z-index, so `z-index:20` correctly lifts the
+  switcher above the `z-index:1` header and the `[ Theme ] [ Colour ]` controls become visible. The diff is
+  localized to the switcher region (top-left 168×30 px); the rest of the page is byte-identical. The switcher's
+  top-left *position* is unchanged from P1 (the deferred fixed-anchoring/auto-width limitation, D55 Findings
+  A/B) — P2 changed paint order only. This is a correctness improvement; re-blessed.
+- **Size:** the i486 binary is **1,275,036 bytes** (`stele-i486` artifact), **+8,192 B (+0.65 %)** vs P1's
+  1,266,844 — another single 8 KB page; **86.5 % of the 1.44 MB floppy** (199,524 B headroom).
+- **Acid2 progress:** overlapping positioned layers now composite in the right order — the face layers can
+  stack correctly. Still ahead (Packets 3–7): generated content (`:before`/`:after`), `data:` URIs,
+  min/max/overflow/background-position, `<object>` fallback, then final assembly + the smiley golden.

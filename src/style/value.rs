@@ -7,7 +7,7 @@ use crate::dom::AttrMap;
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Display, FlexDirection, FlexWrap, Float,
     FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Position, TextAlign, TextDecoration,
-    VerticalAlign, WhiteSpace,
+    VerticalAlign, WhiteSpace, ZIndex,
 };
 use crate::style::tokenizer::Token;
 use crate::surface::Color;
@@ -213,6 +213,9 @@ pub(crate) struct Declarations {
     /// `position: static | relative | absolute | fixed` (Acid2 Packet 1) --
     /// mirrors `float`'s own keyword-enum shape exactly.
     pub position: Option<Position>,
+    /// `z-index: auto | <integer>` (Acid2 Packet 2) -- mirrors `position`'s
+    /// own `Option<Position>` shape exactly (non-inherited keyword/enum).
+    pub z_index: Option<ZIndex>,
     /// `top`/`right`/`bottom`/`left` (Acid2 Packet 1) -- mirrors `margin`'s
     /// own `EdgesRaw<RawLengthAuto>` shape exactly (same grammar per edge).
     pub inset: EdgesRaw<RawLengthAuto>,
@@ -317,6 +320,7 @@ impl Declarations {
         ov!(float);
         ov!(clear);
         ov!(position);
+        ov!(z_index);
         ov!(box_sizing);
         ov!(flex_direction);
         ov!(flex_wrap);
@@ -1730,6 +1734,21 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             _ => false,
         },
+        // `z-index` (Acid2 Packet 2): `auto` or an integer. CSS z-index is
+        // an integer -- a non-integer number (`1.5`) is rejected (parsing
+        // stays total: `false` leaves `d.z_index` unset, cascade defaults
+        // to `Auto`).
+        "z-index" => match tokens.first() {
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("auto") => {
+                d.z_index = Some(ZIndex::Auto);
+                true
+            }
+            Some(Token::Number(v)) if v.is_finite() && v.fract() == 0.0 => {
+                d.z_index = Some(ZIndex::Layer(*v as i32));
+                true
+            }
+            _ => false,
+        },
         "clear" => match keyword(tokens).as_deref() {
             Some("left") => {
                 d.clear = Some(Clear::Left);
@@ -2197,6 +2216,44 @@ mod tests {
         assert_eq!(d.position, Some(Position::Fixed));
         assert!(apply_property("position", &toks("static"), &mut d));
         assert_eq!(d.position, Some(Position::Static));
+    }
+
+    #[test]
+    fn parses_z_index_keyword_and_integers() {
+        let mut d = Declarations::default();
+        assert!(apply_property("z-index", &toks("auto"), &mut d));
+        assert_eq!(d.z_index, Some(ZIndex::Auto));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("z-index", &toks("5"), &mut d));
+        assert_eq!(d.z_index, Some(ZIndex::Layer(5)));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("z-index", &toks("-1"), &mut d));
+        assert_eq!(d.z_index, Some(ZIndex::Layer(-1)));
+
+        let mut d = Declarations::default();
+        assert!(apply_property("z-index", &toks("+3"), &mut d));
+        assert_eq!(d.z_index, Some(ZIndex::Layer(3)));
+    }
+
+    #[test]
+    fn z_index_is_total_on_garbage() {
+        let mut d = Declarations::default();
+        assert!(!apply_property("z-index", &toks("1.5"), &mut d)); // non-integer rejected
+        assert_eq!(d.z_index, None);
+
+        let mut d = Declarations::default();
+        assert!(!apply_property("z-index", &toks("banana"), &mut d));
+        assert_eq!(d.z_index, None);
+    }
+
+    #[test]
+    fn z_index_layer_helper() {
+        assert_eq!(ZIndex::Auto.layer(), 0);
+        assert_eq!(ZIndex::Layer(0).layer(), 0);
+        assert_eq!(ZIndex::Layer(-2).layer(), -2);
+        assert_eq!(ZIndex::Layer(7).layer(), 7);
     }
 
     #[test]

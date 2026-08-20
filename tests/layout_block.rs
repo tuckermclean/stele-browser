@@ -9,7 +9,7 @@ use stele::img::RgbaImage;
 use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
 use stele::style::computed::{
     BorderSide, BorderStyle, Dimension, Display, Edges, FlexDirection, Float, GridRepetitionCount,
-    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, Position,
+    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, Position, ZIndex,
 };
 use stele::style::ComputedStyle;
 
@@ -905,4 +905,36 @@ fn positioned_child_paints_after_static_sibling_regardless_of_source_order() {
         "static sibling must paint (be emitted) before the positioned child that precedes it in source order: \
          b_static at index {b_index}, a_positioned at index {a_index}"
     );
+}
+
+#[test]
+fn positioned_children_paint_in_z_index_then_source_order() {
+    // Three overlapping absolute children with DISTINCT sizes (identifiable
+    // fragments). Source order A(z=1), B(z=-1), C(z auto=0). Appendix-E paint
+    // order back->front: B(neg) < in-flow(none) < C(auto/0) < A(pos).
+    let abs = |w: f32, h: f32, z: ZIndex| {
+        let mut s = block_style();
+        s.position = Position::Absolute;
+        s.z_index = z;
+        s.width = Dimension::Px(w);
+        s.height = Dimension::Px(h);
+        s.inset = Edges {
+            top: LengthPercentageAuto::Px(0.0),
+            left: LengthPercentageAuto::Px(0.0),
+            right: LengthPercentageAuto::Auto,
+            bottom: LengthPercentageAuto::Auto,
+        };
+        leaf_container(s)
+    };
+    let a = abs(111.0, 11.0, ZIndex::Layer(1));
+    let b = abs(122.0, 22.0, ZIndex::Layer(-1));
+    let c = abs(133.0, 33.0, ZIndex::Auto);
+    let root = container(block_style(), vec![a, b, c]);
+    let fragments = layout(&root, Size { w: 300.0, h: 200.0 });
+    let boxes = box_fragments(&fragments);
+    let idx = |w: f32, h: f32| {
+        boxes.iter().position(|f| f.rect.size.w == w && f.rect.size.h == h).expect("fragment present")
+    };
+    let (ia, ib, ic) = (idx(111.0, 11.0), idx(122.0, 22.0), idx(133.0, 33.0));
+    assert!(ib < ic && ic < ia, "z-order back->front B(-1)<C(0)<A(1): B={ib} C={ic} A={ia}");
 }

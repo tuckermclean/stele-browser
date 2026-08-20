@@ -211,6 +211,23 @@ pub enum Clear {
     Both,
 }
 
+/// `z-index: auto | <integer>` (Acid2 Packet 2). Non-inherited. `Auto` and
+/// `Layer(0)` paint in the same CSS 2.1 Appendix-E step; `layer()` collapses
+/// `Auto` to 0 for the paint-order sort (see layout::block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZIndex {
+    Auto,
+    Layer(i32),
+}
+impl ZIndex {
+    pub fn layer(self) -> i32 {
+        match self {
+            ZIndex::Auto => 0,
+            ZIndex::Layer(n) => n,
+        }
+    }
+}
+
 /// CSS `box-sizing: content-box | border-box` (packet/acid1-content-box).
 /// `ContentBox` is the real CSS initial value (a declared `width`/`height`
 /// is the box's CONTENT size; padding/border add on top to reach the
@@ -429,6 +446,10 @@ pub struct ComputedStyle {
     /// Non-inherited ("own") box property, same resolution shape as `float`/
     /// `clear`/`box_sizing`. `Static` is the CSS initial value.
     pub position: Position,
+    /// `z-index: auto | <integer>` (Acid2 Packet 2). Non-inherited ("own")
+    /// box property, same resolution shape as `position`. `Auto` is the CSS
+    /// initial value; see `ZIndex::layer` for how it collapses for paint.
+    pub z_index: ZIndex,
     /// `top`/`right`/`bottom`/`left` (the "inset" properties, Acid2 Packet
     /// 1) — same type `margin` uses (`Edges<LengthPercentageAuto>`), since
     /// both share the identical `<length> | <percentage> | auto` grammar.
@@ -515,6 +536,7 @@ impl Default for ComputedStyle {
             float: Float::None,
             clear: Clear::None,
             position: Position::Static,
+            z_index: ZIndex::Auto,
             inset: Edges::all(LengthPercentageAuto::Auto),
             box_sizing: BoxSizing::ContentBox,
 
