@@ -1182,6 +1182,25 @@ else
     bad "A5m: PNG dump of $FIXTURE_GC_NONE differs from $GOLDEN_PNG_GC_NONE"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_GC_NONE") actual=$(wc -c < /tmp/stele_a5m.png)"
   fi
+
+  FIXTURE_DATA_IMG="fixtures/data-img.html"
+  GOLDEN_PNG_DATA_IMG="goldens/data-img.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5n: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_DATA_IMG" /tmp/stele_a5n.png 2>/tmp/stele_a5n.err; then
+    bad "A5n: stele --headless --dump-png crashed on $FIXTURE_DATA_IMG"
+    sed 's/^/    /' /tmp/stele_a5n.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5n.png "$GOLDEN_PNG_DATA_IMG"
+    pass "A5n: blessed data-img PNG golden -> $GOLDEN_PNG_DATA_IMG (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_DATA_IMG" ]; then
+    bad "A5n: no golden at $GOLDEN_PNG_DATA_IMG to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_DATA_IMG" /tmp/stele_a5n.png; then
+    pass "A5n: PNG dump of $FIXTURE_DATA_IMG matches golden"
+  else
+    bad "A5n: PNG dump of $FIXTURE_DATA_IMG differs from $GOLDEN_PNG_DATA_IMG"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_DATA_IMG") actual=$(wc -c < /tmp/stele_a5n.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
