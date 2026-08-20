@@ -312,6 +312,9 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         // Acid2 Packet 1: `position` is non-inherited ("own"), same shape
         // as `float`/`clear` right above.
         position: own!(position),
+        // Acid2 Packet 2: `z-index` is non-inherited ("own"), same shape
+        // as `position` right above.
+        z_index: own!(z_index),
         // Acid2 Packet 1: `inset` (top/right/bottom/left) is non-inherited,
         // resolved edge-by-edge exactly like `margin` above (same raw/
         // computed type, `LengthPercentageAuto`).
