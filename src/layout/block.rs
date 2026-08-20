@@ -2303,7 +2303,7 @@ fn emit<M: Metrics>(
             // `Position::Static` and could never see a `position:fixed`
             // ANCESTOR's fixed-ness, but `is_fixed_ctx` was already
             // correctly propagated down to this call by the `Container`
-            // arm's `emit_child` closure above, regardless of tree depth.
+            // arm's per-child branch above, regardless of tree depth.
             let is_fixed = is_fixed_ctx;
             for line in &laid_out.lines {
                 for run in &line.runs {
