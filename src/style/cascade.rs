@@ -447,6 +447,9 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         // Acid2 Packet 1: `position` is non-inherited ("own"), same shape
         // as `float`/`clear` right above.
         position: own!(position),
+        // Acid2 Packet 5, Task 2: `overflow` is non-inherited ("own"), same
+        // shape as `position` right above.
+        overflow: own!(overflow),
         // Acid2 Packet 2: `z-index` is non-inherited ("own"), same shape
         // as `position` right above.
         z_index: own!(z_index),

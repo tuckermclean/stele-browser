@@ -211,6 +211,18 @@ pub enum Clear {
     Both,
 }
 
+/// CSS `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2). Non-
+/// inherited box property. `Visible` is the CSS initial value (no clip).
+/// `Hidden` covers every non-visible keyword (`hidden`/`scroll`/`auto`/
+/// `clip`) -- a static render (no scrollbars, no scrolling) clips for all of
+/// them alike, so this engine collapses them onto one clipping value. See
+/// `value::apply_property`'s `overflow`/`overflow-x`/`overflow-y` parse arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overflow {
+    Visible,
+    Hidden,
+}
+
 /// `z-index: auto | <integer>` (Acid2 Packet 2). Non-inherited. `Auto` and
 /// `Layer(0)` paint in the same CSS 2.1 Appendix-E step; `layer()` collapses
 /// `Auto` to 0 for the paint-order sort (see layout::block).
@@ -480,6 +492,12 @@ pub struct ComputedStyle {
     /// Non-inherited ("own") box property, same resolution shape as `float`/
     /// `clear`/`box_sizing`. `Static` is the CSS initial value.
     pub position: Position,
+    /// `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2). Non-
+    /// inherited ("own") box property, same resolution shape as `position`.
+    /// `Visible` is the CSS initial value (no paint clipping); see
+    /// `Overflow`'s own doc comment for how the non-visible keywords
+    /// collapse onto `Hidden`.
+    pub overflow: Overflow,
     /// `z-index: auto | <integer>` (Acid2 Packet 2). Non-inherited ("own")
     /// box property, same resolution shape as `position`. `Auto` is the CSS
     /// initial value; see `ZIndex::layer` for how it collapses for paint.
@@ -580,6 +598,7 @@ impl Default for ComputedStyle {
             float: Float::None,
             clear: Clear::None,
             position: Position::Static,
+            overflow: Overflow::Visible,
             z_index: ZIndex::Auto,
             content: Content::Normal,
             inset: Edges::all(LengthPercentageAuto::Auto),
@@ -631,5 +650,8 @@ mod tests {
         assert_eq!(s.column_gap, None);
         // Acid2 Packet 3: `content`'s CSS initial value is `normal`.
         assert_eq!(s.content, Content::Normal);
+        // Acid2 Packet 5, Task 2: `overflow`'s CSS initial value is
+        // `visible` -- no paint clipping by default.
+        assert_eq!(s.overflow, Overflow::Visible);
     }
 }

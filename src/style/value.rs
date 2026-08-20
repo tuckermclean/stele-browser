@@ -6,8 +6,8 @@
 use crate::dom::AttrMap;
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderStyle, BoxSizing, Clear, Content, Display, FlexDirection, FlexWrap,
-    Float, FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Position, TextAlign, TextDecoration,
-    VerticalAlign, WhiteSpace, ZIndex,
+    Float, FontFamily, FontStyle, FontWeight, JustifyContent, ListStyleType, Overflow, Position, TextAlign,
+    TextDecoration, VerticalAlign, WhiteSpace, ZIndex,
 };
 use crate::style::tokenizer::Token;
 use crate::surface::Color;
@@ -226,6 +226,13 @@ pub(crate) struct Declarations {
     /// `position: static | relative | absolute | fixed` (Acid2 Packet 1) --
     /// mirrors `float`'s own keyword-enum shape exactly.
     pub position: Option<Position>,
+    /// `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2) --
+    /// mirrors `position`'s own keyword-enum shape exactly. A SINGLE field
+    /// backs all three properties (see `Overflow`'s own doc comment and the
+    /// `"overflow"`/`"overflow-x"`/`"overflow-y"` parse arms below) -- the
+    /// last of the three to be declared wins per the normal cascade, which
+    /// is Acid2-sufficient.
+    pub overflow: Option<Overflow>,
     /// `z-index: auto | <integer>` (Acid2 Packet 2) -- mirrors `position`'s
     /// own `Option<Position>` shape exactly (non-inherited keyword/enum).
     pub z_index: Option<ZIndex>,
@@ -342,6 +349,7 @@ impl Declarations {
         ov!(float);
         ov!(clear);
         ov!(position);
+        ov!(overflow);
         ov!(z_index);
         ov!(box_sizing);
         ov!(flex_direction);
@@ -1784,6 +1792,23 @@ pub(crate) fn apply_property(name: &str, tokens: &[Token], d: &mut Declarations)
             }
             _ => false,
         },
+        // `overflow`/`overflow-x`/`overflow-y` (Acid2 Packet 5, Task 2):
+        // `visible` is the only non-clipping keyword; `hidden`/`scroll`/
+        // `auto`/`clip` all collapse to `Hidden` (see `Overflow`'s own doc
+        // comment) -- a static render clips for all of them alike. All
+        // three properties overlay the SAME `Declarations::overflow` field
+        // (last-writer-wins per the normal cascade).
+        "overflow" | "overflow-x" | "overflow-y" => match keyword(tokens).as_deref() {
+            Some("visible") => {
+                d.overflow = Some(Overflow::Visible);
+                true
+            }
+            Some("hidden") | Some("scroll") | Some("auto") | Some("clip") => {
+                d.overflow = Some(Overflow::Hidden);
+                true
+            }
+            _ => false,
+        },
         // `z-index` (Acid2 Packet 2): `auto` or an integer. CSS z-index is
         // an integer -- a non-integer number (`1.5`) is rejected (parsing
         // stays total: `false` leaves `d.z_index` unset, cascade defaults
@@ -2289,6 +2314,40 @@ mod tests {
         assert_eq!(d.position, Some(Position::Fixed));
         assert!(apply_property("position", &toks("static"), &mut d));
         assert_eq!(d.position, Some(Position::Static));
+    }
+
+    #[test]
+    fn apply_property_parses_overflow_keyword() {
+        // `overflow: hidden` -> Hidden.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("hidden"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+
+        // `overflow: visible` -> Visible.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("visible"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Visible));
+
+        // `scroll`/`auto` are non-visible -> also collapse to Hidden.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("scroll"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow", &toks("auto"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+
+        // `overflow-x`/`overflow-y` share the same field.
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow-x", &toks("hidden"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+        let mut d = Declarations::default();
+        assert!(apply_property("overflow-y", &toks("hidden"), &mut d));
+        assert_eq!(d.overflow, Some(Overflow::Hidden));
+
+        // Garbage keyword: unset, doesn't apply.
+        let mut d = Declarations::default();
+        assert!(!apply_property("overflow", &toks("bogus"), &mut d));
+        assert_eq!(d.overflow, None);
     }
 
     #[test]

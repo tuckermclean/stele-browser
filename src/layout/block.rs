@@ -131,7 +131,7 @@ use crate::layout::{BoxContent, Fragment, FragmentKind, Interactive, LayoutNode,
 use crate::style::computed::{
     AlignItems, AlignSelf, BorderCollapse, BorderSide, BorderStyle, BoxSizing, Clear, Display, FlexDirection,
     FlexWrap, Float, GridRepetitionCount, GridTemplateComponent, GridTrack, GridTrackSize, JustifyContent,
-    LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, Position, TextAlign,
+    LengthPercentage, LengthPercentageAuto, Dimension as CssDimension, Overflow, Position, TextAlign,
 };
 use crate::style::ComputedStyle;
 use crate::text::Metrics;
@@ -405,7 +405,7 @@ pub fn layout_tree<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -
     );
 
     let mut fragments = Vec::new();
-    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments);
+    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments, None);
     fragments
 }
 
@@ -1521,7 +1521,7 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
         measure_node(kd, av, id, ctx, style, metrics)
     });
     let mut fragments = Vec::new();
-    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments);
+    emit(&built, &taffy, Point { x: 0.0, y: 0.0 }, metrics, &mut fragments, None);
     let size = taffy
         .layout(built.taffy_id())
         .map(|l| Size { w: finite_nonneg(l.size.width), h: finite_nonneg(l.size.height) })
@@ -2021,14 +2021,45 @@ fn push_replaced_fragment(
     image: Option<std::rc::Rc<crate::img::RgbaImage>>,
     style: &ComputedStyle,
     interactive: Option<Interactive>,
+    clip: Option<Rect>,
 ) {
     match image {
-        Some(img) => out.push(Fragment { rect, kind: FragmentKind::Image { image: (*img).clone() }, interactive }),
-        None => out.push(Fragment { rect, kind: FragmentKind::Box { style: style.clone() }, interactive }),
+        Some(img) => {
+            out.push(Fragment { rect, kind: FragmentKind::Image { image: (*img).clone() }, interactive, clip })
+        }
+        None => out.push(Fragment { rect, kind: FragmentKind::Box { style: style.clone() }, interactive, clip }),
     }
 }
 
-fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Point, metrics: &M, out: &mut Vec<Fragment>) {
+/// Intersect an optional clip with a rect (Acid2 Packet 5, Task 2). `None` ∩
+/// `r` = `r` (the first clipping ancestor establishes the clip outright);
+/// `Some(c)` ∩ `r` = their overlap, floored to a zero-size (not negative-size)
+/// rect when they're disjoint -- `emit`'s `Built::Container` arm is this
+/// function's only caller, using it to fold a new `overflow:hidden`
+/// container's own border box into whatever clip was already in force from
+/// an ANCESTOR `overflow:hidden`, so nested clips compose (the innermost
+/// always wins, never widens back out).
+fn intersect_clip(clip: Option<Rect>, r: Rect) -> Option<Rect> {
+    match clip {
+        None => Some(r),
+        Some(c) => {
+            let x0 = c.origin.x.max(r.origin.x);
+            let y0 = c.origin.y.max(r.origin.y);
+            let x1 = (c.origin.x + c.size.w).min(r.origin.x + r.size.w);
+            let y1 = (c.origin.y + c.size.h).min(r.origin.y + r.size.h);
+            Some(Rect { origin: Point { x: x0, y: y0 }, size: Size { w: (x1 - x0).max(0.0), h: (y1 - y0).max(0.0) } })
+        }
+    }
+}
+
+fn emit<M: Metrics>(
+    built: &Built,
+    taffy: &TaffyTree<NodeCtx>,
+    parent_origin: Point,
+    metrics: &M,
+    out: &mut Vec<Fragment>,
+    clip: Option<Rect>,
+) {
     let Ok(layout) = taffy.layout(built.taffy_id()) else { return };
     let origin = Point { x: parent_origin.x + layout.location.x, y: parent_origin.y + layout.location.y };
     let size = Size { w: layout.size.width.max(0.0), h: layout.size.height.max(0.0) };
@@ -2039,7 +2070,19 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 rect: Rect { origin, size },
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: interactive.clone(),
+                clip,
             });
+            // Acid2 Packet 5, Task 2: `overflow:hidden` clips this
+            // container's DESCENDANTS (not the container's own box fragment
+            // above, which still uses the incoming `clip`) to its own
+            // border box, intersected with whatever clip was already in
+            // force from an ancestor -- see `intersect_clip`'s own doc
+            // comment.
+            let child_clip = if style.overflow == Overflow::Hidden {
+                intersect_clip(clip, Rect { origin, size })
+            } else {
+                clip
+            };
             // CSS 2.1 Appendix E stacking order (back to front). z-index
             // affects only positioned children; static children paint in the
             // in-flow pass regardless. emit() paints each child's whole
@@ -2051,25 +2094,25 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
             let mut neg: Vec<&Built> = children.iter().filter(|c| is_pos(c) && z_layer(c) < 0).collect();
             neg.sort_by_key(|c| z_layer(c));
             for child in neg {
-                emit(child, taffy, origin, metrics, out);
+                emit(child, taffy, origin, metrics, out, child_clip);
             }
             // 3-5. in-flow (static) children, source order
             for child in children.iter().filter(|c| built_position(c) == Position::Static) {
-                emit(child, taffy, origin, metrics, out);
+                emit(child, taffy, origin, metrics, out, child_clip);
             }
             // 6. z-index auto/0 positioned children, source order
             for child in children.iter().filter(|c| is_pos(c) && z_layer(c) == 0) {
-                emit(child, taffy, origin, metrics, out);
+                emit(child, taffy, origin, metrics, out, child_clip);
             }
             // 7. positive-z positioned children, least-positive first (stable)
             let mut pos: Vec<&Built> = children.iter().filter(|c| is_pos(c) && z_layer(c) > 0).collect();
             pos.sort_by_key(|c| z_layer(c));
             for child in pos {
-                emit(child, taffy, origin, metrics, out);
+                emit(child, taffy, origin, metrics, out, child_clip);
             }
         }
         Built::Replaced { style, image, interactive, .. } => {
-            push_replaced_fragment(out, Rect { origin, size }, image.clone(), style, interactive.clone());
+            push_replaced_fragment(out, Rect { origin, size }, image.clone(), style, interactive.clone(), clip);
         }
         Built::Inline { runs, text_align, .. } => {
             let available_w = size.w;
@@ -2088,6 +2131,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                                     style: runs[run.run_index].style.clone(),
                                 },
                                 interactive: runs[run.run_index].interactive.clone(),
+                                clip,
                             });
                         }
                         // A non-floated replaced atom (M4 part 2, the D14
@@ -2119,6 +2163,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                                 image.clone(),
                                 &runs[run.run_index].style,
                                 runs[run.run_index].interactive.clone(),
+                                clip,
                             );
                         }
                     }
@@ -2138,6 +2183,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                         image.clone(),
                         &runs[f.run_index].style,
                         runs[f.run_index].interactive.clone(),
+                        clip,
                     ),
                     InlineContent::Text(_) => {} // not reachable: only `Replaced` runs are ever floated.
                 }
@@ -2155,6 +2201,7 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                 rect: Rect { origin, size },
                 kind: FragmentKind::Box { style: (*style).clone() },
                 interactive: None,
+                clip,
             });
 
             // Fetch this leaf's `node`/`table_budget`/cache straight out of
@@ -2222,6 +2269,21 @@ fn emit<M: Metrics>(built: &Built, taffy: &TaffyTree<NodeCtx>, parent_origin: Po
                         },
                         kind: f.kind,
                         interactive: f.interactive,
+                        // Acid2 Packet 5, Task 2: `f.clip` (if any) was
+                        // computed by `cell_content_layout`'s OWN isolated
+                        // `emit` call, rooted at local origin (0,0) -- it is
+                        // NOT in this table's coordinate space (unlike
+                        // `f.rect`, which this loop explicitly re-origins via
+                        // `cell_origin` above) and can't simply be reused
+                        // as-is. Table cells aren't a Task-2 clipping
+                        // scenario this packet targets (no fixture nests
+                        // `overflow:hidden` inside a `<td>`), so this instead
+                        // stamps the ambient `clip` already in force at the
+                        // table itself -- the same value the table's own box
+                        // fragment just above uses -- which is correct for
+                        // every case this packet needs to handle (a table
+                        // sitting inside an ancestor `overflow:hidden`).
+                        clip,
                     });
                 }
             }
@@ -2284,6 +2346,33 @@ mod tests {
         for (b, l) in block_fragments.iter().zip(list_item_fragments.iter()) {
             assert_eq!(b.rect, l.rect, "Display::ListItem must lay out at the exact position/size Display::Block would");
         }
+    }
+
+    /// Acid2 Packet 5, Task 2: an `overflow:hidden` container clips its
+    /// DESCENDANTS, never its own box fragment -- `emit`'s `Built::
+    /// Container` arm pushes the container's own box with the INCOMING
+    /// clip (here `None`, the tree's root), then computes a NEW clip
+    /// (`intersect_clip`'d to the container's own border box) for its
+    /// children only.
+    #[test]
+    fn overflow_hidden_clips_descendants_not_the_container_itself() {
+        let hidden_style = ComputedStyle { display: Display::Block, overflow: Overflow::Hidden, ..ComputedStyle::default() };
+        let tree = container(hidden_style, vec![text_node("hi")]);
+        let font = crate::text::BitmapFont::vga_8x16();
+        let viewport = Size { w: 200.0, h: 200.0 };
+        let fragments = layout_tree(&tree, viewport, &font);
+
+        let container_box =
+            fragments.iter().find(|f| matches!(f.kind, FragmentKind::Box { .. })).expect("container's own box fragment");
+        assert_eq!(container_box.clip, None, "the container is NOT clipped by its own overflow:hidden");
+
+        let child_text =
+            fragments.iter().find(|f| matches!(f.kind, FragmentKind::Text { .. })).expect("the child text fragment");
+        assert_eq!(
+            child_text.clip,
+            Some(container_box.rect),
+            "the child must be clipped to the container's own border box"
+        );
     }
 
     #[test]
