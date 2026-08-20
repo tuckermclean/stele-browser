@@ -44,8 +44,8 @@ const HEADLESS_VIEWPORT_HEIGHT: f32 = 100_000.0;
 /// flag to override it (M4 pixel foundation scope: no `--width` yet — a
 /// later packet can add one). 800px is a common-enough "screenshot" width
 /// for a document-web page and, not coincidentally, exactly 100 columns at
-/// the 8px-per-column `text::BitmapFont::vga_8x16` cell width `--dump-text`
-/// already keys its own layout off of.
+/// the 8px-per-column `text::TerminusFont` (16px bucket) cell width
+/// `--dump-text` already keys its own layout off of.
 const DEFAULT_PNG_WIDTH: u32 = 800;
 
 /// Hard cap on the PNG surface's content-driven height, independent of the

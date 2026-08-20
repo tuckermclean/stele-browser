@@ -1,25 +1,22 @@
 //! Text metrics: the seam between the font layer and the inline engine.
 //!
-//! P5 (Wave 1) implemented [`Metrics`] with a monospace [`bitmap::BitmapFont`]
-//! model (std-only, i486-safe; the brief's bitmap-font lean over a TTF), and
-//! M4 added the compiled-in [`glyphs`] font8x8 atlas as its glyph source.
-//! packet/terminus-font retired both: [`terminus::TerminusFont`] is now the
-//! sole `Metrics` implementer and glyph source everywhere Stele renders text
-//! (tty, fb/raster, chrome, `--dump-png`) — a real, embedded, 191-glyph
-//! subset of Terminus Font (OFL-1.1), 5 pixel sizes x 2 weights, generated
-//! from upstream BDF sources by `tools/gen-terminus-glyphs.py` into
-//! [`terminus_glyphs`]. Shaping-free: Latin-1/UTF-8 advance widths, no
-//! complex-script shaping — the inline engine (P6) breaks lines given these
-//! advances. Still monospace (matches tty cells); proportional fonts remain
-//! a later refinement.
+//! History: P5 (Wave 1) implemented [`Metrics`] with a monospace, purely
+//! synthetic `BitmapFont` model (std-only, i486-safe); M4 added a compiled-in
+//! font8x8 atlas as its glyph source. packet/terminus-font retired both:
+//! [`terminus::TerminusFont`] is now the sole `Metrics` implementer and
+//! glyph source everywhere Stele renders text (tty, fb/raster, chrome,
+//! `--dump-png`) — a real, embedded, 191-glyph subset of Terminus Font
+//! (OFL-1.1), 5 pixel sizes x 2 weights, generated from upstream BDF sources
+//! by `tools/gen-terminus-glyphs.py` into [`terminus_glyphs`]. Shaping-free:
+//! Latin-1/UTF-8 advance widths, no complex-script shaping — the inline
+//! engine (P6) breaks lines given these advances. Still monospace (matches
+//! tty cells); proportional fonts remain a later refinement.
 //!
 //! [`translit`] (packet t2-glyph-fallback) is the shared fb/tty seam that
 //! maps a character the embedded subset still can't render to an ASCII
 //! stand-in, or drops it with a counted, documented default — see that
 //! module's own doc comment for the full resolution order.
 
-pub mod bitmap;
-pub(crate) mod glyphs;
 pub mod terminus;
 pub(crate) mod terminus_glyphs;
 #[cfg(test)]
@@ -27,7 +24,6 @@ pub(crate) mod terminus_glyphs;
 mod terminus_glyphs_tests;
 pub mod translit;
 
-pub use bitmap::BitmapFont;
 pub use terminus::TerminusFont;
 
 /// Per-font, size-parameterized metrics. All returns are in pixels at `size_px`.

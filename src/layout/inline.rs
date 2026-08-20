@@ -1320,12 +1320,14 @@ mod tests {
     // 5 embedded pixel-size buckets (12/16/20/24/32), replacing the old
     // font8x8-era flat "never below 16px" floor -- `text_render_px`'s own
     // long-standing "revisit-trigger" doc comment predicted exactly this
-    // moment. Uses the REAL `text::BitmapFont` (not `FixedMetrics`, which
+    // moment. Uses the REAL `text::TerminusFont` (not `FixedMetrics`, which
     // ignores `size_px` entirely and so can't prove anything about a
     // size-dependent snap) -- `text_render_px` is a free function every
     // `Metrics` call site routes through, so these tests still exercise its
-    // (now nearest-of-5) behavior even though `BitmapFont` itself keeps its
-    // own continuous scaling once handed an already-snapped size_px.
+    // (now nearest-of-5) behavior even though `TerminusFont` ALSO re-snaps
+    // internally on every call -- the double application is idempotent
+    // (snapping an already-snapped bucket value is a no-op), so it doesn't
+    // change what these tests actually prove.
     // -----------------------------------------------------------------
 
     fn run_at_font_size(text: &str, font_size: f32) -> InlineRun {
@@ -1338,7 +1340,7 @@ mod tests {
         // 8 clamps up to the min bucket, 13 is nearer 12 than 16) -- they
         // must measure identically, and identically to font_size=12 passed
         // directly.
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let at8 = [run_at_font_size("ab", 8.0)];
         let at13 = [run_at_font_size("ab", 13.0)];
         let at12 = [run_at_font_size("ab", 12.0)];
@@ -1352,7 +1354,7 @@ mod tests {
 
     #[test]
     fn sub_bucket_line_height_matches_the_snapped_bucket_line_height() {
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let sub_bucket = [run_at_font_size("x", 10.0)];
         let out = layout_runs(&sub_bucket, 1000.0, TextAlign::Left, &font);
         assert_eq!(
@@ -1369,7 +1371,7 @@ mod tests {
         // DOWN to 32px instead of scaling up arbitrarily -- the symmetric
         // counterpart to the below-12px clamp-up. `at32` (exactly on the
         // bucket) and `at48` (above it) must measure identically.
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let at32 = [run_at_font_size("ab", 32.0)];
         let at48 = [run_at_font_size("ab", 48.0)];
         let out32 = layout_runs(&at32, 1000.0, TextAlign::Left, &font);
@@ -1386,14 +1388,15 @@ mod tests {
         // line_height` returns it verbatim, un-snapped (see that fn's own
         // doc comment). When it's already generously larger than the
         // snapped glyph's ascent+descent (12.0 at font_size=10, which snaps
-        // to the 12px bucket, by `BitmapFont`'s own
-        // `ascent+descent == size_px` invariant), it alone decides the
-        // final line box height, regardless of which bucket 10px lands on.
+        // to the 12px bucket, by `TerminusFont`'s own pinned metrics table
+        // where ascent+descent == size_px at every bucket), it alone
+        // decides the final line box height, regardless of which bucket
+        // 10px lands on.
         let runs = [run_with("x", |s| {
             s.font_size = 10.0;
             s.line_height = LH::Px(40.0);
         })];
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
         assert_eq!(out.lines[0].rect.size.h, 40.0, "explicit CSS line-height must stay exactly as authored");
     }
@@ -1417,7 +1420,7 @@ mod tests {
             s.font_size = 10.0;
             s.line_height = LH::Px(10.0);
         })];
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let out = layout_runs(&runs, 1000.0, TextAlign::Left, &font);
         assert_eq!(
             out.lines[0].rect.size.h,

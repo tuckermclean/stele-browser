@@ -236,7 +236,7 @@ const MAX_TABLE_MEASURED_CELLS: usize = 2_000;
 /// `border-spacing`/`cellspacing` on the table — see
 /// `style::ComputedStyle::border_spacing_x`'s own doc comment (packet/
 /// table-spacing FREEZE AMENDMENT) for why this is `8.0` (one full
-/// `text::BitmapFont::vga_8x16` cell) rather than CSS's real `2px` initial
+/// `text::TerminusFont`'s 16px-bucket cell) rather than CSS's real `2px` initial
 /// value: `backend::tty::render` maps continuous layout-pixel x-coordinates
 /// to discrete character columns by *rounding* to the nearest cell (`col =
 /// round(x / 8.0)`), so any sub-cell gap smaller than half a cell (4px) can
@@ -2557,7 +2557,7 @@ mod tests {
             let li = container(li_style, vec![text_node("item")]);
             container(block_style(), vec![li])
         }
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let viewport = Size { w: 400.0, h: 300.0 };
         let block_fragments = layout_tree(&tree_with(Display::Block), viewport, &font);
         let list_item_fragments = layout_tree(&tree_with(Display::ListItem), viewport, &font);
@@ -2577,7 +2577,7 @@ mod tests {
     fn overflow_hidden_clips_descendants_not_the_container_itself() {
         let hidden_style = ComputedStyle { display: Display::Block, overflow: Overflow::Hidden, ..ComputedStyle::default() };
         let tree = container(hidden_style, vec![text_node("hi")]);
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let viewport = Size { w: 200.0, h: 200.0 };
         let fragments = layout_tree(&tree, viewport, &font);
 
@@ -2605,7 +2605,7 @@ mod tests {
         let mut target = container(block_style(), vec![text_node("hi")]);
         target.id = Some("target".into());
         let root = container(block_style(), vec![target]);
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let fragments = layout_tree(&root, Size { w: 200.0, h: 100.0 }, &font);
 
         let matches: Vec<&Fragment> = fragments.iter().filter(|f| f.id.as_deref() == Some("target")).collect();
@@ -2636,7 +2636,7 @@ mod tests {
         // Appendix E's paint order (`emit`'s own z-index bucketing) emits it
         // AFTER the in-flow static sibling, regardless of source order.
         let root = container(block_style(), vec![fixed_child, static_child]);
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let fragments = layout_tree(&root, Size { w: 200.0, h: 100.0 }, &font);
 
         let box_with_id = |id: &str| -> &Fragment {
@@ -2699,7 +2699,7 @@ mod tests {
         let relative_ancestor = container(relative_style(200.0, 200.0), vec![fixed]);
         let root = container(block_style(), vec![spacer_tall, relative_ancestor]);
 
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let fragments = layout_tree(&root, Size { w: 400.0, h: 800.0 }, &font);
 
         let fixed_frag = find_box(&fragments, "fixed");
@@ -2728,7 +2728,7 @@ mod tests {
         let outer_relative = container(relative_style(250.0, 250.0), vec![inner_relative]);
         let root = container(block_style(), vec![spacer_tall, outer_relative]);
 
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let fragments = layout_tree(&root, Size { w: 400.0, h: 900.0 }, &font);
 
         let fixed_frag = find_box(&fragments, "fixed");
@@ -2751,7 +2751,7 @@ mod tests {
         let fixed = fixed_box("fixed", 10.0, 10.0, 20.0);
         let root = container(hidden_root_style, vec![fixed]);
 
-        let font = crate::text::BitmapFont::vga_8x16();
+        let font = crate::text::TerminusFont::new();
         let viewport = Size { w: 200.0, h: 150.0 };
         let fragments = layout_tree_viewport(&root, viewport, &font);
 

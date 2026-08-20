@@ -6,8 +6,8 @@
 //!
 //! ## Snapping, not scaling
 //!
-//! [`super::bitmap::BitmapFont`] (the font this packet retires) scales one
-//! design cell CONTINUOUSLY to any `size_px` (`scale = size_px /
+//! The old `BitmapFont` (font this packet retired, packet/terminus-font)
+//! scaled one design cell CONTINUOUSLY to any `size_px` (`scale = size_px /
 //! cell_height`). That model is wrong for Terminus, which ships five
 //! discrete, individually-hinted bitmaps (12/16/20/24/32px) rather than one
 //! shape to rescale. `TerminusFont` therefore does not scale at all: every
