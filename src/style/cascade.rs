@@ -172,11 +172,21 @@ fn fold_matching_declarations(
     let mut candidates: Vec<(u8, Specificity, usize, u32, &Declarations)> = Vec::new();
 
     for r in parser::matching_rules(ua, ancestors, info) {
+        // `p::before` matches the `p` element (its compound is `p`), but its
+        // declarations belong to the generated-content box, not `p` itself
+        // (packet P3) — exclude pseudo-element rules from the element's own
+        // fold.
+        if r.selector.pseudo_element.is_some() {
+            continue;
+        }
         candidates.push((0, r.selector.specificity(), 0, r.order, &r.declarations));
     }
     candidates.push((1, Specificity::default(), 0, 0, presentational));
     for (sheet_index, sheet) in author.iter().enumerate() {
         for r in parser::matching_rules(sheet, ancestors, info) {
+            if r.selector.pseudo_element.is_some() {
+                continue;
+            }
             candidates.push((2, r.selector.specificity(), sheet_index, r.order, &r.declarations));
         }
     }

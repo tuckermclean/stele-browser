@@ -7,7 +7,7 @@
 //! shapes are and aren't in scope.
 
 use crate::style::media::MediaQuery;
-use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
+use crate::style::selector::{Compound, ElementInfo, Pseudo, PseudoElement, Selector};
 use crate::style::tokenizer::{tokenize, Token};
 use crate::style::value::{self, Declarations};
 
@@ -333,6 +333,7 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
     let mut cur = Compound::default();
     let mut cur_has_content = false;
     let mut pending_descendant = false;
+    let mut pseudo_element: Option<PseudoElement> = None;
 
     macro_rules! flush {
         () => {
@@ -395,19 +396,27 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
             }
             Token::Colon => {
                 *pos += 1;
-                if tokens.get(*pos) == Some(&Token::Colon) {
-                    *pos += 1; // pseudo-element `::x` — unsupported
-                    supported = false;
-                }
+                let double = if tokens.get(*pos) == Some(&Token::Colon) {
+                    *pos += 1;
+                    true
+                } else {
+                    false
+                };
                 if let Some(Token::Ident(name)) = tokens.get(*pos) {
                     if pending_descendant {
                         flush!();
                         pending_descendant = false;
                     }
                     match name.to_ascii_lowercase().as_str() {
-                        "link" => cur.pseudo.push(Pseudo::Link),
-                        "visited" => cur.pseudo.push(Pseudo::Visited),
-                        "root" => cur.pseudo.push(Pseudo::Root),
+                        // pseudo-ELEMENTS (both `::before` and legacy
+                        // `:before`) — supported, routed to a generated box
+                        // via `pseudo_element` (NOT `supported = false`).
+                        "before" => pseudo_element = Some(PseudoElement::Before),
+                        "after" => pseudo_element = Some(PseudoElement::After),
+                        // pseudo-CLASSES — single-colon only.
+                        "link" if !double => cur.pseudo.push(Pseudo::Link),
+                        "visited" if !double => cur.pseudo.push(Pseudo::Visited),
+                        "root" if !double => cur.pseudo.push(Pseudo::Root),
                         _ => supported = false,
                     }
                     cur_has_content = true;
@@ -489,6 +498,7 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
     Selector {
         compounds,
         supported: supported && has_compounds,
+        pseudo_element,
     }
 }
 
@@ -954,6 +964,29 @@ mod tests {
             let p = find(&dom, "p").unwrap();
             assert_ne!(styles[p].color, Color::rgb(255, 0, 0), "for {css}");
         }
+    }
+
+    // ---- packet P3 (generated content): `::before`/`::after` -------------
+
+    #[test]
+    fn parses_pseudo_elements_before_after_both_colon_forms() {
+        use crate::style::selector::PseudoElement;
+        let cases = [
+            ("p::before { color: red }", Some(PseudoElement::Before)),
+            ("p::after  { color: red }", Some(PseudoElement::After)),
+            ("p:before  { color: red }", Some(PseudoElement::Before)), // legacy single-colon
+            ("p:after   { color: red }", Some(PseudoElement::After)),
+            ("p         { color: red }", None),
+        ];
+        for (css, want) in cases {
+            let sheet = parse(css);
+            let sel = &sheet.rules[0].selector;
+            assert_eq!(sel.pseudo_element, want, "for {css}");
+            assert!(sel.supported, "pseudo-element selector must stay supported: {css}");
+        }
+        // unknown pseudo-element still dropped
+        let sheet = parse("p::boguspseudo { color: red }");
+        assert!(!sheet.rules[0].selector.supported);
     }
 
     // ---- packet T1a: attribute selectors ([attr=value]) -----------------

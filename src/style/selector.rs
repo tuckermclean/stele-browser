@@ -24,6 +24,15 @@ pub(crate) struct Specificity {
     pub elements: u32,
 }
 
+/// `::before`/`::after` (and legacy single-colon `:before`/`:after`) — packet
+/// P3 (generated content). Tags which generated-content box a rule's
+/// declarations belong to; `None` means the rule targets the element itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PseudoElement {
+    Before,
+    After,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pseudo {
     Link,
@@ -109,6 +118,9 @@ impl Compound {
 pub(crate) struct Selector {
     pub compounds: Vec<Compound>,
     pub supported: bool,
+    /// `Some` when this selector ends in `::before`/`::after` (packet P3) —
+    /// see `PseudoElement`'s doc comment.
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 impl Selector {
@@ -119,6 +131,10 @@ impl Selector {
             total.ids += s.ids;
             total.classes += s.classes;
             total.elements += s.elements;
+        }
+        // CSS 2.1 §6.4.3: a pseudo-element counts like an element.
+        if self.pseudo_element.is_some() {
+            total.elements += 1;
         }
         total
     }
@@ -281,6 +297,7 @@ mod tests {
         let sel = Selector {
             compounds: vec![compound(Some("div")), compound(Some("p"))],
             supported: true,
+            pseudo_element: None,
         };
         let ancestors = vec![info("body", None, &[], false), info("div", None, &[], false)];
         assert!(sel.matches(&ancestors, &info("p", None, &[], false)));
@@ -294,6 +311,7 @@ mod tests {
         let sel = Selector {
             compounds: vec![compound(Some("p"))],
             supported: false,
+            pseudo_element: None,
         };
         assert!(!sel.matches(&[], &info("p", None, &[], false)));
     }
