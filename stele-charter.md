@@ -79,7 +79,9 @@ converge, not grow.
       the data: URI scheme -- data:[<mediatype>][;base64],<data>, decoded
       in-process (base64/percent, no dependency) (Acid2 Packet 4);
       min/max-width/height clamping and overflow:hidden clipping (Acid2
-      Packet 5; background-position deferred). Still
+      Packet 5; background-position deferred);
+      <object> with its data->nested-fallback cascade -- render the decoded
+      data image, else the fallback children (Acid2 Packet 6). Still
       candidates: <details>/
       <summary> interactive toggle (rendered as blocks today), MathML,
       static SVG. The dialect ships as a versioned one-page document:

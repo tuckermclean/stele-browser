@@ -159,49 +159,60 @@ fn walk(
     }
     let Node::Element(el) = dom.node(id) else { return };
 
-    if el.name.as_str() == "img" {
-        if let Some(src) = el.attrs.get("src") {
-            let url = base.resolve(src);
-            let key = url.as_str().to_string();
+    // `<img src>` supplies its (only) representation; `<object data>`
+    // supplies its PRIMARY representation (the fallback -- its children --
+    // is handled entirely by `layout::box_tree`, which already renders an
+    // element's children whenever it isn't in this map). Both attribute
+    // values feed the IDENTICAL resolve/dedup/budget/fetch+decode pipeline
+    // below (spec §1), so the attribute-name lookup is the only difference
+    // between the two element kinds.
+    let src_attr = match el.name.as_str() {
+        "img" => el.attrs.get("src"),
+        "object" => el.attrs.get("data"),
+        _ => None,
+    };
 
-            let resolved = match cache.get(&key) {
-                // Dedup hit: this exact resolved URL was already attempted
-                // earlier in the walk (successfully or not) — reuse that
-                // outcome, no new fetch/decode, no new budget spend.
-                Some(cached) => cached.clone(),
-                // Unseen URL: only spend a new attempt if the walk hasn't
-                // exhausted its budget (count or bytes) yet.
-                None if !budget.exhausted && budget.attempts < budget.max_images => {
-                    budget.attempts += 1;
-                    let decoded = fetch_and_decode(&url).map(|image| {
-                        let size = image.pixels.len();
-                        (image, size)
-                    });
-                    let result = match decoded {
-                        Some((image, size)) if budget.total_bytes.saturating_add(size) <= budget.max_total_bytes => {
-                            budget.total_bytes += size;
-                            Some(Rc::new(image))
-                        }
-                        Some(_) => {
-                            // This decode alone (or combined with what's
-                            // already resident) would exceed the aggregate
-                            // budget: discard it, and stop attempting any
-                            // further UNSEEN src for the rest of this walk
-                            // (already-cached srcs remain usable).
-                            budget.exhausted = true;
-                            None
-                        }
-                        None => None, // fetch/decode failure, unrelated to budget
-                    };
-                    cache.insert(key, result.clone());
-                    result
-                }
-                None => None, // budget exhausted (count or bytes): skip without attempting
-            };
+    if let Some(src) = src_attr {
+        let url = base.resolve(src);
+        let key = url.as_str().to_string();
 
-            if let Some(rc) = resolved {
-                out.insert(id, rc);
+        let resolved = match cache.get(&key) {
+            // Dedup hit: this exact resolved URL was already attempted
+            // earlier in the walk (successfully or not) — reuse that
+            // outcome, no new fetch/decode, no new budget spend.
+            Some(cached) => cached.clone(),
+            // Unseen URL: only spend a new attempt if the walk hasn't
+            // exhausted its budget (count or bytes) yet.
+            None if !budget.exhausted && budget.attempts < budget.max_images => {
+                budget.attempts += 1;
+                let decoded = fetch_and_decode(&url).map(|image| {
+                    let size = image.pixels.len();
+                    (image, size)
+                });
+                let result = match decoded {
+                    Some((image, size)) if budget.total_bytes.saturating_add(size) <= budget.max_total_bytes => {
+                        budget.total_bytes += size;
+                        Some(Rc::new(image))
+                    }
+                    Some(_) => {
+                        // This decode alone (or combined with what's
+                        // already resident) would exceed the aggregate
+                        // budget: discard it, and stop attempting any
+                        // further UNSEEN src for the rest of this walk
+                        // (already-cached srcs remain usable).
+                        budget.exhausted = true;
+                        None
+                    }
+                    None => None, // fetch/decode failure, unrelated to budget
+                };
+                cache.insert(key, result.clone());
+                result
             }
+            None => None, // budget exhausted (count or bytes): skip without attempting
+        };
+
+        if let Some(rc) = resolved {
+            out.insert(id, rc);
         }
     }
 

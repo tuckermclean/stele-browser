@@ -1491,3 +1491,19 @@ Append-only running log. Newest at the bottom.
   1,279,132 -- **87.02 % of the 1.44 MB floppy** (191,332 B headroom).
 - **Acid2 progress:** boxes clamp and clip. Still ahead (Packets 6-7): `<object>` fallback, then final assembly
   + the smiley golden (and the deferred `background-position` if the face needs it).
+
+## 2026-08-20 -- Acid2 Packet 6: <object> nested fallback
+
+- **Landed** the HTML `<object>` fallback cascade: `images::walk` fetches+decodes `<object data>` (same
+  pipeline as `<img src>`, keyed by NodeId), and `box_tree` renders an `<object>` as its decoded `data` image
+  when that resolves (a `Replaced` box, fallback children suppressed), else as its children -- the fallback
+  content, which nests automatically (a fallback child may be another `<object>`). See DECISIONS D60.
+- **Verified** (pixel-measured): `object-image` -- a `<object data="data:image/png;base64,...">FALLBACK</object>`
+  renders the 16x16 red PNG, NOT the word "FALLBACK"; `object-fallback` -- `<object data="data:,notanimage">`
+  renders its "fallback" text (data doesn't decode); `object-nested` -- an outer object whose data isn't an
+  image renders its child object, whose `data:` PNG resolves, so the innermost representation shows.
+- **Size:** the i486 binary is **1,283,228 bytes** (`stele-i486`), **+0 B (+0.00 %)** vs P5's 1,283,228 --
+  **87.02 % of the 1.44 MB floppy** (191,332 B headroom).
+- **Acid2 progress:** the last per-feature packet. Only Packet 7 remains -- assemble `fixtures/acid2.html`,
+  render it, and pixel-verify the reference smiley (the KILL test), plus the deferred `background-position` if
+  the face needs it.

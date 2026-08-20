@@ -1239,6 +1239,63 @@ else
     bad "A5p: PNG dump of $FIXTURE_BC_OVERFLOW differs from $GOLDEN_PNG_BC_OVERFLOW"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_BC_OVERFLOW") actual=$(wc -c < /tmp/stele_a5p.png)"
   fi
+
+  FIXTURE_OBJECT_IMAGE="fixtures/object-image.html"
+  GOLDEN_PNG_OBJECT_IMAGE="goldens/object-image.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5q: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_OBJECT_IMAGE" /tmp/stele_a5q.png 2>/tmp/stele_a5q.err; then
+    bad "A5q: stele --headless --dump-png crashed on $FIXTURE_OBJECT_IMAGE"
+    sed 's/^/    /' /tmp/stele_a5q.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5q.png "$GOLDEN_PNG_OBJECT_IMAGE"
+    pass "A5q: blessed object-image PNG golden -> $GOLDEN_PNG_OBJECT_IMAGE (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_OBJECT_IMAGE" ]; then
+    bad "A5q: no golden at $GOLDEN_PNG_OBJECT_IMAGE to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_OBJECT_IMAGE" /tmp/stele_a5q.png; then
+    pass "A5q: PNG dump of $FIXTURE_OBJECT_IMAGE matches golden"
+  else
+    bad "A5q: PNG dump of $FIXTURE_OBJECT_IMAGE differs from $GOLDEN_PNG_OBJECT_IMAGE"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_OBJECT_IMAGE") actual=$(wc -c < /tmp/stele_a5q.png)"
+  fi
+
+  FIXTURE_OBJECT_FALLBACK="fixtures/object-fallback.html"
+  GOLDEN_PNG_OBJECT_FALLBACK="goldens/object-fallback.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5r: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_OBJECT_FALLBACK" /tmp/stele_a5r.png 2>/tmp/stele_a5r.err; then
+    bad "A5r: stele --headless --dump-png crashed on $FIXTURE_OBJECT_FALLBACK"
+    sed 's/^/    /' /tmp/stele_a5r.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5r.png "$GOLDEN_PNG_OBJECT_FALLBACK"
+    pass "A5r: blessed object-fallback PNG golden -> $GOLDEN_PNG_OBJECT_FALLBACK (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_OBJECT_FALLBACK" ]; then
+    bad "A5r: no golden at $GOLDEN_PNG_OBJECT_FALLBACK to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_OBJECT_FALLBACK" /tmp/stele_a5r.png; then
+    pass "A5r: PNG dump of $FIXTURE_OBJECT_FALLBACK matches golden"
+  else
+    bad "A5r: PNG dump of $FIXTURE_OBJECT_FALLBACK differs from $GOLDEN_PNG_OBJECT_FALLBACK"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_OBJECT_FALLBACK") actual=$(wc -c < /tmp/stele_a5r.png)"
+  fi
+
+  FIXTURE_OBJECT_NESTED="fixtures/object-nested.html"
+  GOLDEN_PNG_OBJECT_NESTED="goldens/object-nested.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5s: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_OBJECT_NESTED" /tmp/stele_a5s.png 2>/tmp/stele_a5s.err; then
+    bad "A5s: stele --headless --dump-png crashed on $FIXTURE_OBJECT_NESTED"
+    sed 's/^/    /' /tmp/stele_a5s.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_a5s.png "$GOLDEN_PNG_OBJECT_NESTED"
+    pass "A5s: blessed object-nested PNG golden -> $GOLDEN_PNG_OBJECT_NESTED (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_OBJECT_NESTED" ]; then
+    bad "A5s: no golden at $GOLDEN_PNG_OBJECT_NESTED to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_OBJECT_NESTED" /tmp/stele_a5s.png; then
+    pass "A5s: PNG dump of $FIXTURE_OBJECT_NESTED matches golden"
+  else
+    bad "A5s: PNG dump of $FIXTURE_OBJECT_NESTED differs from $GOLDEN_PNG_OBJECT_NESTED"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_OBJECT_NESTED") actual=$(wc -c < /tmp/stele_a5s.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

@@ -136,6 +136,28 @@ fn build_node<'a>(
                     interactive: None,
                 });
             }
+            if el.name.as_str() == "object" {
+                if let Some(img) = images.get(&id).cloned() {
+                    // Primary representation resolved (its `data` decoded to
+                    // an image -- see `images::walk`'s "object" branch) ->
+                    // render the image, SUPPRESSING the fallback children.
+                    let mut style = style;
+                    apply_align_float_hint(el, &mut style);
+                    return Some(LayoutNode {
+                        style,
+                        content: BoxContent::Replaced { intrinsic: replaced_intrinsic(el, Some(&img)), image: Some(img) },
+                        children: Vec::new(),
+                        interactive: None,
+                    });
+                }
+                // else: fall through to the normal element path below, which
+                // builds the object's CHILDREN -- i.e. the fallback content
+                // (which may itself contain more <object>s, handled
+                // recursively the same way). No special-casing needed for
+                // nesting. Deliberately NOT added to `is_replaced` (that
+                // would force an empty-children Replaced unconditionally and
+                // lose the fallback) -- see spec §2.
+            }
             if is_form_control(el) {
                 return build_form_control(dom, el, style, form_action);
             }
@@ -1807,6 +1829,103 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// `<object data>` whose decoded image IS present in the `images` map
+    /// (mirrors `img_element_with_a_decoded_entry_in_the_images_map_carries_
+    /// that_image` above, but for `<object>`): renders as a `Replaced` box
+    /// carrying that exact `Rc`, with its fallback children SUPPRESSED (the
+    /// primary representation wins -- Acid2 Packet 6 spec §2).
+    #[test]
+    fn object_element_with_a_decoded_entry_in_the_images_map_carries_that_image_and_suppresses_fallback() {
+        let d = dom::parser::parse(r#"<object data="x.png" width="2" height="2">FALLBACK</object>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let object_id = find(&d, "object").expect("object node present");
+
+        let decoded = Rc::new(RgbaImage { width: 2, height: 2, pixels: vec![9, 9, 9, 255].repeat(4) });
+        let mut images = HashMap::new();
+        images.insert(object_id, decoded.clone());
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        fn find_replaced(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_replaced)
+        }
+        let object = find_replaced(&root).expect("object box present");
+        assert!(object.children.is_empty(), "the primary representation resolving must suppress the fallback children");
+        match &object.content {
+            BoxContent::Replaced { image, .. } => {
+                let got = image.as_ref().expect("decoded image should be threaded through");
+                assert!(Rc::ptr_eq(got, &decoded), "should carry the exact Rc from the images map, not a copy");
+            }
+            _ => unreachable!(),
+        }
+        let mut text = String::new();
+        collect_all_text(&root, &mut text);
+        assert!(!text.contains("FALLBACK"), "fallback text must not render once the primary representation resolved");
+    }
+
+    /// `<object data>` with NO entry in the `images` map (the `data` failed
+    /// to resolve/decode, or is absent entirely): falls all the way through
+    /// to the ordinary element path, i.e. a plain `Container` whose children
+    /// are the object's fallback content -- exactly as an `<object>`
+    /// (not in `is_replaced`) already rendered before this packet.
+    #[test]
+    fn object_element_with_no_images_map_entry_renders_its_fallback_children() {
+        let d = dom::parser::parse(r#"<object data="bad-data-url">fallback text</object>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+
+        assert!(matches!(root.content, BoxContent::Container));
+        assert!(find_text(&root, "fallback text").is_some(), "fallback children must still render when the primary representation is absent");
+        // No Replaced box anywhere in the tree -- the object never got a
+        // decoded image, so it must never take the Replaced path.
+        fn any_replaced(node: &LayoutNode) -> bool {
+            matches!(node.content, BoxContent::Replaced { .. }) || node.children.iter().any(any_replaced)
+        }
+        assert!(!any_replaced(&root), "an object with no resolved image must not become a Replaced box");
+    }
+
+    /// Nested `<object><object>…</object></object>` where only the INNER
+    /// object's data resolved: the outer object's `data` failed, so it falls
+    /// through to its normal element path and renders its child (the inner
+    /// `<object>`) as a plain `Container` -- proving the fallback cascade
+    /// nests automatically with no special-casing (spec §2 / §"Key
+    /// realization").
+    #[test]
+    fn nested_object_outer_no_image_inner_has_image_resolves_to_inner_replaced() {
+        let d = dom::parser::parse(r#"<object data="bad-outer"><object data="inner.png">deep</object></object>"#);
+        let styles = cascade::cascade(&d, &[]);
+        let object_ids = find_all(&d, "object");
+        assert_eq!(object_ids.len(), 2, "fixture should have exactly two nested <object>s");
+        let inner_id = object_ids[1]; // outer_id (object_ids[0]) deliberately gets no map entry
+
+        let decoded = Rc::new(RgbaImage { width: 4, height: 4, pixels: vec![1, 2, 3, 255].repeat(16) });
+        let mut images = HashMap::new();
+        images.insert(inner_id, decoded.clone()); // outer_id deliberately absent
+
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+
+        fn find_replaced(node: &LayoutNode) -> Option<&LayoutNode> {
+            if matches!(node.content, BoxContent::Replaced { .. }) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_replaced)
+        }
+        // The outer object itself must be a Container (no image resolved for
+        // it), containing the inner object as the sole Replaced descendant.
+        assert!(matches!(root.content, BoxContent::Container));
+        let replaced = find_replaced(&root).expect("inner object's Replaced box present");
+        match &replaced.content {
+            BoxContent::Replaced { image, .. } => {
+                let got = image.as_ref().expect("inner object's decoded image should be threaded through");
+                assert!(Rc::ptr_eq(got, &decoded));
+            }
+            _ => unreachable!(),
+        }
+        assert!(replaced.children.is_empty());
     }
 
     #[test]
