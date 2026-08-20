@@ -186,11 +186,12 @@ pub enum FragmentKind {
 /// M2 (P6): block flow (taffy's degenerate-column-flex substrate) + the
 /// bespoke inline engine (`inline` module) for text wrapping. Tables (P8)
 /// are not yet part of this pipeline — a `table`/`tr`/`td` tree lays out as
-/// plain blocks until the column solver lands. Text metrics are the one
-/// `Metrics` impl P5 shipped (`text::BitmapFont`, monospace) — font-family
-/// selection is a later refinement once a proportional font exists.
+/// plain blocks until the column solver lands. Text metrics are
+/// `text::TerminusFont` (packet/terminus-font; monospace, nearest-of-5-size
+/// snapping) — font-family selection is a later refinement once a
+/// proportional font exists.
 pub fn layout(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
-    let font = crate::text::BitmapFont::vga_8x16();
+    let font = crate::text::TerminusFont::new();
     block::layout_tree(root, viewport, &font)
 }
 
@@ -204,7 +205,7 @@ pub fn layout(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
 /// call, same behavior, every existing golden byte-identical) — this calls
 /// the new `block::layout_tree_viewport` instead.
 pub fn layout_viewport(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
-    let font = crate::text::BitmapFont::vga_8x16();
+    let font = crate::text::TerminusFont::new();
     block::layout_tree_viewport(root, viewport, &font)
 }
 

@@ -889,14 +889,22 @@ mod tests {
         assert!(bold > normal, "Terminus's bold glyphs are visually heavier -- expect MORE lit pixels, not fewer");
     }
 
-    /// packet/text-min-8x8: a sub-16px author `font-size` must still
-    /// rasterize the atlas's native 8x8 glyph (via `text::text_render_px`'s
-    /// floor in `paint_text`), not a downscaled/muddier blob with fewer lit
-    /// pixels than the native size would paint. Same black-ink-pixel-count
-    /// probe `text_fragment_draws_ink_at_the_expected_position` uses above,
-    /// compared between an 8px-declared style and a 16px (native) one.
+    /// packet/terminus-font: REPLACES the old font8x8-era
+    /// `sub_16px_font_size_still_paints_native_8x8_ink_not_a_downscaled_blob`.
+    /// That test's premise (every sub-16px `font-size` floors UP to the
+    /// SAME 16px native glyph) is exactly what `text_render_px`'s own
+    /// long-standing "revisit-trigger" doc comment predicted would stop
+    /// being universally correct once a second font landed -- it has.
+    /// Under the nearest-of-5 snap, an 8px-declared `font-size` now
+    /// resolves to the 12px bucket (a SMALLER, but still fully native,
+    /// non-downscaled Terminus bitmap) -- this pins that (a) two font-sizes
+    /// snapping to the SAME bucket (8px and 13px both -> 12px) paint
+    /// IDENTICAL ink, proving there is no residual per-font_size scaling
+    /// happening within a bucket, and (b) a font-size snapping to a
+    /// DIFFERENT bucket (16px) paints DIFFERENT ink, proving the snap is
+    /// actually size-sensitive, not a flat floor in disguise.
     #[test]
-    fn sub_16px_font_size_still_paints_native_8x8_ink_not_a_downscaled_blob() {
+    fn sub_bucket_font_sizes_snap_to_the_same_native_bucket_not_a_downscaled_blob() {
         let paint_a = |font_size: f32| {
             let mut s = MemSurface::new(20, 20, Color::WHITE);
             let style = ComputedStyle { color: Color::BLACK, font_size, ..ComputedStyle::default() };
@@ -908,14 +916,19 @@ mod tests {
             paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
             s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count()
         };
-        let black_at_8 = paint_a(8.0);
-        let black_at_16 = paint_a(16.0);
+        let black_at_8 = paint_a(8.0); // snaps to the 12px bucket
+        let black_at_13 = paint_a(13.0); // also snaps to the 12px bucket
+        let black_at_16 = paint_a(16.0); // its own, 16px bucket
+
+        assert!(black_at_8 > 0, "sanity: the 12px bucket must actually paint some ink");
         assert_eq!(
-            black_at_8, black_at_16,
-            "an 8px-declared font-size must paint the SAME lit-pixel count as 16px (native) -- the floor \
-             must have kept the glyph at its native 8x8 resolution instead of downscaling it to ~4x4"
+            black_at_8, black_at_13,
+            "8px and 13px both snap to the 12px bucket -- they must paint IDENTICAL ink, not a per-font_size scale"
         );
-        assert!(black_at_16 > 0, "sanity: the native render must actually paint some ink");
+        assert_ne!(
+            black_at_8, black_at_16,
+            "8px (12px bucket) and 16px (16px bucket) are DIFFERENT buckets -- they must paint different ink"
+        );
     }
 
     #[test]
