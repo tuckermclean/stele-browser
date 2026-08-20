@@ -18,6 +18,7 @@
 
 pub mod bitmap;
 pub(crate) mod glyphs;
+pub mod terminus;
 pub(crate) mod terminus_glyphs;
 #[cfg(test)]
 #[path = "terminus_glyphs_tests.rs"]
@@ -25,6 +26,7 @@ mod terminus_glyphs_tests;
 pub mod translit;
 
 pub use bitmap::BitmapFont;
+pub use terminus::TerminusFont;
 
 /// Per-font, size-parameterized metrics. All returns are in pixels at `size_px`.
 pub trait Metrics {
