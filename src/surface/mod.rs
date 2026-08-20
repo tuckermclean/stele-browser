@@ -9,6 +9,8 @@ pub mod mem;
 
 pub use mem::MemSurface;
 
+use crate::style::computed::FontWeight;
+
 /// A straight-alpha RGBA color — the paint primitive shared by style and paint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color {
@@ -45,6 +47,16 @@ pub struct Rect {
 /// the backend renders `text` starting at `x`, sitting on `baseline`, using the
 /// font metrics from the `text` module. Firm-up (font handle, per-glyph offsets)
 /// arrives with P5/P7.
+///
+/// `weight` (packet/terminus-font, Task 3): `ComputedStyle::font_weight` was
+/// cascaded correctly (`b`/`strong`/headings all resolve `FontWeight::Bold`)
+/// but never reached rendering — `font8x8` had no bold variant to switch to,
+/// so every `TextRun` painted at `FontWeight::Normal` regardless of the
+/// style it came from. Terminus ships a real bold BDF at every embedded
+/// size, so this field finally lets `font-weight: bold` paint something
+/// different; see `backend::raster::paint_text` (forwards
+/// `style.font_weight` here) and `surface::mem::MemSurface::draw_text`
+/// (reads it to pick the bold vs. normal glyph table).
 #[derive(Debug, Clone, Copy)]
 pub struct TextRun<'a> {
     pub text: &'a str,
@@ -52,6 +64,7 @@ pub struct TextRun<'a> {
     pub baseline: i32,
     pub size_px: f32,
     pub color: Color,
+    pub weight: FontWeight,
 }
 
 /// The paint target. Backends implement it; the renderer only ever holds

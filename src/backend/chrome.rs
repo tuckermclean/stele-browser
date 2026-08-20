@@ -8,6 +8,7 @@
 //! `run_x11` (manual-verified, T3); everything HERE is unit-tested and,
 //! via the `--chrome` screenshot mode (T2), golden-tested too.
 
+use crate::style::computed::FontWeight;
 use crate::surface::{Color, Rect, Surface, TextRun};
 use crate::text::{BitmapFont, Metrics};
 
@@ -212,7 +213,8 @@ fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, 
     let baseline = text_top + ascent;
 
     surface.set_clip(Some(rect));
-    surface.draw_text(&TextRun { text, x: rect.x + PAD_X, baseline, size_px: TEXT_SIZE_PX, color });
+    // Chrome labels never carry an author `font-weight` -- always Normal.
+    surface.draw_text(&TextRun { text, x: rect.x + PAD_X, baseline, size_px: TEXT_SIZE_PX, color, weight: FontWeight::Normal });
     surface.set_clip(None);
 }
 
@@ -235,7 +237,7 @@ fn draw_centered_glyph(surface: &mut dyn Surface, rect: Rect, ch: char, color: C
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
     surface.set_clip(Some(rect));
-    surface.draw_text(&TextRun { text: s, x, baseline, size_px: TEXT_SIZE_PX, color });
+    surface.draw_text(&TextRun { text: s, x, baseline, size_px: TEXT_SIZE_PX, color, weight: FontWeight::Normal });
     surface.set_clip(None);
 }
 

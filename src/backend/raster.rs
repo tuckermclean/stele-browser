@@ -462,15 +462,20 @@ fn paint_text(surface: &mut dyn Surface, rect: &LayoutRect, text: &str, baseline
     let top_y = finite_or(rect.origin.y, 0.0);
     let bl = finite_or(baseline, 0.0);
     let baseline_px = to_i32(top_y + bl);
-    // packet/text-min-8x8: the ACTUAL rasterized glyph size is floored to
-    // font8x8's native 8x8-at-16px resolution (`text::text_render_px`) --
-    // never `style.font_size` verbatim -- so a sub-16px author font-size
-    // never downscales the atlas below its own native pixels. `rect`/
-    // `baseline` themselves already reflect this same floor (see
-    // `layout::inline`'s own metrics call sites), so glyphs painted here
-    // line up with the line box `layout::block::emit` built around them.
+    // packet/text-min-8x8 (now packet/terminus-font): the ACTUAL rasterized
+    // glyph size snaps to one of Terminus's 5 embedded buckets
+    // (`text::text_render_px`, packet/terminus-font Task 4) -- never
+    // `style.font_size` verbatim. `rect`/`baseline` themselves already
+    // reflect this same snap (see `layout::inline`'s own metrics call
+    // sites), so glyphs painted here line up with the line box
+    // `layout::block::emit` built around them.
     let size_px = crate::text::text_render_px(style.font_size);
-    let run = TextRun { text: &sanitized, x, baseline: baseline_px, size_px, color: ink };
+    // packet/terminus-font, Task 3: `style.font_weight` was cascaded
+    // correctly but never reached rendering before this packet (font8x8 had
+    // no bold variant) -- forwarding it here is what finally makes
+    // `font-weight: bold` paint something different; see `TextRun::weight`'s
+    // own doc comment.
+    let run = TextRun { text: &sanitized, x, baseline: baseline_px, size_px, color: ink, weight: style.font_weight };
     surface.draw_text(&run);
 }
 
@@ -557,7 +562,7 @@ mod tests {
     use super::*;
     use crate::img::RgbaImage;
     use crate::layout::{Point, Size};
-    use crate::style::computed::{BorderSide, BorderStyle, Edges};
+    use crate::style::computed::{BorderSide, BorderStyle, Edges, FontWeight};
 
     fn box_style(bg: Color, border: BorderSide) -> ComputedStyle {
         ComputedStyle { background_color: bg, border: Edges::all(border), ..ComputedStyle::default() }
@@ -851,6 +856,37 @@ mod tests {
         paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
         let count_black = s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count();
         assert!(count_black > 0, "expected some glyph ink to be painted");
+    }
+
+    /// packet/terminus-font, Task 3: `paint_text` reads `style.font_weight`
+    /// and forwards it into the `TextRun` it builds (`TextRun::weight`'s own
+    /// doc comment) -- proven end-to-end through `paint`/`MemSurface`, since
+    /// nothing in this file has a spy `Surface` to inspect the `TextRun`
+    /// struct directly. A `FontWeight::Bold` style must paint a DIFFERENT
+    /// lit-pixel count than the same char/size at `FontWeight::Normal` --
+    /// before this packet, `font-weight: bold` was cascaded but silently
+    /// discarded (design doc's "Current state": no font8x8 bold variant to
+    /// switch to), so this is genuinely new rendering behavior, not just a
+    /// glyph-shape swap.
+    #[test]
+    fn bold_font_weight_reaches_the_rasterizer_and_paints_differently_than_normal() {
+        let paint_with = |weight: FontWeight| {
+            let mut s = MemSurface::new(20, 20, Color::WHITE);
+            let style = ComputedStyle { color: Color::BLACK, font_size: 16.0, font_weight: weight, ..ComputedStyle::default() };
+            let fragments = vec![Fragment {
+                rect: rect(4.0, 0.0, 8.0, 16.0),
+                kind: FragmentKind::Text { text: "A".to_string(), baseline: 12.0, style },
+                interactive: None, clip: None, id: None, is_fixed: false,
+}];
+            paint(&mut s, &fragments, &HashMap::new(), Color::WHITE);
+            s.bytes().chunks(4).filter(|p| p == &[0, 0, 0, 255]).count()
+        };
+        let normal = paint_with(FontWeight::Normal);
+        let bold = paint_with(FontWeight::Bold);
+        assert!(normal > 0, "sanity: normal weight should paint some ink");
+        assert!(bold > 0, "sanity: bold weight should paint some ink");
+        assert_ne!(normal, bold, "bold and normal 'A' at the same size must paint a different lit-pixel count");
+        assert!(bold > normal, "Terminus's bold glyphs are visually heavier -- expect MORE lit pixels, not fewer");
     }
 
     /// packet/text-min-8x8: a sub-16px author `font-size` must still
