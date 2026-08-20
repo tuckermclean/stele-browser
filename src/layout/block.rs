@@ -1577,11 +1577,22 @@ fn base_style(cs: &ComputedStyle) -> TStyle {
         clear: map_clear(cs.clear),
         box_sizing: box_sizing_for(cs),
         position: map_position(cs.position),
-        inset: TRect {
-            left: map_lpa(cs.inset.left),
-            right: map_lpa(cs.inset.right),
-            top: map_lpa(cs.inset.top),
-            bottom: map_lpa(cs.inset.bottom),
+        // CSS 2.1 §9.4.2: `top`/`right`/`bottom`/`left` have NO effect on a
+        // statically-positioned box. taffy has no `Static` (we map it to
+        // `Relative`, see `map_position`) and WOULD fold any inset into the
+        // flow offset, so a static box must map to taffy's auto/no-op insets
+        // regardless of its computed `inset`. Positioned boxes use the real
+        // offsets.
+        inset: if cs.position == Position::Static {
+            let auto = map_lpa(LengthPercentageAuto::Auto);
+            TRect { left: auto, right: auto, top: auto, bottom: auto }
+        } else {
+            TRect {
+                left: map_lpa(cs.inset.left),
+                right: map_lpa(cs.inset.right),
+                top: map_lpa(cs.inset.top),
+                bottom: map_lpa(cs.inset.bottom),
+            }
         },
         ..Default::default()
     }
@@ -1707,12 +1718,15 @@ fn map_clear(clear: Clear) -> TClear {
 /// (in-flow, offsets applied as a post-layout correction) and `Absolute`
 /// (out-of-flow, positioned against the nearest positioned ancestor).
 /// `Static` and `Relative` are both in-flow in CSS, so both map to taffy's
-/// `Relative` (a `Static` box's `inset` is always `Auto`, which is a no-op
-/// offset -- see `base_style`'s `inset` field, mapped unconditionally from
-/// `cs.inset`). `Absolute` and `Fixed` are both out-of-flow, so both map to
-/// taffy's `Absolute`; `Fixed`'s viewport-relative containing block (as
-/// opposed to `Absolute`'s nearest-positioned-ancestor one) is handled in
-/// layout, not here (no scroll in the static render -- see the packet spec).
+/// `Relative`; `base_style` then forces a `Static` box's taffy `inset` to
+/// `Auto` (a no-op offset -- CSS 2.1 §9.4.2: offset properties have no
+/// effect on a statically-positioned box), so any declared
+/// `top`/`right`/`bottom`/`left` is ignored. Only `Relative`/`Absolute`/
+/// `Fixed` boxes receive their computed `cs.inset`. `Absolute` and `Fixed`
+/// are both out-of-flow, so both map to taffy's `Absolute`; `Fixed`'s
+/// viewport-relative containing block (as opposed to `Absolute`'s
+/// nearest-positioned-ancestor one) is handled in layout, not here (no
+/// scroll in the static render -- see the packet spec).
 fn map_position(p: Position) -> TPosition {
     match p {
         Position::Static | Position::Relative => TPosition::Relative,
@@ -2362,5 +2376,22 @@ mod tests {
         let ts = base_style(&cs);
         assert_eq!(ts.inset.top, ts.margin.top);
         assert_eq!(ts.inset.top, TLengthPercentageAuto::length(10.0));
+    }
+
+    #[test]
+    fn static_box_ignores_inset_offsets() {
+        // CSS 2.1 §9.4.2: top/right/bottom/left have no effect on a static
+        // box, even though they have computed values. A static box must map
+        // to taffy's all-Auto inset regardless of what `cs.inset` says.
+        let mut cs = ComputedStyle::default(); // position defaults to Static
+        cs.inset.top = LengthPercentageAuto::Px(50.0);
+        cs.inset.left = LengthPercentageAuto::Px(10.0);
+        let auto = map_lpa(LengthPercentageAuto::Auto);
+        let ts = base_style(&cs);
+        assert_eq!(ts.position, TPosition::Relative);
+        assert_eq!(ts.inset.top, auto, "static box must ignore `top`");
+        assert_eq!(ts.inset.left, auto, "static box must ignore `left`");
+        assert_eq!(ts.inset.right, auto);
+        assert_eq!(ts.inset.bottom, auto);
     }
 }
