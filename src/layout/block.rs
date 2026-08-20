@@ -351,6 +351,25 @@ impl Built<'_> {
 /// `inline::layout_runs`'s own totality notes) — degenerate/non-finite
 /// viewport sizes are floored to zero rather than propagated into taffy.
 pub fn layout_tree<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -> Vec<Fragment> {
+    layout_tree_impl(root, viewport, metrics, false)
+}
+
+/// [`layout_tree`]'s opt-in fixed-viewport sibling (packet/fixed-viewport):
+/// identical content-driven WIDTH clamp, but ALSO clamps the root's HEIGHT
+/// to `viewport.h` (when positive) the same way — so a document root with
+/// `overflow: hidden` (P5's own clip machinery) clips its descendants into a
+/// fixed `viewport.w` x `viewport.h` window instead of sprawling to content
+/// height. Every existing caller keeps using [`layout_tree`] (clamp_height =
+/// `false`, unchanged behavior byte-for-byte); this is purely additive.
+pub fn layout_tree_viewport<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -> Vec<Fragment> {
+    layout_tree_impl(root, viewport, metrics, true)
+}
+
+/// The shared implementation behind [`layout_tree`] (`clamp_height = false`,
+/// today's content-height behavior, unchanged) and [`layout_tree_viewport`]
+/// (`clamp_height = true`, packet/fixed-viewport). See [`layout_tree`]'s own
+/// doc comment for the width-clamp rationale this mirrors for height.
+fn layout_tree_impl<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M, clamp_height: bool) -> Vec<Fragment> {
     let mut taffy: TaffyTree<NodeCtx> = TaffyTree::new();
     let built = translate_any(root, &mut taffy, 0, TABLE_DEPTH_CAP, MarginOverride::default());
 
@@ -387,14 +406,29 @@ pub fn layout_tree<M: Metrics>(root: &LayoutNode, viewport: Size, metrics: &M) -
     // layout_block.rs`'s `nested_margin_padding_border_produce_expected_
     // rects`: a 1px-padding-all-round root grew from the correct 300 to a
     // wrong 302 -- exactly `2 * 1px` padding -- before this fix).
-    if vw > 0.0 {
+    // packet/fixed-viewport: when the caller opted into the fixed-viewport
+    // path (`clamp_height`) AND gave a positive `vh`, the root's HEIGHT is
+    // ALSO pinned to the viewport — same synthetic BorderBox assignment as
+    // the width clamp directly above (see that block's own comment for why
+    // BorderBox, not whatever `box_sizing_for` would otherwise resolve, is
+    // the correct target here), done in the SAME style-clone/set_style round
+    // trip so both axes land atomically. `layout_tree` (clamp_height =
+    // `false`) never takes this branch — `vh` stays inert for it, exactly as
+    // before this packet (every existing golden's root is still pure
+    // content-height).
+    if vw > 0.0 || (clamp_height && vh > 0.0) {
         if let Ok(mut style) = taffy.style(built.taffy_id()).cloned() {
-            style.size.width = length(vw);
-            style.box_sizing = TBoxSizing::BorderBox;
+            if vw > 0.0 {
+                style.size.width = length(vw);
+                style.box_sizing = TBoxSizing::BorderBox;
+            }
+            if clamp_height && vh > 0.0 {
+                style.size.height = length(vh);
+                style.box_sizing = TBoxSizing::BorderBox;
+            }
             let _ = taffy.set_style(built.taffy_id(), style);
         }
     }
-    let _ = vh; // height is always content-derived for the root (no fixed viewport clamp in M2)
 
     let _ = taffy.compute_layout_with_measure(
         built.taffy_id(),
