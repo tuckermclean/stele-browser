@@ -7,10 +7,11 @@ use std::sync::OnceLock;
 
 use crate::dom::{Dom, Node, NodeId};
 use crate::style::computed::{
-    BorderSide, BorderStyle, BoxSizing, Dimension, Edges, GridRepetitionCount, GridTemplateComponent, GridTrack,
-    GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
+    BorderSide, BorderStyle, BoxSizing, Content, Dimension, Display, Edges, GridRepetitionCount,
+    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, LineHeight,
+    Position,
 };
-use crate::style::selector::{ElementInfo, Specificity};
+use crate::style::selector::{ElementInfo, PseudoElement, Specificity};
 use crate::style::ua::UA_CSS;
 use crate::style::value::{
     self, presentational_hints, BorderRaw, Declarations, EdgesRaw, Env, RawGridRepetitionCount,
@@ -172,11 +173,21 @@ fn fold_matching_declarations(
     let mut candidates: Vec<(u8, Specificity, usize, u32, &Declarations)> = Vec::new();
 
     for r in parser::matching_rules(ua, ancestors, info) {
+        // `p::before` matches the `p` element (its compound is `p`), but its
+        // declarations belong to the generated-content box, not `p` itself
+        // (packet P3) — exclude pseudo-element rules from the element's own
+        // fold.
+        if r.selector.pseudo_element.is_some() {
+            continue;
+        }
         candidates.push((0, r.selector.specificity(), 0, r.order, &r.declarations));
     }
     candidates.push((1, Specificity::default(), 0, 0, presentational));
     for (sheet_index, sheet) in author.iter().enumerate() {
         for r in parser::matching_rules(sheet, ancestors, info) {
+            if r.selector.pseudo_element.is_some() {
+                continue;
+            }
             candidates.push((2, r.selector.specificity(), sheet_index, r.order, &r.declarations));
         }
     }
@@ -187,6 +198,109 @@ fn fold_matching_declarations(
         decls.overlay(d);
     }
     decls
+}
+
+/// The computed styles for an element's generated-content boxes (Acid2 P3).
+/// `Some` only when the pseudo-element's `content` generates a box
+/// (`content.generates_box()`); `None` for `content: normal|none` or no
+/// matching `::before`/`::after` rule (and for every non-element node).
+#[derive(Debug, Clone, Default)]
+pub struct PseudoStyles {
+    pub before: Option<ComputedStyle>,
+    pub after: Option<ComputedStyle>,
+}
+
+/// Like `fold_matching_declarations`, but folds only the rules whose
+/// `selector.pseudo_element == Some(which)` -- the mirror image of that
+/// function's `if r.selector.pseudo_element.is_some() { continue; }` guards.
+/// Two tiers only (UA `0`, author `2`): generated content has no
+/// presentational-hint tier (there's no HTML attribute that could target a
+/// `::before`/`::after` box). Same `(tier, specificity, sheet_index, order)`
+/// sort + low-to-high `overlay` as `fold_matching_declarations`.
+fn fold_pseudo_declarations(
+    ua: &Stylesheet,
+    author: &[Stylesheet],
+    ancestors: &[ElementInfo],
+    info: &ElementInfo,
+    which: PseudoElement,
+) -> Declarations {
+    let mut candidates: Vec<(u8, Specificity, usize, u32, &Declarations)> = Vec::new();
+    for r in parser::matching_rules(ua, ancestors, info) {
+        if r.selector.pseudo_element == Some(which) {
+            candidates.push((0, r.selector.specificity(), 0, r.order, &r.declarations));
+        }
+    }
+    for (sheet_index, sheet) in author.iter().enumerate() {
+        for r in parser::matching_rules(sheet, ancestors, info) {
+            if r.selector.pseudo_element == Some(which) {
+                candidates.push((2, r.selector.specificity(), sheet_index, r.order, &r.declarations));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
+    let mut decls = Declarations::default();
+    for (_, _, _, _, d) in candidates {
+        decls.overlay(d);
+    }
+    decls
+}
+
+/// Compute `::before`/`::after` styles for every element in `dom` (Acid2 P3).
+/// Takes the caller's already-computed `elem_styles` (the inheritance parent
+/// each pseudo-element's declarations resolve against -- every real caller
+/// has already run `cascade(dom, author_sheets)` for its own purposes, so
+/// this walk no longer reruns it) and walks the DOM a second time -- an
+/// explicit-stack walk mirroring `visit`'s ancestor management -- resolving
+/// each element's before/after pseudo style against `elem_styles[id]` as
+/// parent and `Env::default()` (pseudo rules don't thread the inherited
+/// custom-property environment; a `var()` inside one simply falls back to
+/// its initial value, an acceptable simplification for Acid2). A pseudo
+/// style is kept only when `content.generates_box()`.
+pub fn cascade_pseudo(dom: &Dom, author_sheets: &[Stylesheet], elem_styles: &[ComputedStyle]) -> Vec<PseudoStyles> {
+    let mut out = vec![PseudoStyles::default(); dom.len()];
+    if dom.is_empty() {
+        return out;
+    }
+    let ua = ua_stylesheet();
+
+    // Explicit-stack walk mirroring `visit`'s ancestor management.
+    enum PFrame {
+        Enter(NodeId),
+        Exit,
+    }
+    let mut ancestors: Vec<ElementInfo> = Vec::new();
+    let mut stack = vec![PFrame::Enter(dom.root())];
+    while let Some(f) = stack.pop() {
+        match f {
+            PFrame::Exit => {
+                ancestors.pop();
+            }
+            PFrame::Enter(id) => {
+                if let Node::Element(el) = dom.node(id) {
+                    let is_root = id == dom.root();
+                    let info = ElementInfo::from_element(&el.name, &el.attrs, is_root);
+                    let parent = elem_styles.get(id); // this element's own computed style
+                    for which in [PseudoElement::Before, PseudoElement::After] {
+                        let decls = fold_pseudo_declarations(ua, author_sheets, &ancestors, &info, which);
+                        // Generated content inherits from the originating element.
+                        let style = resolve(&decls, parent, &Env::default());
+                        if style.content.generates_box() {
+                            match which {
+                                PseudoElement::Before => out[id].before = Some(style),
+                                PseudoElement::After => out[id].after = Some(style),
+                            }
+                        }
+                    }
+                    ancestors.push(info);
+                    stack.push(PFrame::Exit);
+                    for &child in el.children.iter().rev() {
+                        stack.push(PFrame::Enter(child));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Turn one node's folded `Declarations` (still raw: px/pt/em/% units, not
@@ -279,7 +393,20 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         vertical_align: own!(vertical_align),
         list_style_type: inherited!(list_style_type),
 
-        display: own!(display),
+        // CSS 2.1 §9.7: an absolutely-positioned or `fixed` box is blockified —
+        // `display: inline` computes to `block` so it honors width/height and
+        // establishes a box (a `::before { content:""; position:absolute;
+        // width/height }` generated box, or any inline element that is
+        // absolutely positioned). Scoped to absolute/fixed (not float) —
+        // Acid2-sufficient, and no existing float fixture positions an inline.
+        display: {
+            let disp = own!(display);
+            if matches!(own!(position), Position::Absolute | Position::Fixed) && disp == Display::Inline {
+                Display::Block
+            } else {
+                disp
+            }
+        },
         width: resolve_dimension(d.width, font_size, default.width),
         height: resolve_dimension(d.height, font_size, default.height),
         margin: Edges {
@@ -315,6 +442,13 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         // Acid2 Packet 2: `z-index` is non-inherited ("own"), same shape
         // as `position` right above.
         z_index: own!(z_index),
+        // Acid2 Packet 3 (generated content): non-inherited ("own"), but
+        // `Content` isn't `Copy` (owns a `String`), so -- like
+        // `background_image` above -- it's hand-cloned rather than going
+        // through the `own!` macro. Unlike `background_image` (whose
+        // default is already `None`), `Content`'s CSS initial value is
+        // `Normal`, so the `unwrap_or` supplies that default explicitly.
+        content: d.content.clone().unwrap_or(Content::Normal),
         // Acid2 Packet 1: `inset` (top/right/bottom/left) is non-inherited,
         // resolved edge-by-edge exactly like `margin` above (same raw/
         // computed type, `LengthPercentageAuto`).
@@ -582,6 +716,25 @@ mod tests {
         let styles = cascade(&d, &[]);
         assert_eq!(styles[find(&d, "div")].display, Display::Block);
         assert_eq!(styles[find(&d, "span")].display, Display::Inline);
+    }
+
+    #[test]
+    fn absolutely_positioned_inline_is_blockified() {
+        // CSS 2.1 §9.7: position:absolute/fixed blockifies an inline box so it
+        // honors width/height. A plain inline (or position:relative) stays inline.
+        let d = dom::parser::parse(
+            r#"<span id="a" style="position:absolute">a</span><span id="r" style="position:relative">r</span><span id="s">s</span>"#,
+        );
+        let styles = cascade(&d, &[]);
+        let by_id = |want: &str| {
+            find_all(&d, "span")
+                .into_iter()
+                .find(|&id| d.node(id).element().and_then(|e| e.attrs.get("id")) == Some(want))
+                .unwrap()
+        };
+        assert_eq!(styles[by_id("a")].display, Display::Block, "position:absolute blockifies inline");
+        assert_eq!(styles[by_id("r")].display, Display::Inline, "position:relative does NOT blockify");
+        assert_eq!(styles[by_id("s")].display, Display::Inline, "static inline stays inline");
     }
 
     #[test]
@@ -1429,5 +1582,42 @@ mod tests {
         let sheet2 = parser::parse(&css2);
         let styles2 = cascade(&d2, std::slice::from_ref(&sheet2));
         assert_eq!(styles2.len(), d2.len());
+    }
+
+    // ---- Acid2 P3: `cascade_pseudo` -- ::before/::after computed styles ----
+
+    #[test]
+    fn cascade_pseudo_before_after_generate_only_with_content() {
+        use crate::style::computed::Content;
+        let dom = crate::dom::parser::parse("<p>t</p>");
+        let sheet = crate::style::parser::parse(
+            r#"p::before { content: "B"; color: red } p::after { content: none }"#,
+        );
+        let styles = cascade(&dom, std::slice::from_ref(&sheet));
+        let pseudo = cascade_pseudo(&dom, std::slice::from_ref(&sheet), &styles);
+        let p = find(&dom, "p");
+        let before = pseudo[p].before.as_ref().expect("::before generates (content:\"B\")");
+        assert_eq!(before.content, Content::Str("B".into()));
+        assert_eq!(before.color, Color::rgb(255, 0, 0));
+        assert!(pseudo[p].after.is_none(), "::after content:none => no box");
+
+        // element with no pseudo rule => neither
+        let dom2 = crate::dom::parser::parse("<span>x</span>");
+        let styles2 = cascade(&dom2, &[]);
+        let pseudo2 = cascade_pseudo(&dom2, &[], &styles2);
+        let s = find(&dom2, "span");
+        assert!(pseudo2[s].before.is_none() && pseudo2[s].after.is_none());
+    }
+
+    #[test]
+    fn empty_string_content_still_generates_pseudo_box() {
+        use crate::style::computed::Content;
+        let dom = crate::dom::parser::parse("<div>d</div>");
+        let sheet = crate::style::parser::parse(r#"div::before { content: "" }"#);
+        let styles = cascade(&dom, std::slice::from_ref(&sheet));
+        let pseudo = cascade_pseudo(&dom, std::slice::from_ref(&sheet), &styles);
+        let d = find(&dom, "div");
+        let b = pseudo[d].before.as_ref().expect("content:\"\" DOES generate a box");
+        assert_eq!(b.content, Content::Str(String::new()));
     }
 }

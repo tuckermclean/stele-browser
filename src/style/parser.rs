@@ -7,7 +7,7 @@
 //! shapes are and aren't in scope.
 
 use crate::style::media::MediaQuery;
-use crate::style::selector::{Compound, ElementInfo, Pseudo, Selector};
+use crate::style::selector::{Compound, ElementInfo, Pseudo, PseudoElement, Selector};
 use crate::style::tokenizer::{tokenize, Token};
 use crate::style::value::{self, Declarations};
 
@@ -333,6 +333,7 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
     let mut cur = Compound::default();
     let mut cur_has_content = false;
     let mut pending_descendant = false;
+    let mut pseudo_element: Option<PseudoElement> = None;
 
     macro_rules! flush {
         () => {
@@ -353,6 +354,14 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
             }
             Token::LBrace | Token::RBrace | Token::Semicolon | Token::Comma => break,
             Token::Ident(name) => {
+                // A pseudo-element (`::before`/`::after`) must be the last
+                // simple selector — anything else after it (e.g. the `span`
+                // in `p::before span`) makes the whole selector unsupported
+                // rather than silently attaching the pseudo-element to the
+                // wrong compound.
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 if pending_descendant {
                     flush!();
                     pending_descendant = false;
@@ -362,6 +371,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Star => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 if pending_descendant {
                     flush!();
                     pending_descendant = false;
@@ -371,6 +383,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Dot => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 *pos += 1;
                 if let Some(Token::Ident(name)) = tokens.get(*pos) {
                     if pending_descendant {
@@ -385,6 +400,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 }
             }
             Token::Hash(id) => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 if pending_descendant {
                     flush!();
                     pending_descendant = false;
@@ -394,20 +412,36 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Colon => {
-                *pos += 1;
-                if tokens.get(*pos) == Some(&Token::Colon) {
-                    *pos += 1; // pseudo-element `::x` — unsupported
+                // A pseudo-element must be the last simple selector; a
+                // further `:pseudo`/`::pseudo` after one already seen (e.g.
+                // `p::before:hover`) is unsupported. (The colon that sets
+                // `pseudo_element` itself hits this arm too, but at that
+                // point `pseudo_element` is still `None`, so it's unaffected.)
+                if pseudo_element.is_some() {
                     supported = false;
                 }
+                *pos += 1;
+                let double = if tokens.get(*pos) == Some(&Token::Colon) {
+                    *pos += 1;
+                    true
+                } else {
+                    false
+                };
                 if let Some(Token::Ident(name)) = tokens.get(*pos) {
                     if pending_descendant {
                         flush!();
                         pending_descendant = false;
                     }
                     match name.to_ascii_lowercase().as_str() {
-                        "link" => cur.pseudo.push(Pseudo::Link),
-                        "visited" => cur.pseudo.push(Pseudo::Visited),
-                        "root" => cur.pseudo.push(Pseudo::Root),
+                        // pseudo-ELEMENTS (both `::before` and legacy
+                        // `:before`) — supported, routed to a generated box
+                        // via `pseudo_element` (NOT `supported = false`).
+                        "before" => pseudo_element = Some(PseudoElement::Before),
+                        "after" => pseudo_element = Some(PseudoElement::After),
+                        // pseudo-CLASSES — single-colon only.
+                        "link" if !double => cur.pseudo.push(Pseudo::Link),
+                        "visited" if !double => cur.pseudo.push(Pseudo::Visited),
+                        "root" if !double => cur.pseudo.push(Pseudo::Root),
                         _ => supported = false,
                     }
                     cur_has_content = true;
@@ -451,6 +485,9 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
                 *pos += 1;
             }
             Token::Delim('[') => {
+                if pseudo_element.is_some() {
+                    supported = false;
+                }
                 *pos += 1;
                 if let Some((attr_name, attr_value, next)) = parse_attr_selector(tokens, *pos) {
                     // The curated exact-match attribute-selector form
@@ -489,6 +526,7 @@ fn parse_selector(tokens: &[Token], pos: &mut usize) -> Selector {
     Selector {
         compounds,
         supported: supported && has_compounds,
+        pseudo_element,
     }
 }
 
@@ -954,6 +992,39 @@ mod tests {
             let p = find(&dom, "p").unwrap();
             assert_ne!(styles[p].color, Color::rgb(255, 0, 0), "for {css}");
         }
+    }
+
+    // ---- packet P3 (generated content): `::before`/`::after` -------------
+
+    #[test]
+    fn parses_pseudo_elements_before_after_both_colon_forms() {
+        use crate::style::selector::PseudoElement;
+        let cases = [
+            ("p::before { color: red }", Some(PseudoElement::Before)),
+            ("p::after  { color: red }", Some(PseudoElement::After)),
+            ("p:before  { color: red }", Some(PseudoElement::Before)), // legacy single-colon
+            ("p:after   { color: red }", Some(PseudoElement::After)),
+            ("p         { color: red }", None),
+        ];
+        for (css, want) in cases {
+            let sheet = parse(css);
+            let sel = &sheet.rules[0].selector;
+            assert_eq!(sel.pseudo_element, want, "for {css}");
+            assert!(sel.supported, "pseudo-element selector must stay supported: {css}");
+        }
+        // unknown pseudo-element still dropped
+        let sheet = parse("p::boguspseudo { color: red }");
+        assert!(!sheet.rules[0].selector.supported);
+    }
+
+    #[test]
+    fn pseudo_element_must_be_last_simple_selector() {
+        // `p::before span` is invalid — a pseudo-element must be the subject's last bit.
+        let sheet = parse("p::before span { color: red }");
+        assert!(!sheet.rules[0].selector.supported, "pseudo-element followed by more selector => dropped");
+        // sanity: the valid form still parses supported
+        let ok = parse("p::before { color: red }");
+        assert!(ok.rules[0].selector.supported);
     }
 
     // ---- packet T1a: attribute selectors ([attr=value]) -----------------

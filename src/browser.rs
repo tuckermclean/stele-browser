@@ -1482,7 +1482,7 @@ mod tests {
     use super::*;
     use crate::dom as dom_mod;
     use crate::fetch::Method;
-    use crate::layout::box_tree::build_box_tree;
+    use crate::layout::box_tree::build_box_tree_with_pseudo;
     use crate::layout::{self, FragmentKind, Point, Rect, Size};
     use crate::style::cascade;
 
@@ -1493,7 +1493,9 @@ mod tests {
     fn build_page(html: &str, cols: usize, url: &str) -> Page {
         let dom = dom_mod::parser::parse(html);
         let styles = cascade::cascade(&dom, &[]);
-        let root = build_box_tree(&dom, &styles, &Default::default()).expect("non-empty fixture");
+        let pseudo = cascade::cascade_pseudo(&dom, &[], &styles);
+        let root =
+            build_box_tree_with_pseudo(&dom, &styles, &Default::default(), &pseudo).expect("non-empty fixture");
         let viewport = Size { w: cols as f32 * 8.0, h: 100_000.0 };
         let fragments = layout::layout(&root, viewport);
         // `Page::build` needs `dom`/`styles` again for NodeId resolution,

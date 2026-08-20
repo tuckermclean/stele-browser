@@ -1435,3 +1435,27 @@ Append-only running log. Newest at the bottom.
 - **Acid2 progress:** overlapping positioned layers now composite in the right order — the face layers can
   stack correctly. Still ahead (Packets 3–7): generated content (`:before`/`:after`), `data:` URIs,
   min/max/overflow/background-position, `<object>` fallback, then final assembly + the smiley golden.
+
+## 2026-08-20 — Acid2 Packet 3: generated content (::before/::after + content)
+
+- **Landed** the `::before`/`::after` pseudo-elements + the `content` property (`normal | none | <string> |
+  url()`), synthesizing generated-content boxes in the style→box-tree pipeline. A `Selector.pseudo_element`
+  tag (excluded from the element's own cascade), a `Content` computed field, a second `cascade::cascade_pseudo`
+  walk producing each element's `before`/`after` `ComputedStyle`, and `box_tree` synthesis of a
+  `Container(+Text)` child (prepended/appended) via `build_box_tree_with_pseudo` (the 3-arg `build_box_tree`
+  stays a back-compat wrapper). Generated boxes reuse `base_style`/`emit`, so P1 positioning + P2 z-index apply
+  for free. See DECISIONS D57.
+- **CSS 2.1 §9.7 blockification** (`cascade::resolve`): an absolutely/fixed-positioned inline box (the default
+  for `::before`/`::after`) computes `display:block`, so an empty generated box honors width/height. Without it
+  `content:""; position:absolute; width; height; background` rendered nothing.
+- **Verified** (pixel-measured micro-fixtures): `gc-before-string` renders `[MID]` (generated `[`/`]` bracket
+  the text, in order); `gc-empty-box` renders a red 40×40 box at (10,10) inside the gray div (empty generated
+  content still carries its box model); `gc-none` renders only `plain` (`content:none` + an unmatched `::after`
+  generate no box).
+- **httpforever unchanged:** its `.hero::before/::after` motif uses a `var()`-based background, which
+  `cascade_pseudo`'s `Env::default()` leaves unresolved → transparent → the golden is byte-identical (no
+  re-bless). `content: url()` image rendering is deferred (parsed only). Both recorded in D57 with revisit triggers.
+- **Size:** the i486 binary is **1,279,132 bytes** (`stele-i486` artifact), **+4,096 B (+0.32 %)** vs P2's
+  1,275,036 — **86.75 % of the 1.44 MB floppy** (195,428 B headroom).
+- **Acid2 progress:** the face can now grow generated boxes. Still ahead (Packets 4–7): `data:` URIs,
+  min/max/overflow/background-position, `<object>` fallback, then final assembly + the smiley golden.

@@ -3,6 +3,43 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Style — generated content (::before/::after, Acid2 Packet 3)
+
+### D57 — generated content via a second `cascade_pseudo` walk + box-tree synthesis
+Acid2 builds parts of the face from `::before`/`::after` generated content; both the pseudo-elements and the
+`content` property were absent (selectors parsed to `supported = false`). **Options:** (a) a separate
+generated-box tree / bespoke pass; (b) plumb it through the existing style→box-tree pipeline. **Choice: (b).**
+`::before`/`::after` become a `Selector.pseudo_element` tag (kept off the element's own cascade via a filter
+in `fold_matching_declarations`); `content` (`normal|none|<string>|url()`) becomes a computed field; a second
+walk `cascade::cascade_pseudo` produces each element's `before`/`after` `ComputedStyle` (inheriting from the
+element), kept only when `content.generates_box()`; `box_tree` synthesizes a `Container(+Text)` child,
+prepended/appended, via a new `build_box_tree_with_pseudo` (the 3-arg `build_box_tree` stays a wrapper so its
+~120 test call sites are untouched). Generated boxes reuse the normal `base_style`/`emit` path, so P1
+positioning and P2 z-index apply to them for free. **Why:** minimal new surface, no new dependency, and the
+box-tree seam is exactly where a generated box must live to lay out/paint like a real one.
+**Key points / rulings:**
+  - `content:""` (empty string) STILL generates a box (full box model, no text) — distinct from `none`; this
+    is the Acid2/httpforever colored-rectangle pattern.
+  - **CSS 2.1 §9.7 blockification** (`cascade::resolve`): an inline box (the default `display` for
+    `::before`/`::after`) that is `position:absolute`/`fixed` computes `display` to `block`, so it honors
+    width/height. Without this an empty absolutely-positioned generated box never rendered. Scoped to
+    absolute/fixed (not float) — Acid2-sufficient and golden-safe (no existing fixture absolutely-positions
+    an inline element).
+**Simplifications / deferrals (revisit triggers — do not build speculatively):**
+  - `cascade_pseudo` resolves pseudo styles with `Env::default()`, so `var()` inside a `::before`/`::after`
+    rule is unresolved (falls back to initial). Consequence: httpforever's `.hero::before/::after` motif
+    (a `var()`-based background) stays transparent — httpforever's golden is unchanged by this packet. Thread
+    the element's custom-property `Env` into `cascade_pseudo` if a fixture needs `var()` in generated content.
+  - `content: url()` is PARSED but the generated image is NOT rendered (images are keyed by `NodeId`;
+    generated boxes have none). Add a `(NodeId, PseudoElement)`-keyed fetch/decode path only if Acid2's
+    generated content uses `url()` (verify at P7). Acid2/httpforever use strings/empty boxes.
+  - Only `::before`/`::after` (not `::first-line`/`::first-letter`/`::marker`); no `counter()`/`attr()`/quotes.
+  - Generated content synthesizes only for ordinary block/inline container elements. Elements built by a
+    specialized box-tree arm — `<a href>`, `<form>`, `<details>`/`<summary>`, `<ul>`/`<ol>` containers, and
+    replaced elements (`<img>`, form controls) — do not synthesize their OWN `::before`/`::after` yet (their
+    normal descendants still do). Not exercised by Acid2 (its generated content is on plain `div`s); broaden
+    per-arm only if a fixture needs it.
+
 ## Layout — CSS stacking / z-index (Acid2 Packet 2)
 
 ### D56 — z-index refines P1's `emit` paint partition (not a separate stacking-context tree)
