@@ -5,6 +5,7 @@
 //! blocking IO is correct for a single-threaded program (brief §9).
 
 pub mod cookies;
+pub mod data;
 pub mod file;
 pub mod http1;
 pub mod https;
@@ -105,6 +106,7 @@ pub trait Fetch {
 /// call sites before.
 pub fn fetch(request: &Request) -> Result<Response, FetchError> {
     match request.url.scheme().as_str() {
+        "data" => data::fetch(request),
         "file" => file::FileFetcher::new().fetch(request),
         "http" | "https" => http1::Http1Client::new().fetch(request),
         other => Err(FetchError::UnsupportedScheme(other.to_string())),
