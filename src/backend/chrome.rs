@@ -201,10 +201,15 @@ fn draw_throbber(surface: &mut dyn Surface, rect: Rect, loading: bool, frame: u8
 fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, color: Color) {
     const PAD_X: i32 = 4;
     let font = BitmapFont::vga_8x16();
-    let ascent = Metrics::ascent(&font, TEXT_SIZE_PX);
-    let line_h = Metrics::line_height(&font, TEXT_SIZE_PX);
-    let text_top = rect.y + ((rect.h as f32 - line_h) / 2.0).max(0.0) as i32;
-    let baseline = text_top + ascent as i32;
+    // Cast the (target-stable) metrics to integers ONCE, then center with
+    // pure integer arithmetic. A float `(rect.h - line_h) / 2.0` here rounds
+    // differently under the i486 target's x87 80-bit intermediates than under
+    // the host's SSE, shifting the text a pixel and breaking the host==i486
+    // golden byte-identity every other A5 render already relies on.
+    let ascent = Metrics::ascent(&font, TEXT_SIZE_PX) as i32;
+    let line_h = Metrics::line_height(&font, TEXT_SIZE_PX) as i32;
+    let text_top = rect.y + (rect.h as i32 - line_h).max(0) / 2;
+    let baseline = text_top + ascent;
 
     surface.set_clip(Some(rect));
     surface.draw_text(&TextRun { text, x: rect.x + PAD_X, baseline, size_px: TEXT_SIZE_PX, color });
@@ -216,13 +221,16 @@ fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, 
 /// horizontally centered too since it's a single fixed-width glyph in a
 /// square box rather than a left-flowing text run.
 fn draw_centered_glyph(surface: &mut dyn Surface, rect: Rect, ch: char, color: Color) {
-    const CELL_W: f32 = 8.0; // BitmapFont::vga_8x16's native cell width.
+    const CELL_W: i32 = 8; // BitmapFont::vga_8x16's native cell width.
     let font = BitmapFont::vga_8x16();
-    let ascent = Metrics::ascent(&font, TEXT_SIZE_PX);
-    let line_h = Metrics::line_height(&font, TEXT_SIZE_PX);
-    let text_top = rect.y + ((rect.h as f32 - line_h) / 2.0).max(0.0) as i32;
-    let baseline = text_top + ascent as i32;
-    let x = rect.x + ((rect.w as f32 - CELL_W) / 2.0).max(0.0) as i32;
+    // Integer centering (see draw_left_aligned_clipped): float math here
+    // diverges between the i486 (x87) and host (SSE) targets and would break
+    // the chrome golden's host==i486 byte-identity.
+    let ascent = Metrics::ascent(&font, TEXT_SIZE_PX) as i32;
+    let line_h = Metrics::line_height(&font, TEXT_SIZE_PX) as i32;
+    let text_top = rect.y + (rect.h as i32 - line_h).max(0) / 2;
+    let baseline = text_top + ascent;
+    let x = rect.x + (rect.w as i32 - CELL_W).max(0) / 2;
 
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
