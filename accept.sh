@@ -1296,6 +1296,24 @@ else
     bad "A5s: PNG dump of $FIXTURE_OBJECT_NESTED differs from $GOLDEN_PNG_OBJECT_NESTED"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_OBJECT_NESTED") actual=$(wc -c < /tmp/stele_a5s.png)"
   fi
+
+  # ---------------------------------------------------------------------
+  # A5t -- Acid2 assembly packet (P7): smoke check only, NOT a pixel golden.
+  # Verifies fixtures/acid2.html renders to a non-empty PNG without
+  # crashing. The compact-smiley golden is deferred until a fixed-viewport
+  # render lands -- see DECISIONS D61.
+  # ---------------------------------------------------------------------
+  FIXTURE_ACID2="fixtures/acid2.html"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5t: host binary not found"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_ACID2" /tmp/stele_acid2.png 2>/tmp/stele_acid2.err; then
+    bad "A5t: stele --headless --dump-png crashed on fixtures/acid2.html"
+    sed 's/^/    /' /tmp/stele_acid2.err
+  elif [ ! -s /tmp/stele_acid2.png ]; then
+    bad "A5t: acid2.html produced no PNG"
+  else
+    pass "A5t: acid2.html renders to a non-empty PNG (smoke check; smiley golden deferred to a fixed-viewport render — see DECISIONS D61)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then
