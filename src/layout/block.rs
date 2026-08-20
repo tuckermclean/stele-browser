@@ -1555,6 +1555,17 @@ fn cell_content_layout<M: Metrics>(node: &LayoutNode, width: f32, metrics: &M, t
 fn base_style(cs: &ComputedStyle) -> TStyle {
     TStyle {
         size: TSize { width: map_dimension(cs.width), height: map_dimension(cs.height) },
+        // Acid2 Packet 5, Task 1: `min-width`/`max-width`/`min-height`/
+        // `max-height` via taffy's OWN native `min_size`/`max_size` -- same
+        // `map_dimension` conversion `size` above already uses.
+        // `map_dimension(Dimension::Auto)` yields taffy's `auto()`, which is
+        // ALSO taffy's own `Style::DEFAULT` for `min_size`/`max_size` (no
+        // constraint) -- so an element that never declares any of the four
+        // (i.e. `cs.min_width`/etc. are all `Dimension::Auto`, the default)
+        // maps byte-identically to the pre-existing `..Default::default()`
+        // this literal already falls back to, no golden churn.
+        min_size: TSize { width: map_dimension(cs.min_width), height: map_dimension(cs.min_height) },
+        max_size: TSize { width: map_dimension(cs.max_width), height: map_dimension(cs.max_height) },
         margin: TRect {
             left: map_lpa(cs.margin.left),
             right: map_lpa(cs.margin.right),
@@ -2360,6 +2371,27 @@ mod tests {
         // it, not taffy's own BorderBox default.
         let style = base_style(&ComputedStyle::default());
         assert_eq!(style.box_sizing, TBoxSizing::ContentBox);
+    }
+
+    #[test]
+    fn base_style_maps_min_max_width_height_to_taffys_native_min_max_size() {
+        // Acid2 Packet 5, Task 1. Default (Dimension::Auto on all four)
+        // must map to taffy's own no-constraint `auto()` -- identical to
+        // what `..Default::default()` already produced, so no golden churn
+        // for any element that never declares min-/max-width/height.
+        let default_style = base_style(&ComputedStyle::default());
+        assert_eq!(default_style.min_size.width, auto());
+        assert_eq!(default_style.min_size.height, auto());
+        assert_eq!(default_style.max_size.width, auto());
+        assert_eq!(default_style.max_size.height, auto());
+
+        let cs = ComputedStyle { min_width: CssDimension::Px(80.0), ..ComputedStyle::default() };
+        let style = base_style(&cs);
+        assert_eq!(style.min_size.width, length(80.0));
+        // Untouched fields stay at their no-constraint default.
+        assert_eq!(style.min_size.height, auto());
+        assert_eq!(style.max_size.width, auto());
+        assert_eq!(style.max_size.height, auto());
     }
 
     #[test]

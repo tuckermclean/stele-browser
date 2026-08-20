@@ -409,6 +409,14 @@ fn resolve(d: &Declarations, parent: Option<&ComputedStyle>, env: &Env) -> Compu
         },
         width: resolve_dimension(d.width, font_size, default.width),
         height: resolve_dimension(d.height, font_size, default.height),
+        // Acid2 Packet 5, Task 1: same non-inherited ("own") resolution as
+        // width/height, reusing `resolve_dimension` unchanged -- see
+        // `ComputedStyle::min_width`'s own doc comment for why `Auto` is the
+        // correct default for all four.
+        min_width: resolve_dimension(d.min_width, font_size, default.min_width),
+        max_width: resolve_dimension(d.max_width, font_size, default.max_width),
+        min_height: resolve_dimension(d.min_height, font_size, default.min_height),
+        max_height: resolve_dimension(d.max_height, font_size, default.max_height),
         margin: Edges {
             top: resolve_lpa(d.margin.top, font_size, default.margin.top),
             right: resolve_lpa(d.margin.right, font_size, default.margin.right),

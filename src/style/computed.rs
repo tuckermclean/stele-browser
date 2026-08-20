@@ -404,6 +404,25 @@ pub struct ComputedStyle {
     pub display: Display,
     pub width: Dimension,
     pub height: Dimension,
+    /// `min-width`/`max-width`/`min-height`/`max-height` (Acid2 Packet 5,
+    /// Task 1). Same `Dimension` shape as `width`/`height` -- `layout::
+    /// block::base_style` maps all four straight onto taffy's own native
+    /// `min_size`/`max_size` (`layout::block::map_dimension` unchanged,
+    /// reused as-is). `Dimension::Auto` is the default for ALL FOUR: that is
+    /// CSS's real initial value for `min-width`/`min-height` (`auto`), and
+    /// for `max-width`/`max-height` (`none`) -- `Dimension` has no separate
+    /// "none" variant, so `value::apply_property` maps a literal `none`
+    /// token for the max-* properties onto this same `Auto` value (see that
+    /// module's own doc comment on the max-width/max-height parse arms).
+    /// Taffy's own `Size::auto()` (its default for `min_size`/`max_size`)
+    /// means "no constraint" either way, so `Dimension::Auto` -> `auto()`
+    /// is the correct mapping for both min's and max's "unset" case, and an
+    /// element that never declares any of the four resolves byte-identically
+    /// to before this packet (no golden churn).
+    pub min_width: Dimension,
+    pub max_width: Dimension,
+    pub min_height: Dimension,
+    pub max_height: Dimension,
     pub margin: Edges<LengthPercentageAuto>,
     pub padding: Edges<LengthPercentage>,
     pub border: Edges<BorderSide>,
@@ -539,6 +558,12 @@ impl Default for ComputedStyle {
             display: Display::Inline, // CSS initial; UA sheet makes blocks block
             width: Dimension::Auto,
             height: Dimension::Auto,
+            // Acid2 Packet 5, Task 1: `auto`/`none` -- see the field doc
+            // comments above for why both collapse to the same `Auto` value.
+            min_width: Dimension::Auto,
+            max_width: Dimension::Auto,
+            min_height: Dimension::Auto,
+            max_height: Dimension::Auto,
             margin: Edges::all(LengthPercentageAuto::Px(0.0)),
             padding: Edges::all(LengthPercentage::Px(0.0)),
             border: Edges::all(BorderSide::default()),
