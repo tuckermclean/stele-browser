@@ -1,5 +1,10 @@
 //! `data:` URI scheme (Acid2 Packet 4): `data:[<mediatype>][;base64],<data>`
-//! decoded to bytes + content-type, no socket. RFC 2397.
+//! decoded to bytes + content-type, no socket. RFC 2397. Per RFC 3986,
+//! percent-escaping is legal anywhere in a URI -- a `;base64` payload is
+//! still URI content and may legitimately percent-escape `+`/`/`/`=` (e.g.
+//! `%2B`/`%2F`/`%3D`) to survive contexts (CSS `url()`, HTML attributes)
+//! that could otherwise misparse those characters literally. The payload is
+//! therefore always percent-decoded FIRST, then base64-decoded.
 use super::{FetchError, Request, Response};
 
 pub fn fetch(request: &Request) -> Result<Response, FetchError> {
@@ -26,7 +31,7 @@ pub fn fetch(request: &Request) -> Result<Response, FetchError> {
     .to_string();
 
     let body = if is_base64 {
-        decode_base64(payload.as_bytes())?
+        decode_base64(&percent_decode(payload.as_bytes()))?
     } else {
         percent_decode(payload.as_bytes())
     };
@@ -236,6 +241,54 @@ mod tests {
         let resp = fetch(&get(&url)).unwrap();
         assert_eq!(resp.body, raw);
         assert_eq!(resp.header("content-type"), Some("image/png"));
+    }
+
+    #[test]
+    fn fetch_base64_payload_with_percent_escaped_plus_and_slash_decodes() {
+        // RFC 3986: percent-escaping is legal anywhere in a URI, including
+        // inside a `;base64` payload (this is exactly the pattern
+        // `fixtures/acid2.html` uses for every one of its `data:` images).
+        // Pick raw bytes whose base64 encoding is KNOWN (computed, not
+        // guessed) to contain both `+` and `/`, then percent-escape those
+        // two characters in the URL — the fetch must decode to the same
+        // raw bytes as the un-escaped control case.
+        let raw: &[u8] = &[0xFB, 0xFF, 0xBF, 0x00, 0xFF];
+        let b64 = encode_base64_for_test(raw);
+        assert!(b64.contains('+'), "test premise: b64 {b64:?} must contain '+'");
+        assert!(b64.contains('/'), "test premise: b64 {b64:?} must contain '/'");
+        let escaped = b64.replace('+', "%2B").replace('/', "%2F");
+        let url = format!("data:application/octet-stream;base64,{escaped}");
+        let resp = fetch(&get(&url)).unwrap();
+        assert_eq!(resp.body, raw);
+    }
+
+    #[test]
+    fn fetch_base64_payload_with_percent_escaped_padding_matches_literal_equals() {
+        // Mirrors `fixtures/acid2.html`'s own pattern: payloads ending in a
+        // percent-escaped `=` (`%3D`) must decode identically to the same
+        // payload with a literal, un-escaped `=`.
+        let raw: &[u8] = b"Hi";
+        let b64 = encode_base64_for_test(raw);
+        assert!(b64.contains('='), "test premise: b64 {b64:?} must contain '='");
+        let escaped_url = format!("data:text/plain;base64,{}", b64.replace('=', "%3D"));
+        let literal_url = format!("data:text/plain;base64,{b64}");
+        let escaped_resp = fetch(&get(&escaped_url)).unwrap();
+        let literal_resp = fetch(&get(&literal_url)).unwrap();
+        assert_eq!(escaped_resp.body, literal_resp.body);
+        assert_eq!(escaped_resp.body, raw);
+    }
+
+    #[test]
+    fn fetch_base64_payload_with_malformed_percent_escape_does_not_panic() {
+        // `%ZZ` is not a valid hex escape -- `percent_decode` passes the
+        // literal `%`, `Z`, `Z` bytes through unchanged (its existing
+        // literal-passthrough behavior), which are then not valid base64
+        // alphabet characters -- `decode_base64` must return `Err`, not
+        // panic. Totality: hostile input must never panic (AGENTS.md).
+        let url = "data:application/octet-stream;base64,AAAA%ZZAAAA";
+        let result = fetch(&get(url));
+        assert!(result.is_err(), "got {result:?}");
+        assert!(matches!(result.unwrap_err(), FetchError::Protocol(_)));
     }
 
     #[test]
