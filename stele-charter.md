@@ -134,6 +134,11 @@ converge, not grow.
       runtimes, and a stranger's code in one is the open port with a
       JIT. No plumbing from wire to any engine exists to misuse: the
       AST has no script variant to hand over.
+      The interactive shell (`--x11`) wears a minimal self-drawn
+      chrome -- a back button, an address bar (the current URL), a
+      throbber, and a status bar -- framing the document viewport;
+      drawn by the engine into its own Surface, no toolkit (DECISIONS
+      D62).
   C6. Plain-file state: bookmarks a text file, history a log, cache a
       dir of hash-named files, cookie jar Netscape-format text. grep
       is the extension API.
