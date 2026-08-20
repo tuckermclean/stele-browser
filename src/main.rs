@@ -146,6 +146,16 @@ struct Args {
     /// `--dump-png` (every existing golden) is completely unaffected —
     /// golden-safe per the design doc's non-negotiables.
     chrome: bool,
+    /// `--viewport-height <N>` (packet/fixed-viewport, CSS px): opts a
+    /// `--dump-png` render into the FIXED-viewport layout path
+    /// (`layout::layout_viewport`) at `(width, N)` instead of the default
+    /// content-height `layout::layout` — so `html { overflow: hidden }`
+    /// clips the document into an `N`-tall window rather than sprawling to
+    /// content height. `None` (the flag absent, or given with a missing/
+    /// unparseable value) leaves every render path byte-identical to before
+    /// this packet — same "trailing flag, no/bad value is a no-op" totality
+    /// `--cols`/`--color-scheme` already have.
+    viewport_height: Option<u32>,
 }
 
 impl Default for Args {
@@ -164,6 +174,7 @@ impl Default for Args {
             color_scheme_given: false,
             audit_contrast: None,
             chrome: false,
+            viewport_height: None,
         }
     }
 }
@@ -195,31 +206,55 @@ fn parse_args(argv: &[String]) -> Args {
                 // ANY slot between `--dump-png` and its `<src> <out.png>`
                 // pair — `--dump-png --chrome <src> <out.png>` (the form
                 // accept.sh's `chrome-basic` golden uses), and equally
-                // `--dump-png <src> --chrome <out.png>` — this arm eagerly
-                // grabs the NEXT two non-`--chrome` tokens as positionals,
-                // so a `--chrome` sitting anywhere in that stretch has to be
-                // recognized and skipped explicitly here or it would
-                // silently BECOME `<src>`/`<out.png>` (shifting the real
-                // positional(s) over) instead of setting the flag. `--chrome`
-                // AFTER the full `<src> <out.png>` pair (or before
-                // `--dump-png` entirely) still works too — this loop stops
-                // as soon as it has collected two positionals, so a trailing
-                // `--chrome` is left untouched for the ordinary standalone
-                // `"--chrome"` match arm below to catch (no double-consume).
+                // `--dump-png <src> --chrome <out.png>`. packet/fixed-
+                // viewport final review: `--viewport-height <N>` gets the
+                // same "any slot" treatment — `--dump-png --viewport-height
+                // 120 <src> <out.png>` was silently mis-parsing `120` and
+                // `<src>` as the positionals (the flag never took effect,
+                // a *silent* blank-PNG failure) because this arm eagerly
+                // grabs the NEXT two non-flag tokens as positionals, so any
+                // recognized inline flag sitting anywhere in that stretch
+                // has to be skipped explicitly here or it silently BECOMES
+                // `<src>`/`<out.png>` (shifting the real positional(s)
+                // over) instead of setting the flag. Both `--chrome` and
+                // `--viewport-height <N>` are handled in any position here;
+                // either flag AFTER the full `<src> <out.png>` pair (or
+                // before `--dump-png` entirely) still works too — this loop
+                // stops as soon as it has collected two positionals, so a
+                // trailing flag is left untouched for the ordinary
+                // standalone `"--chrome"`/`"--viewport-height"` match arms
+                // below to catch (no double-consume).
                 let mut j = i + 1;
                 let mut chrome_seen = false;
+                let mut viewport_height: Option<u32> = None;
                 let mut positionals: Vec<String> = Vec::new();
                 while positionals.len() < 2 && j < argv.len() {
                     if argv[j] == "--chrome" {
                         chrome_seen = true;
+                        j += 1;
+                    } else if argv[j] == "--viewport-height" {
+                        // Value flag: skip the flag token, then try the
+                        // next token as the value. Missing/non-numeric
+                        // value: skip only the flag itself, leaving
+                        // `viewport_height` at `None` — total, never a
+                        // panic, matching the standalone arm's own
+                        // "trailing flag, no/bad value is a no-op" rule.
+                        j += 1;
+                        if let Some(v) = argv.get(j).and_then(|s| s.parse::<u32>().ok()) {
+                            viewport_height = Some(v);
+                            j += 1;
+                        }
                     } else {
                         positionals.push(argv[j].clone());
+                        j += 1;
                     }
-                    j += 1;
                 }
                 if positionals.len() == 2 {
                     if chrome_seen {
                         out.chrome = true;
+                    }
+                    if let Some(v) = viewport_height {
+                        out.viewport_height = Some(v);
                     }
                     i = j - 1;
                     out.dump_png = Some((positionals[0].clone(), positionals[1].clone()));
@@ -262,6 +297,16 @@ fn parse_args(argv: &[String]) -> Args {
                     out.audit_contrast = Some(v.clone());
                 }
                 // Same "trailing flag, no value" totality as --dump-text.
+            }
+            "--viewport-height" => {
+                i += 1;
+                if let Some(v) = argv.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    out.viewport_height = Some(v);
+                }
+                // A missing or unparseable value leaves `viewport_height` at
+                // `None` (same "trailing flag, no/bad value is a no-op"
+                // totality `--cols` already has) — never a panic, never a
+                // hard CLI error.
             }
             other => {
                 // packet/shell-keyboard: the first bare token (doesn't start
@@ -626,7 +671,7 @@ fn blank_png() -> Vec<u8> {
 /// not this packet's job.
 #[cfg(test)]
 fn dump_png(source: &str) -> Vec<u8> {
-    dump_png_opts(source, false, style::ColorScheme::Light, false)
+    dump_png_opts(source, false, style::ColorScheme::Light, false, None)
 }
 
 /// [`dump_png`]'s real implementation, parameterized over `no_bg_images`
@@ -647,8 +692,8 @@ fn dump_png(source: &str) -> Vec<u8> {
 /// `prefers-color-scheme` fallback) — could never be PNG-screenshotted in
 /// its dark theme at all. t1d-httpforever's own dark-theme fidelity fixture
 /// needs exactly that, so this packet finishes the wiring.
-fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Vec<u8> {
-    match build_dump_png_render(source, no_bg_images, scheme, stamp) {
+fn dump_png_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool, viewport_height: Option<u32>) -> Vec<u8> {
+    match build_dump_png_render(source, no_bg_images, scheme, stamp, viewport_height) {
         None => blank_png(),
         Some(r) => {
             let mut surface = MemSurface::new(DEFAULT_PNG_WIDTH, r.height, Color::WHITE);
@@ -678,7 +723,13 @@ struct DocRender {
     final_url: Url,
 }
 
-fn build_dump_png_render(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Option<DocRender> {
+fn build_dump_png_render(
+    source: &str,
+    no_bg_images: bool,
+    scheme: style::ColorScheme,
+    stamp: bool,
+    viewport_height: Option<u32>,
+) -> Option<DocRender> {
     let url = resolve_url(source);
     let response = match fetch_response(&url) {
         Ok(r) => r,
@@ -726,27 +777,46 @@ fn build_dump_png_render(source: &str, no_bg_images: bool, scheme: style::ColorS
     };
 
     let width = DEFAULT_PNG_WIDTH;
-    let viewport = Size { w: width as f32, h: HEADLESS_VIEWPORT_HEIGHT };
-    let fragments = layout::layout(&root, viewport);
+    // packet/fixed-viewport: `viewport_height` opts into the FIXED-viewport
+    // layout path (`layout::layout_viewport`, docs/superpowers/specs/
+    // 2026-08-20-fixed-viewport-design.md) at `(width, N)` instead of the
+    // default content-height `layout::layout` at `(width,
+    // HEADLESS_VIEWPORT_HEIGHT)`. `None` (the overwhelmingly common case —
+    // every existing `--dump-png` golden) takes the exact call this packet
+    // found here, byte-identical.
+    let fragments = match viewport_height {
+        Some(vh) => layout::layout_viewport(&root, Size { w: width as f32, h: vh as f32 }),
+        None => layout::layout(&root, Size { w: width as f32, h: HEADLESS_VIEWPORT_HEIGHT }),
+    };
 
-    // Content-driven height: the tallest fragment bottom edge, mirroring
-    // `backend::tty::render`'s own `rows_needed` derivation (max over ALL
-    // fragments, not just Text, so a bare background Box taller than its
-    // text still sizes the canvas) — clamped finite/non-negative/bounded
-    // the same defensive way, since a fragment rect's `size.h`/`origin.y`
-    // are ultimately document/layout-controlled.
-    let mut content_bottom = 0.0f32;
-    for f in &fragments {
-        let y = f.rect.origin.y;
-        let h = f.rect.size.h;
-        if y.is_finite() && h.is_finite() {
-            content_bottom = content_bottom.max(y + h);
+    // Canvas height: content-driven by default (the tallest fragment bottom
+    // edge, mirroring `backend::tty::render`'s own `rows_needed` derivation —
+    // max over ALL fragments, not just Text, so a bare background Box taller
+    // than its text still sizes the canvas — clamped finite/non-negative/
+    // bounded the same defensive way, since a fragment rect's `size.h`/
+    // `origin.y` are ultimately document/layout-controlled). When
+    // `viewport_height` opted into the fixed-viewport path, the canvas is
+    // the window itself (`N`, clamped into the same bound) — the whole point
+    // of `layout_viewport`'s root height clamp + `overflow:hidden` clip is a
+    // FIXED-size window, not a content-height canvas that happens to clip
+    // its content in the first `N` rows and leave the rest blank.
+    let height = match viewport_height {
+        Some(vh) => vh.clamp(1, MAX_PNG_HEIGHT),
+        None => {
+            let mut content_bottom = 0.0f32;
+            for f in &fragments {
+                let y = f.rect.origin.y;
+                let h = f.rect.size.h;
+                if y.is_finite() && h.is_finite() {
+                    content_bottom = content_bottom.max(y + h);
+                }
+            }
+            if content_bottom.is_finite() && content_bottom > 0.0 {
+                (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT)
+            } else {
+                1
+            }
         }
-    }
-    let height = if content_bottom.is_finite() && content_bottom > 0.0 {
-        (content_bottom.ceil() as u32).clamp(1, MAX_PNG_HEIGHT)
-    } else {
-        1
     };
 
     // Packet bg-image: the `background-image` fetch+decode pre-pass, same
@@ -766,15 +836,24 @@ fn build_dump_png_render(source: &str, no_bg_images: bool, scheme: style::ColorS
 /// directory, a hostile/invalid `out_path`).
 #[cfg(test)]
 fn write_dump_png(source: &str, out_path: &str) -> Result<(), String> {
-    write_dump_png_opts(source, out_path, false, style::ColorScheme::Light, false)
+    write_dump_png_opts(source, out_path, false, style::ColorScheme::Light, false, None)
 }
 
 /// [`write_dump_png`]'s real implementation, parameterized over
 /// `no_bg_images`/`scheme`/`stamp` — see [`dump_png_opts`]'s doc comment for
 /// the same wrapper-over-parameterized-impl rationale and the
-/// packet-t1d-httpforever `scheme`/`stamp` wiring specifically.
-fn write_dump_png_opts(source: &str, out_path: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Result<(), String> {
-    let bytes = dump_png_opts(source, no_bg_images, scheme, stamp);
+/// packet-t1d-httpforever `scheme`/`stamp` wiring specifically — and, as of
+/// packet/fixed-viewport, `viewport_height` (see [`build_dump_png_render`]'s
+/// own doc comment).
+fn write_dump_png_opts(
+    source: &str,
+    out_path: &str,
+    no_bg_images: bool,
+    scheme: style::ColorScheme,
+    stamp: bool,
+    viewport_height: Option<u32>,
+) -> Result<(), String> {
+    let bytes = dump_png_opts(source, no_bg_images, scheme, stamp, viewport_height);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
@@ -807,12 +886,18 @@ const CHROME_WINDOW_HEIGHT: u32 = 600;
 /// URL — rather than falling back to a bare [`blank_png`]; `chrome::draw`
 /// itself is total over any URL/status string (see its own doc comment), so
 /// there is nothing here that can panic on a hostile `source`.
-fn dump_png_chrome_opts(source: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Vec<u8> {
+fn dump_png_chrome_opts(
+    source: &str,
+    no_bg_images: bool,
+    scheme: style::ColorScheme,
+    stamp: bool,
+    viewport_height: Option<u32>,
+) -> Vec<u8> {
     let win_w = DEFAULT_PNG_WIDTH;
     let win_h = CHROME_WINDOW_HEIGHT;
     let lay = chrome::layout(win_w, win_h);
 
-    let render = build_dump_png_render(source, no_bg_images, scheme, stamp);
+    let render = build_dump_png_render(source, no_bg_images, scheme, stamp, viewport_height);
     let final_url = match &render {
         Some(r) => r.final_url.as_str().to_string(),
         None => resolve_url(source).as_str().to_string(),
@@ -863,8 +948,15 @@ fn dump_png_chrome_opts(source: &str, no_bg_images: bool, scheme: style::ColorSc
 /// "render is total, only the filesystem write can fail" contract
 /// [`write_dump_png_opts`] has, just calling [`dump_png_chrome_opts`]
 /// instead of [`dump_png_opts`].
-fn write_dump_png_chrome_opts(source: &str, out_path: &str, no_bg_images: bool, scheme: style::ColorScheme, stamp: bool) -> Result<(), String> {
-    let bytes = dump_png_chrome_opts(source, no_bg_images, scheme, stamp);
+fn write_dump_png_chrome_opts(
+    source: &str,
+    out_path: &str,
+    no_bg_images: bool,
+    scheme: style::ColorScheme,
+    stamp: bool,
+    viewport_height: Option<u32>,
+) -> Result<(), String> {
+    let bytes = dump_png_chrome_opts(source, no_bg_images, scheme, stamp, viewport_height);
     std::fs::write(out_path, bytes).map_err(|e| format!("{e}"))
 }
 
@@ -2461,9 +2553,23 @@ fn main() {
             // PNG; plain `--dump-png` (the default, every existing golden)
             // takes the unchanged path below.
             let result = if args.chrome {
-                write_dump_png_chrome_opts(&source, &out_path, args.no_bg_images, args.color_scheme, args.color_scheme_given)
+                write_dump_png_chrome_opts(
+                    &source,
+                    &out_path,
+                    args.no_bg_images,
+                    args.color_scheme,
+                    args.color_scheme_given,
+                    args.viewport_height,
+                )
             } else {
-                write_dump_png_opts(&source, &out_path, args.no_bg_images, args.color_scheme, args.color_scheme_given)
+                write_dump_png_opts(
+                    &source,
+                    &out_path,
+                    args.no_bg_images,
+                    args.color_scheme,
+                    args.color_scheme_given,
+                    args.viewport_height,
+                )
             };
             if let Err(e) = result {
                 eprintln!("stele: --dump-png failed: {e}");
@@ -2685,6 +2791,28 @@ mod tests {
         assert_eq!(a.cols, DEFAULT_COLS);
     }
 
+    // ---- packet/fixed-viewport: --viewport-height CLI parsing -----------
+
+    #[test]
+    fn parse_args_reads_viewport_height() {
+        let a = parse_args(&args(&["--headless", "--dump-png", "x.html", "out.png", "--viewport-height", "600"]));
+        assert_eq!(a.viewport_height, Some(600));
+    }
+
+    #[test]
+    fn parse_args_viewport_height_defaults_to_none_when_absent() {
+        let a = parse_args(&args(&["--headless", "--dump-png", "x.html", "out.png"]));
+        assert_eq!(a.viewport_height, None);
+    }
+
+    #[test]
+    fn parse_args_viewport_height_missing_or_non_numeric_value_is_a_no_op_not_a_panic() {
+        let a = parse_args(&args(&["--viewport-height"]));
+        assert_eq!(a.viewport_height, None);
+        let a2 = parse_args(&args(&["--viewport-height", "not-a-number"]));
+        assert_eq!(a2.viewport_height, None);
+    }
+
     // ---- T1b: --color-scheme CLI parsing --------------------------------
 
     #[test]
@@ -2827,15 +2955,15 @@ mod tests {
         // path must be byte-identical to the pre-t1d two-argument call --
         // same rationale as dump_text's own
         // `color_scheme_default_does_not_stamp_and_matches_the_pre_t1b_golden_path`.
-        let via_opts = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false);
+        let via_opts = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, None);
         let golden: &[u8] = include_bytes!("../goldens/basic.png");
         assert_eq!(via_opts.as_slice(), golden, "the default (unstamped, Light) PNG path must not have changed");
     }
 
     #[test]
     fn dump_png_color_scheme_dark_stamped_changes_the_rendered_pixels() {
-        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false);
-        let dark = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true);
+        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false, None);
+        let dark = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None);
         assert_ne!(light, dark, "--color-scheme dark (stamped) must change which paragraphs paint, hence the PNG bytes");
 
         let (_, light_h) = decode_png_dims(&light);
@@ -2849,8 +2977,8 @@ mod tests {
         // attribute stamp) are independently wired on the pixel path too --
         // mirrors dump_text's own
         // `color_scheme_dark_without_stamping_only_affects_media_queries_not_attribute_selectors`.
-        let dark_no_stamp = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, false);
-        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false);
+        let dark_no_stamp = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, false, None);
+        let light = dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Light, false, None);
         assert_ne!(dark_no_stamp, light, "prefers-color-scheme is scheme-driven independent of stamping, so the render must still differ");
     }
 
@@ -2859,9 +2987,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("stele-write-dump-png-color-scheme-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let out = dir.join("dark.png");
-        write_dump_png_opts("fixtures/color-scheme.html", &out.to_string_lossy(), false, style::ColorScheme::Dark, true).expect("write should succeed");
+        write_dump_png_opts("fixtures/color-scheme.html", &out.to_string_lossy(), false, style::ColorScheme::Dark, true, None).expect("write should succeed");
         let on_disk = std::fs::read(&out).expect("png should be written");
-        assert_eq!(on_disk, dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true));
+        assert_eq!(on_disk, dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2997,6 +3125,52 @@ mod tests {
         assert!(a.chrome);
     }
 
+    // packet/fixed-viewport final review: `--viewport-height` inline within
+    // `--dump-png`'s <src> <out> stretch must not get mis-parsed as a
+    // positional (the footgun this fix closes).
+
+    #[test]
+    fn parse_args_dump_png_viewport_height_before_src_sets_flag_and_positionals() {
+        let a = parse_args(&args(&["--dump-png", "--viewport-height", "120", "fixtures/basic.html", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert_eq!(a.viewport_height, Some(120));
+    }
+
+    #[test]
+    fn parse_args_dump_png_chrome_and_viewport_height_before_src_sets_both_and_positionals() {
+        let a = parse_args(&args(&[
+            "--dump-png",
+            "--chrome",
+            "--viewport-height",
+            "90",
+            "fixtures/basic.html",
+            "/tmp/out.png",
+        ]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert!(a.chrome);
+        assert_eq!(a.viewport_height, Some(90));
+    }
+
+    #[test]
+    fn parse_args_dump_png_viewport_height_after_out_still_sets_flag_and_positionals() {
+        let a = parse_args(&args(&[
+            "--dump-png",
+            "fixtures/basic.html",
+            "/tmp/out.png",
+            "--viewport-height",
+            "120",
+        ]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert_eq!(a.viewport_height, Some(120));
+    }
+
+    #[test]
+    fn parse_args_dump_png_no_viewport_height_leaves_it_none() {
+        let a = parse_args(&args(&["--dump-png", "fixtures/basic.html", "/tmp/out.png"]));
+        assert_eq!(a.dump_png, Some(("fixtures/basic.html".to_string(), "/tmp/out.png".to_string())));
+        assert_eq!(a.viewport_height, None);
+    }
+
     fn decode_png_dims(bytes: &[u8]) -> (u32, u32) {
         let decoder = png::Decoder::new(bytes);
         let reader = decoder.read_info().expect("dump_png must always produce a valid PNG");
@@ -3103,6 +3277,26 @@ mod tests {
         assert!(h > 0, "content-driven height should be nonzero for a real document");
     }
 
+    /// packet/fixed-viewport: `--viewport-height` opts `--dump-png` into the
+    /// fixed-viewport layout path (`layout::layout_viewport`) — the encoded
+    /// PNG's height is the requested window height, not the content-driven
+    /// height the default (no-flag) path above produces. `fixtures/
+    /// basic.html`'s default content height is well over 10px, so a 10px
+    /// window genuinely exercises the clamp rather than coincidentally
+    /// matching it.
+    #[test]
+    fn dump_png_with_viewport_height_clamps_the_encoded_png_to_the_requested_height() {
+        let default_bytes = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, None);
+        let (_, default_h) = decode_png_dims(&default_bytes);
+        assert!(default_h > 10, "fixture must be taller than the clamp under test for this to be meaningful");
+
+        let clamped_bytes = dump_png_opts("fixtures/basic.html", false, style::ColorScheme::Light, false, Some(10));
+        assert!(clamped_bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        let (w, h) = decode_png_dims(&clamped_bytes);
+        assert_eq!(w, DEFAULT_PNG_WIDTH);
+        assert_eq!(h, 10);
+    }
+
     // -------------------------------------------------------- bg-image (--no-bg-images)
 
     #[test]
@@ -3138,8 +3332,8 @@ mod tests {
     /// red tile pixels.
     #[test]
     fn no_bg_images_flag_produces_a_distinct_image_free_render() {
-        let with_images = dump_png_opts("fixtures/bg-image.html", false, style::ColorScheme::Light, false);
-        let without_images = dump_png_opts("fixtures/bg-image.html", true, style::ColorScheme::Light, false);
+        let with_images = dump_png_opts("fixtures/bg-image.html", false, style::ColorScheme::Light, false, None);
+        let without_images = dump_png_opts("fixtures/bg-image.html", true, style::ColorScheme::Light, false, None);
 
         assert_ne!(with_images, without_images, "--no-bg-images must change the render");
 

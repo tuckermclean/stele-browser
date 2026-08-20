@@ -158,3 +158,17 @@ pub fn layout(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
     let font = crate::text::BitmapFont::vga_8x16();
     block::layout_tree(root, viewport, &font)
 }
+
+/// [`layout`]'s opt-in fixed-viewport sibling (packet/fixed-viewport, design
+/// doc `docs/superpowers/specs/2026-08-20-fixed-viewport-design.md`): lays
+/// `root` out at a FIXED `viewport.h`, not just the content-driven height
+/// `layout` always uses — so `html { overflow: hidden }` (P5's clip
+/// machinery) clips the document's descendants into a `viewport.w` x
+/// `viewport.h` window instead of the default content-height sprawl. `layout`
+/// itself is completely untouched by this addition (same `block::layout_tree`
+/// call, same behavior, every existing golden byte-identical) — this calls
+/// the new `block::layout_tree_viewport` instead.
+pub fn layout_viewport(root: &LayoutNode, viewport: Size) -> Vec<Fragment> {
+    let font = crate::text::BitmapFont::vga_8x16();
+    block::layout_tree_viewport(root, viewport, &font)
+}

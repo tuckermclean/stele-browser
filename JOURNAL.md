@@ -1547,3 +1547,19 @@ Append-only running log. Newest at the bottom.
 - **Size:** the i486 binary is **1,287,324 bytes** (`stele-i486`), **+4,096 B (+0.32 %)** vs P7's 1,283,228 --
   **87.30 % of the 1.44 MB floppy** (187,236 B headroom).
 - The rock now looks like a browser.
+
+## 2026-08-20 -- Fixed-viewport render mode (windowed render; Acid2 face still needs positioning fidelity)
+
+- **Landed** an opt-in fixed-viewport render: `layout_viewport` clamps the document root to the viewport
+  height (symmetric to the existing width clamp) so `html{overflow:hidden}` (P5) clips content into a window
+  instead of the default content-height sprawl; exposed as `--dump-png --viewport-height N` (sizes the canvas
+  to N). Default render is byte-identical (opt-in). See DECISIONS D63.
+- **Verified:** `viewport-clip.png` -- a tall red+blue `html{overflow:hidden}` doc at `--viewport-height 120`
+  renders 800x120 with the red box clipped to 200x120 and the blue box clipped away.
+- **Honest Acid2 measurement:** `acid2.html` at `--viewport-height 600` clamps+clips to 800x600, but the
+  clipped viewport shows only Acid2's intro text -- the positioned face resolves BELOW the viewport in our
+  engine and is clipped away, so the smiley still does not compose. The remaining gap is positioning fidelity
+  (containing-block resolution for the face + the D55 fixed-anchoring deferral), not the viewport clamp. No
+  false golden, no false pass (D61 updated in D63).
+- **Size:** i486 = **1,287,324 bytes**, **+0 B (+0.00 %)** vs 1,287,324 -- **87.30 %** of the floppy
+  (187,236 B headroom).

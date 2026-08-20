@@ -6,10 +6,11 @@
 use std::rc::Rc;
 
 use stele::img::RgbaImage;
-use stele::layout::{layout, BoxContent, Fragment, FragmentKind, LayoutNode, Size};
+use stele::layout::{layout, layout_viewport, BoxContent, Fragment, FragmentKind, LayoutNode, Point, Rect, Size};
 use stele::style::computed::{
     BorderSide, BorderStyle, Dimension, Display, Edges, FlexDirection, Float, GridRepetitionCount,
-    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, Position, ZIndex,
+    GridTemplateComponent, GridTrack, GridTrackSize, LengthPercentage, LengthPercentageAuto, Overflow, Position,
+    ZIndex,
 };
 use stele::style::ComputedStyle;
 
@@ -444,6 +445,68 @@ fn zero_and_negative_viewport_do_not_panic() {
         // total: never panics, and always yields at least the root box.
         assert!(!fragments.is_empty());
     }
+}
+
+// -----------------------------------------------------------------------
+// packet/fixed-viewport: `layout_viewport` (`docs/superpowers/specs/
+// 2026-08-20-fixed-viewport-design.md`) opts the document root into a
+// FIXED viewport height (clamped, mirroring the always-on width clamp)
+// instead of `layout`'s default content-driven height. `layout` itself
+// must stay completely unaffected -- these three tests pin both halves of
+// that contract plus the `overflow:hidden` clip it unlocks.
+// -----------------------------------------------------------------------
+
+/// A tree taller than the viewport it's laid out into: three stacked
+/// fixed-height children, each 100px tall (300px total), well past the
+/// 120px viewport height used below.
+fn tall_tree() -> LayoutNode {
+    let mut child_style = block_style();
+    child_style.height = Dimension::Px(100.0);
+    container(block_style(), vec![leaf_container(child_style.clone()), leaf_container(child_style.clone()), leaf_container(child_style)])
+}
+
+#[test]
+fn layout_viewport_clamps_the_root_fragment_height_to_the_given_viewport_height() {
+    let fragments = layout_viewport(&tall_tree(), Size { w: 200.0, h: 120.0 });
+    let boxes = box_fragments(&fragments);
+    // boxes[0] is the root's own Box fragment (painted first, per `emit`'s
+    // paint-ordering) -- its border-box height is pinned to the viewport,
+    // NOT the 300px its three 100px children would otherwise force.
+    assert_eq!(boxes[0].rect.size.h, 120.0);
+}
+
+#[test]
+fn layout_content_height_on_the_same_tall_tree_still_grows_to_content() {
+    // Same tree, same viewport height, but through the ordinary
+    // content-height `layout` entry point: unchanged from before this
+    // packet -- the root grows to fit all three 100px children instead of
+    // clamping to the 120px viewport.
+    let fragments = layout(&tall_tree(), Size { w: 200.0, h: 120.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes[0].rect.size.h, 300.0);
+}
+
+#[test]
+fn layout_viewport_with_overflow_hidden_root_clips_a_taller_child() {
+    let mut root_style = block_style();
+    root_style.overflow = Overflow::Hidden;
+    let mut child_style = block_style();
+    child_style.height = Dimension::Px(300.0);
+    let root = container(root_style, vec![leaf_container(child_style)]);
+
+    let fragments = layout_viewport(&root, Size { w: 200.0, h: 120.0 });
+    let boxes = box_fragments(&fragments);
+    assert_eq!(boxes.len(), 2);
+    // The root itself is never clipped by its OWN `overflow:hidden` (see
+    // `Fragment::clip`'s own doc comment) -- only its child is.
+    assert_eq!(boxes[0].clip, None);
+    let clip = boxes[1].clip.expect("child of an overflow:hidden root must carry a clip");
+    // The clip is the root's own (viewport-clamped) border box: 200 wide,
+    // 120 tall -- the taller (300px) child is clipped INTO that window, not
+    // sized down to it (its own rect is still 300 tall; `clip` is what a
+    // painter intersects against, not a layout-time resize).
+    assert_eq!(clip, Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 200.0, h: 120.0 } });
+    assert_eq!(boxes[1].rect.size.h, 300.0);
 }
 
 #[test]
