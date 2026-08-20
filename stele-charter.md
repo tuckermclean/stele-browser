@@ -75,7 +75,9 @@ converge, not grow.
       on taffy's native Position/inset (Acid2 Packet 1); z-index +
       CSS 2.1 Appendix-E stacking/paint order (Acid2 Packet 2);
       generated content -- ::before/::after pseudo-elements + the content
-      property (string/empty/url) (Acid2 Packet 3). Still
+      property (string/empty/url) (Acid2 Packet 3);
+      the data: URI scheme -- data:[<mediatype>][;base64],<data>, decoded
+      in-process (base64/percent, no dependency) (Acid2 Packet 4). Still
       candidates: <details>/
       <summary> interactive toggle (rendered as blocks today), MathML,
       static SVG. The dialect ships as a versioned one-page document:

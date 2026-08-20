@@ -1459,3 +1459,18 @@ Append-only running log. Newest at the bottom.
   1,275,036 — **86.75 % of the 1.44 MB floppy** (195,428 B headroom).
 - **Acid2 progress:** the face can now grow generated boxes. Still ahead (Packets 4–7): `data:` URIs,
   min/max/overflow/background-position, `<object>` fallback, then final assembly + the smiley golden.
+
+## 2026-08-20 -- Acid2 Packet 4: the data: URI scheme
+
+- **Landed** `data:[<mediatype>][;base64],<data>` as a new `fetch::fetch` scheme arm (`src/fetch/data.rs`):
+  parsed from `Url::as_str()` (opaque content preserved), base64/percent-decoded by in-repo decoders (no new
+  dependency), returning bytes + a `content-type` header the existing image decoders consume. Malformed URLs
+  return `FetchError::Protocol` (total, no panic). See DECISIONS D58.
+- **Verified:** unit tests (base64 with/without padding + whitespace + invalid=>Err via `TWFu`->`Man`,
+  `TWE=`->`Ma`, `TQ==`->`M`; percent-decode; end-to-end `data:` fetch of text + image URLs; malformed=>Err).
+  Golden `data-img.html` (`<img src="data:image/png;base64,...">`) renders a 16x16 red square at (8,8) --
+  pixel-verified the data: image decodes end-to-end.
+- **Size:** the i486 binary is **1,279,132 bytes** (`stele-i486` artifact), **+0 B (+0.00 %)** vs P3's
+  1,279,132 -- **86.75 % of the 1.44 MB floppy** (195,428 B headroom).
+- **Acid2 progress:** embedded `data:` images now decode. Still ahead (Packets 5-7): min/max/overflow/
+  background-position, `<object>` fallback, then final assembly + the smiley golden.
