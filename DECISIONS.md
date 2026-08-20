@@ -3,6 +3,20 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Networking — data: URI scheme (Acid2 Packet 4)
+
+### D58 -- data: served as one fetch::fetch arm with in-repo base64/percent decoders
+Acid2 embeds images via `url(data:...)`. **Options:** (a) add a base64 crate; (b) a bespoke in-repo decoder.
+**Choice: (b)** -- the 1.44 MB floppy forbids a dependency for ~60 lines of decoder. `src/fetch/data.rs`
+parses `data:[<mediatype>][;base64],<data>` straight from `Url::as_str()` (the opaque data: content survives
+verbatim -- the generic path-splitter is bypassed), decodes base64 (whitespace-skipping, `=`-terminated,
+total -- invalid alphabet => `Err`) or percent-encoding, and returns a `Response { 200, content-type header,
+body }` that the existing `img::decode_bytes` consumes. Wired as one `"data" =>` arm in `fetch::fetch`'s scheme
+match -- every driver-level fetch (images, and CSS `url(data:)` if it routes through fetch) gets it at once.
+**Totality:** a malformed data: URL (no comma, not `data:`, bad base64) returns `FetchError::Protocol`, never
+panics. Golden-safe: a document with no data: URL is unaffected. **Deferred:** charset transcoding of `text/*`
+data (bytes passed through as-is); mediatype-parameter parsing beyond `;base64` + charset default.
+
 ## Style — generated content (::before/::after, Acid2 Packet 3)
 
 ### D57 — generated content via a second `cascade_pseudo` walk + box-tree synthesis
