@@ -114,10 +114,22 @@ const MAX_CELL_H: usize = 32;
 /// comment for why storage stays byte-tight while this API stays simple).
 /// Only the first `cell_h` entries of `rows` are meaningful; the rest are
 /// zero padding up to [`MAX_CELL_H`].
+///
+/// `ascent` is the bucket's pinned ascent (from [`METRICS`], same value
+/// [`Metrics::ascent`] returns for the snapped size) carried alongside the
+/// bitmap so a renderer holding only a `Glyph` — not the `size_px` it was
+/// looked up with — can still place it correctly: row `ascent` is the
+/// baseline row, so the glyph's top-left belongs at `baseline - ascent`, NOT
+/// `baseline - cell_h` (that old font8x8-era formula only happened to work
+/// because font8x8's 8-row atlas was smaller than its 16-row cell; Terminus's
+/// bitmaps encode a real ascent/descent split, `ascent + descent == cell_h`).
+/// Cast to `u8` losslessly: every [`METRICS`] ascent is a whole-pixel integer
+/// (10/12/16/19/26).
 #[derive(Debug, Clone, Copy)]
 pub struct Glyph {
     pub cell_w: u8,
     pub cell_h: u8,
+    pub ascent: u8,
     pub rows: [u16; MAX_CELL_H],
 }
 
@@ -148,7 +160,8 @@ impl TerminusFont {
                 }
             }
         }
-        Glyph { cell_w: g.cell_w, cell_h: g.cell_h, rows }
+        let ascent = METRICS[bucket_of(snapped)].0 as u8;
+        Glyph { cell_w: g.cell_w, cell_h: g.cell_h, ascent, rows }
     }
 }
 

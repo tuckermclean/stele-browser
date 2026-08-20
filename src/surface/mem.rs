@@ -209,15 +209,27 @@ const MAX_CELL_W: i32 = 16;
 const MAX_CELL_H: i32 = 32;
 
 impl MemSurface {
-    /// Paint one glyph's lit pixels in `color`, with its bottom row sitting
-    /// exactly on `baseline` — i.e. the glyph's `cell_h`-pixel-tall bounding
-    /// box spans `[baseline - cell_h, baseline)` vertically and
+    /// Paint one glyph's lit pixels in `color`, with row `ascent` (the
+    /// bucket's pinned ascent, carried on the glyph itself — see
+    /// `terminus::Glyph::ascent`'s doc comment) sitting exactly on
+    /// `baseline` — i.e. the glyph's `cell_h`-pixel-tall bounding box spans
+    /// `[baseline - ascent, baseline - ascent + cell_h)` vertically and
     /// `[x0, x0 + cell_w)` horizontally. Terminus's embedded bitmaps are
     /// already at their real, native target size once `TerminusFont::glyph`
     /// has snapped `size_px` to a bucket — unlike font8x8 (always an 8x8
     /// source, nearest-neighbor-scaled to fit `size_px`), there is no
     /// upscale/downscale left to do here: this is a straight 1:1 copy of
     /// `glyph.rows`.
+    ///
+    /// Review fix (code review on packet/terminus-font, the blocker):
+    /// placing the glyph at `baseline - cell_h` (the old font8x8-era
+    /// formula) only worked for font8x8 because its 8-row glyph atlas was
+    /// smaller than its 16-row cell. Terminus's bitmaps encode a real
+    /// ascent/descent split INSIDE `cell_h` (`ascent + descent == cell_h`
+    /// at every bucket) — anchoring on `cell_h` instead of `ascent` shifted
+    /// every glyph up by `descent` px, so descenders (g, y, p, q, j) never
+    /// dipped below the baseline and clipped contexts lost their top
+    /// `descent` rows.
     ///
     /// Review fix (Important #1, carried forward from the font8x8-era
     /// implementation): compute the glyph's screen-space bounding box up
@@ -231,7 +243,7 @@ impl MemSurface {
         if w_px <= 0 || h_px <= 0 {
             return;
         }
-        let y0 = baseline - h_px as f32;
+        let y0 = baseline - glyph.ascent as f32;
         if !x0.is_finite() || !y0.is_finite() {
             return;
         }
@@ -341,9 +353,13 @@ mod tests {
         // size_px == 16.0 snaps to Terminus's 16px bucket (an 8x16 cell) --
         // the WHOLE cell is the glyph's own native size now (unlike
         // font8x8's 8x8-source-inside-a-16-tall-cell), so this is a
-        // straight 1:1 copy, no scaling. The glyph's bottom row sits exactly
-        // on `baseline` (mem.rs draw_text/draw_glyph's placement rule), so
-        // its pixel box spans `[baseline - 16, baseline)` vertically and
+        // straight 1:1 copy, no scaling. The glyph's row `ascent` (NOT its
+        // bottom row) sits exactly on `baseline` -- code review fix on
+        // packet/terminus-font: `terminus::METRICS[1]` (the 16px bucket) is
+        // `(ascent=12.0, descent=4.0, ...)`, so the box's top-left is
+        // `baseline - ascent = 16 - 12 = 4`, not `baseline - cell_h = 0`
+        // (the old, wrong font8x8-era formula this test used to assert).
+        // Its pixel box spans `[4, 4 + 16) = [4, 20)` vertically and
         // `[x, x + 8)` horizontally.
         let mut s = MemSurface::new(20, 20, Color::WHITE);
         let run = TextRun { text: "A", x: 4, baseline: 16, size_px: 16.0, color: Color::BLACK, weight: FontWeight::Normal };
@@ -351,7 +367,7 @@ mod tests {
 
         for y in 0..20 {
             for x in 0..20 {
-                let expect_lit = a_glyph_lit(x, y, 4, 16 - 16);
+                let expect_lit = a_glyph_lit(x, y, 4, 16 - 12);
                 let got = px(&s, x, y);
                 if expect_lit {
                     assert_eq!(got, (0, 0, 0, 255), "expected glyph pixel lit at ({x},{y})");
@@ -403,10 +419,16 @@ mod tests {
         let run = TextRun { text: "A", x: 2, baseline: 32, size_px: 32.0, color: Color::BLACK, weight: FontWeight::Normal };
         s.draw_text(&run);
 
+        // Code review fix on packet/terminus-font: the box's top-left (y0)
+        // is `baseline - ascent`, not `baseline - cell_h`. The 32px
+        // bucket's ascent is 26.0 (`terminus::METRICS[4]`), so
+        // y0 = 32 - 26 = 6 (not 0, the old wrong-formula value) -- glyph
+        // row `y` (0-indexed into `A32`) lands at surface row `6 + y`.
+        const Y0: i32 = 6;
         for (y, &row) in A32.iter().enumerate() {
             for x in 0..16u32 {
                 let expect_lit = (row >> x) & 1 != 0;
-                let got = px(&s, 2 + x as i32, y as i32);
+                let got = px(&s, 2 + x as i32, Y0 + y as i32);
                 if expect_lit {
                     assert_eq!(got, (0, 0, 0, 255), "expected lit pixel at glyph-relative ({x},{y})");
                 } else {
@@ -521,9 +543,13 @@ mod tests {
         let red = Color::rgb(200, 10, 10);
         s.draw_text(&TextRun { text: "A", x: 4, baseline: 16, size_px: 16.0, color: red, weight: FontWeight::Normal });
         // The 'A' glyph's crossbar row (row index 7 of the 16-row cell,
-        // 0x7E) lights columns 1..=6; at x0=4, baseline=16 (box top y0=0)
-        // that's surface column 4+1=5, row 7.
-        assert_eq!(px(&s, 5, 7), (200, 10, 10, 255));
+        // 0x7E) lights columns 1..=6. Code review fix on packet/terminus-
+        // font: the box's top-left (y0) is `baseline - ascent`, not
+        // `baseline - cell_h` -- the 16px bucket's ascent is 12.0
+        // (`terminus::METRICS[1]`), so y0 = 16 - 12 = 4, and row 7 lands at
+        // surface row 4 + 7 = 11 (not row 7, the old wrong-formula value).
+        // At x0=4 that's surface column 4+1=5.
+        assert_eq!(px(&s, 5, 11), (200, 10, 10, 255));
     }
 
     /// packet/terminus-font, Task 3 step 2: bold vs. normal at the same
