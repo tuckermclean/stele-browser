@@ -81,8 +81,13 @@ converge, not grow.
       min/max-width/height clamping and overflow:hidden clipping (Acid2
       Packet 5; background-position deferred);
       <object> with its data->nested-fallback cascade -- render the decoded
-      data image, else the fallback children (Acid2 Packet 6). Still
-      candidates: <details>/
+      data image, else the fallback children (Acid2 Packet 6). The seven-
+      packet Acid2 dialect program is COMPLETE: every CSS 2.1 mechanism Acid2
+      exercises is now in the dialect. The test assembles and renders all of
+      them; composing the compact reference smiley is a browser-level concern
+      (a fixed-viewport render clamp so html{overflow:hidden} clips the
+      positioned face into a window), not a dialect gap -- see DECISIONS D61.
+      Still candidates: <details>/
       <summary> interactive toggle (rendered as blocks today), MathML,
       static SVG. The dialect ships as a versioned one-page document:
       "What Stele Speaks."
