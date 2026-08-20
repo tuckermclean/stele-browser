@@ -1563,3 +1563,25 @@ Append-only running log. Newest at the bottom.
   false golden, no false pass (D61 updated in D63).
 - **Size:** i486 = **1,287,324 bytes**, **+0 B (+0.00 %)** vs 1,287,324 -- **87.30 %** of the floppy
   (187,236 B headroom).
+
+## 2026-08-20 -- Acid2 scroll-to-fragment + viewport-anchored `position:fixed`: the smiley composes
+
+- **Landed** `--scroll-to <id>` (paired with `--viewport-height`): a headless render scrolled so an element's
+  padding-top edge sits at the window's y=0 (`layout::find_fragment_top`, reusing `paint_at`'s existing
+  y-offset primitive, D54), plus a fix so `position:fixed` content is anchored to the viewport instead of its
+  DOM parent (`layout::block::emit` threads `viewport_origin`/`viewport_clip`; `paint_at` skips its y-shift,
+  rect AND clip, for `is_fixed` fragments). Together: `--viewport-height 600 --scroll-to top` on
+  `fixtures/acid2.html` **composes the Acid2 smiley** inside the 800x600 window -- overlapping face-colored
+  regions at the top, not the intro-text-only shape D63 documented as failing. Milestone A only: composes,
+  does NOT byte-match the WaSP reference (a later milestone). New golden `goldens/acid2-scrolled.png`, gated
+  by `accept.sh` A5w -- realizes A5t/D61's long-deferred smiley check. See DECISIONS D64.
+- **Re-blessed** `goldens/pos-fixed.png`: the fixed box's Y is now viewport-correct (0, was 8, the UA body
+  margin). **Follow-up, not silently fixed:** its X is `right`-anchored, and this packet reparents only the
+  fixed box's paint origin, not the containing-block WIDTH `right`'s inset resolves against -- so the box
+  lands at `(744,0)`, not the CSS-ideal `(760,0)`. Acid2's own scalp uses `top`/`left` (fully corrected), so
+  the smiley is unaffected; a real fix (resolve `Fixed`'s box fully against the initial containing block, not
+  just its position) is a documented follow-up in D64.
+- **Charter ruling (controller's):** a bugfix to D55 Finding A's already-adopted `position:fixed`
+  approximation, not a new C2 dialect amendment -- no new CSS property, keyword, or element.
+- **Size:** pending CI (this task lands scaffolding only; no local `cargo build` per AGENTS.md -- report the
+  `stele-i486` delta once `m0-acceptance` runs).

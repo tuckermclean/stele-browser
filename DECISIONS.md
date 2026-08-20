@@ -3,6 +3,65 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Layout — scroll-to-fragment render + viewport-anchored `position:fixed`
+
+### D64 — `--scroll-to <id>` + viewport-anchored `position:fixed` compose the Acid2 smiley (Milestone A only)
+D63 diagnosed the fixed-viewport clamp as necessary but not sufficient: nothing ever scrolled the document
+(the face sits ~600-3900px down), and even scrolled, `position:fixed` content was mapped onto taffy's
+`Absolute` and anchored to its DOM parent, not the viewport (D55 Finding A). **Added:** (1) `layout::
+find_fragment_top(fragments, id)` resolves an element `id` to its document-space padding-top edge (a new `id`
+carrier on `LayoutNode`/`Fragment`, populated from `Element.attrs` in `box_tree::build_node`); `--dump-png
+--scroll-to <id>` (gated on `--viewport-height` also being set — scrolling only means something inside a
+fixed window) computes `scroll_y` from it and paints via the existing `raster::paint_at(.., -scroll_y)`
+y-shift primitive (D54) instead of `paint`. An unresolvable id degrades to `scroll_y = 0.0` — no scroll,
+never a panic. (2) `layout::block::emit` gained two read-only parameters, `viewport_origin`/`viewport_clip`
+(computed once in `layout_tree_impl`, threaded unchanged through recursion): a `Fixed` child's `parent_origin`/
+`clip` are swapped for the viewport's instead of its ancestor's at the one recursive call site that emits it,
+so its `Fragment.rect`/`clip` land viewport-true regardless of scroll or DOM nesting depth. `Fragment.is_fixed`
+(threaded as `is_fixed_ctx` so inline/replaced descendants of a fixed container inherit it too, since
+`built_position` alone reports `Static` for those `Built` variants) gates `paint_at`'s y-shift on BOTH the
+fragment's `rect` AND its `clip` — the clip half is the subtle bit: `Fixed`'s `clip` already holds the
+UNSHIFTED viewport rect post-reparent, so shifting it the same way an ordinary fragment's clip shifts would
+clip fixed content against a window that moved, silently swallowing it past a small `scroll_y`.
+**Milestone A goal, explicitly:** the Acid2 smiley COMPOSES inside the 800x600 window (overlapping
+face-colored regions near the top, pixel-measured per AGENTS.md) — this is NOT a byte-match of the WaSP
+reference bitmap; that's a later milestone. New golden `goldens/acid2-scrolled.png`, gated by `accept.sh`'s
+A5w (realizes A5t/D61's deferral).
+
+**CHARTER RULING (controller's):** this is a BUGFIX to D55 Finding A's already-documented approximation
+(`Fixed` anchored to its containing block, not the viewport) — not a new C2 dialect amendment. No new CSS
+property, keyword, or element is introduced; `position:fixed`'s containing-block resolution was already
+adopted under D55, this packet just corrects it and adds a browser-capability (scroll-to-fragment rendering,
+same family as D63's own "reusable, also what the interactive browser wants" framing).
+
+**`goldens/pos-fixed.png` re-bless — honest detail:** the fixed 40x40 box (`fixtures/pos-fixed.html`:
+`position:fixed;top:0;right:0`) moves from `(752,8)` to `(744,0)`, NOT the CSS-ideal `(760,0)` D55's own
+Finding A entry projected. The reparent makes Y viewport-correct (`top:0` → `y=0`, was `y=8` from the UA
+body margin). X is `744`, not `760`: `right`'s offset resolves against the containing block's WIDTH, and this
+packet reparents only the paint ORIGIN a `Fixed` box's `layout.location` was computed against, not the WIDTH
+taffy used to resolve the opposite-side (`right`/`bottom`) inset — that width is still `.picture`'s (or
+whatever DOM ancestor's) content width, not the true viewport width. **Documented limitation, not a
+regression:** right/bottom-anchored `Fixed` elements are viewport-anchored in position-origin but still size
+their inset offset against the old containing block. Follow-up: resolve `Fixed`'s box fully against the
+initial containing block (position AND the insets' sizing basis), not just position. Acid2's own scalp uses
+`top`/`left` (both fully corrected by this packet) — the smiley is unaffected by this gap.
+`goldens/httpforever.light.png`/`.dark.png` are expected unchanged (`.switcher`'s DOM parent already sits at
+the viewport origin, per D55/D63's own ground-truthing) — verify in CI, don't assume.
+
+**Test-infra notes (incidental, worth recording so they don't look like scope creep later):**
+`.cargo/config.toml` now sets `[env] RUST_MIN_STACK = "16777216"` (16 MiB) — the `id` field added to
+`LayoutNode` grew `build_node_inner`'s per-frame size just enough that the `deeply_nested_*` DEPTH_CAP probes
+(which intentionally build DOMs far past the cap, in unoptimized debug test builds) sat right at libtest's
+default ~2 MB per-test-thread stack margin; DEPTH_CAP still fires correctly, this only widens the TEST
+threads so frame-size marginality can't masquerade as a cap failure. Release builds ignore it; production is
+unaffected. Separately, the `main.rs` `--scroll-to` integration tests now write their synthetic HTML fixture
+to a unique `std::env::temp_dir()` subdirectory per call (`stele-scroll-to-<pid>-<seq>`) instead of a shared
+fixed path — parallel `cargo test` threads were racing a write/read on the same file.
+
+**Revisit trigger:** a fixture that needs a `Fixed` element's SIZE (not just position) resolved against the
+true viewport (D55's own Finding B is adjacent — an auto-width positioned flex container collapsing — this is
+the sibling gap for explicit `right`/`bottom`-anchored sizing).
+
 ## Rendering — <object> nested fallback (Acid2 Packet 6)
 
 ## Layout — fixed-viewport render mode

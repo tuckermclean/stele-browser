@@ -1300,8 +1300,10 @@ else
   # ---------------------------------------------------------------------
   # A5t -- Acid2 assembly packet (P7): smoke check only, NOT a pixel golden.
   # Verifies fixtures/acid2.html renders to a non-empty PNG without
-  # crashing. The compact-smiley golden is deferred until a fixed-viewport
-  # render lands -- see DECISIONS D61.
+  # crashing. The compact-smiley golden was deferred until a fixed-viewport
+  # render lands -- see DECISIONS D61 -- and is now REALIZED by A5w (below):
+  # `--viewport-height 600 --scroll-to top` composes the smiley at the
+  # window top -- see DECISIONS D64.
   # ---------------------------------------------------------------------
   FIXTURE_ACID2="fixtures/acid2.html"
   if [ ! -f "$HOST_BIN" ]; then
@@ -1312,7 +1314,7 @@ else
   elif [ ! -s /tmp/stele_acid2.png ]; then
     bad "A5t: acid2.html produced no PNG"
   else
-    pass "A5t: acid2.html renders to a non-empty PNG (smoke check; smiley golden deferred to a fixed-viewport render — see DECISIONS D61)"
+    pass "A5t: acid2.html renders to a non-empty PNG (smoke check; smiley golden realized by A5w — see DECISIONS D61/D64)"
   fi
 
   # ---------------------------------------------------------------------
@@ -1379,6 +1381,38 @@ else
   else
     bad "A5v: viewport-clipped PNG dump of $FIXTURE_VIEWPORT_CLIP differs from $GOLDEN_PNG_VIEWPORT_CLIP"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_VIEWPORT_CLIP") actual=$(wc -c < /tmp/stele_vpclip.png)"
+  fi
+
+  # ---------------------------------------------------------------------
+  # A5w -- Acid2 scrolled-to-#top: `--dump-png --viewport-height 600
+  # --scroll-to top` scrolls the document so #top's padding-top edge sits
+  # at the window's y=0 (layout::find_fragment_top) and paints
+  # position:fixed content anchored to the viewport instead of its DOM
+  # parent (block.rs's viewport_origin/viewport_clip threading; DECISIONS
+  # D64) -- together these compose the Acid2 smiley inside the 800x600
+  # window (Milestone A -- composes, pixel-measured before blessing, NOT a
+  # byte-match of the WaSP reference). Unlike A5u (browser chrome,
+  # host-only), this exercises the document renderer, not the chrome, so it
+  # IS cross-build stable and runs in both host and i486 accept, same as
+  # A5v.
+  # ---------------------------------------------------------------------
+  FIXTURE_ACID2_SCROLL="fixtures/acid2.html"
+  GOLDEN_PNG_ACID2_SCROLL="goldens/acid2-scrolled.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5w: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png "$FIXTURE_ACID2_SCROLL" /tmp/stele_acid2scroll.png --viewport-height 600 --scroll-to top 2>/tmp/stele_acid2scroll.err; then
+    bad "A5w: stele --headless --dump-png crashed on $FIXTURE_ACID2_SCROLL"
+    sed 's/^/    /' /tmp/stele_acid2scroll.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_acid2scroll.png "$GOLDEN_PNG_ACID2_SCROLL"
+    pass "A5w: blessed acid2-scrolled PNG golden -> $GOLDEN_PNG_ACID2_SCROLL (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_ACID2_SCROLL" ]; then
+    bad "A5w: no golden at $GOLDEN_PNG_ACID2_SCROLL to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_ACID2_SCROLL" /tmp/stele_acid2scroll.png; then
+    pass "A5w: Acid2 scrolled-to-#top: the smiley composes at the window top (Milestone A — composes, pixel-measured before blessing, NOT a byte-match of the WaSP reference)"
+  else
+    bad "A5w: PNG dump of $FIXTURE_ACID2_SCROLL differs from $GOLDEN_PNG_ACID2_SCROLL"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_ACID2_SCROLL") actual=$(wc -c < /tmp/stele_acid2scroll.png)"
   fi
 fi
 
