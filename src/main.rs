@@ -1022,7 +1022,7 @@ fn dump_png_chrome_opts(
     chrome::draw(
         &mut window,
         &lay,
-        &chrome::ChromeState { url: &final_url, status: "Done", loading: false, throbber_frame: 0, can_go_back: false },
+        &chrome::ChromeState { url: &final_url, edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false },
     );
 
     raster::encode_png(&window)
@@ -1727,8 +1727,8 @@ struct X11Stats {
 /// `scroll_y`, which are ALSO mutated around the same call sites (a closure
 /// capturing `history`/`status` by reference would otherwise have to
 /// coexist with those other mutable borrows in scope).
-fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading: bool, throbber_frame: u8) -> chrome::ChromeState<'a> {
-    chrome::ChromeState { url: history.current().as_str(), status, loading, throbber_frame, can_go_back: history.can_go_back() }
+fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading: bool, throbber_frame: u8, edit: Option<(&'a str, usize)>) -> chrome::ChromeState<'a> {
+    chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back() }
 }
 
 /// Whether window-pixel point `(x, y)` falls inside `rect` — half-open on
@@ -1902,7 +1902,7 @@ fn run_x11(source: &str) {
 
     throbber_frame = throbber_frame.wrapping_add(1);
     conn.begin_frame();
-    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
     let _ = conn.end_frame();
     stats.frames += 1;
     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1951,7 +1951,7 @@ fn run_x11(source: &str) {
                         stats.scrolls += 1;
                         throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1969,7 +1969,7 @@ fn run_x11(source: &str) {
                             loading = true;
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1989,7 +1989,7 @@ fn run_x11(source: &str) {
                             loading = false;
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2007,7 +2007,7 @@ fn run_x11(source: &str) {
                         loading = true;
                         throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2027,7 +2027,7 @@ fn run_x11(source: &str) {
                         loading = false;
                         throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2046,7 +2046,7 @@ fn run_x11(source: &str) {
                             loading = true;
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2068,7 +2068,7 @@ fn run_x11(source: &str) {
                             // ConfigureNotify below.
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2084,7 +2084,7 @@ fn run_x11(source: &str) {
                     loading = true;
                     throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2104,7 +2104,7 @@ fn run_x11(source: &str) {
                     loading = false;
                     throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2140,7 +2140,7 @@ fn run_x11(source: &str) {
                     // nothing on screen is safe to retain via CopyArea.
                     throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
