@@ -1991,6 +1991,21 @@ fn run_x11(source: &str) {
                     // click-to-position-cursor).
                     if address_edit.focused && !x11_point_in_rect(lay.address, x, y) {
                         address_edit.blur();
+                        // Redraw right away so a click on DEAD chrome space
+                        // (which none of the branches below act on) still
+                        // visibly reverts the address field to the real
+                        // current URL immediately, not just on the next
+                        // unrelated repaint. A branch below that also acts
+                        // on this same click (back/reload/attest/a document
+                        // link) does its own further redraw(s) on top of
+                        // this one -- harmless, matches this function's
+                        // existing "redraw after every state change" style.
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
                     }
 
                     if x11_point_in_rect(lay.back, x, y) && history.can_go_back() {
