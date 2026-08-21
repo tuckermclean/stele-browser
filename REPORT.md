@@ -105,11 +105,18 @@ in `JOURNAL.md`.
 | `png` (0.17) | PNG decode + encode | MIT / Apache-2.0 |
 | `jpeg-decoder` (0.3, no rayon) | JPEG decode | MIT / Apache-2.0 |
 | `gif` (0.13) | GIF decode | MIT / Apache-2.0 |
-| **font8x8_basic** (embedded atlas, `src/text/glyphs.rs`) | bitmap font | **Public Domain** (github.com/dhepper/font8x8) |
-| **font8x8_ext_latin** (Latin-1 supplement, `src/text/glyphs.rs`, packet t2-glyph-fallback) | bitmap font | **Public Domain** (github.com/dhepper/font8x8) |
+| **Terminus (191-glyph subset)** (embedded atlas, `src/text/terminus_glyphs.rs`, packet #93) | bitmap font | **OFL-1.1** (terminus-font.sourceforge.net; see `third_party/terminus-font/NOTICE.md`) |
 
 All else is `std`. HTTP, CSS, HTML parsing, the inline/table/float/frame
 layout, and the fb backend are bespoke and in-house.
+
+The full runtime dependency roster — every crate above, plus their own
+transitive deps, with real per-crate SPDX ids and license text (not just this
+hand-maintained summary table) — is generated straight from `cargo metadata`
+by `tools/gen-attestations.py` into `src/fetch/attestations_data.rs`, and
+rendered in-binary at `about:attestations` (packet/attestation-modal). Keeping
+this table and that generated roster in sync is a manual step today, not
+automated — flagged, not silently deferred.
 
 ## Deferred, honestly
 
@@ -164,11 +171,18 @@ CLI: `stele [--headless] [--dump-text <src> [--cols N]] [--dump-png <src>
 Stele is free software under **GPL-3.0-or-later** — Copyright (C) 2026 Tucker
 McLean (see `LICENSE`). Use, study, share, and modify it freely; but incorporate
 it into a distributed product and that product must also be GPL-licensed with
-its source available — no closed-source pilfering. Bundled `font8x8` is public
-domain; `taffy`/`png`/`jpeg-decoder`/`gif` are MIT/Apache-2.0 (both compatible
-with GPLv3), so the combined work is validly GPL-3.0.
+its source available — no closed-source pilfering. The bundled Terminus subset
+is OFL-1.1; `taffy`/`png`/`jpeg-decoder`/`gif` and their transitive deps are
+MIT/Apache-2.0/Zlib (all compatible with GPLv3), so the combined work is
+validly GPL-3.0.
+
+This same information — Stele's own license, the full generated dependency
+roster, and Terminus's complete OFL-1.1 text — ships user-facing and in-binary
+at `about:attestations` (packet/attestation-modal): a self-served page, no
+network fetch, reachable from the `--x11` chrome's attestations affordance.
 
 ---
-*Fonts: font8x8_basic (Public Domain). Bespoke soul (in-house): the parser, the
-CSS engine, the inline/table/float/frame layout, the tty & fb backends. The
-rock does not unwind.*
+*Fonts: Terminus (191-glyph subset, OFL-1.1, packet #93 — see
+`third_party/terminus-font/NOTICE.md`). Bespoke soul (in-house): the parser,
+the CSS engine, the inline/table/float/frame layout, the tty & fb backends.
+The rock does not unwind.*

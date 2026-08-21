@@ -1414,6 +1414,37 @@ else
     bad "A5w: PNG dump of $FIXTURE_ACID2_SCROLL differs from $GOLDEN_PNG_ACID2_SCROLL"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_ACID2_SCROLL") actual=$(wc -c < /tmp/stele_acid2scroll.png)"
   fi
+
+  # ---------------------------------------------------------------------
+  # A5x -- about:attestations: `--dump-png about:attestations` renders the
+  # embedded third-party attestation page (Stele's own license, the
+  # generated Cargo dependency/license roster from
+  # src/fetch/attestations_data.rs, and Terminus's OFL-1.1 text), reached
+  # via the new `about:` scheme handler (src/fetch/about.rs) and
+  # resolve_url's `about:` passthrough fix. Unlike A5u (browser chrome,
+  # host-only), this exercises the document renderer on a plain document
+  # source, not the chrome, so it IS cross-build stable and runs in both
+  # host and i486 accept, same as A5v/A5w. The <src> argument here is a
+  # URL, not a fixture file -- resolve_url now passes `about:` URLs
+  # straight through to fetch::fetch, so no fixture file is needed.
+  # ---------------------------------------------------------------------
+  GOLDEN_PNG_ATTEST="goldens/attestations.png"
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5x: host binary still not found at $HOST_BIN"
+  elif ! "$HOST_BIN" --headless --dump-png about:attestations /tmp/stele_attest.png 2>/tmp/stele_attest.err; then
+    bad "A5x: stele --headless --dump-png crashed on about:attestations"
+    sed 's/^/    /' /tmp/stele_attest.err
+  elif [ "$BLESS" = 1 ]; then
+    cp /tmp/stele_attest.png "$GOLDEN_PNG_ATTEST"
+    pass "A5x: blessed attestations PNG golden -> $GOLDEN_PNG_ATTEST (never bless your own render blind — see brief §10)"
+  elif [ ! -f "$GOLDEN_PNG_ATTEST" ]; then
+    bad "A5x: no golden at $GOLDEN_PNG_ATTEST to compare against (run with --bless once accepted)"
+  elif cmp -s "$GOLDEN_PNG_ATTEST" /tmp/stele_attest.png; then
+    pass "A5x: about:attestations renders the embedded third-party attestation page"
+  else
+    bad "A5x: PNG dump of about:attestations differs from $GOLDEN_PNG_ATTEST"
+    note "sizes: golden=$(wc -c < "$GOLDEN_PNG_ATTEST") actual=$(wc -c < /tmp/stele_attest.png)"
+  fi
 fi
 
 if [ "$TTY_ONLY" = 1 ]; then

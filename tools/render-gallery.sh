@@ -280,6 +280,33 @@ if [ -f "$FIXTURES_DIR/acid2.html" ]; then
   fi
 fi
 
+# about:attestations -- the embedded third-party attestation page (Stele's own
+# license, the generated Cargo dependency/license roster, and Terminus's
+# OFL-1.1 text), reached via the `about:` scheme handler. Identical command to
+# accept.sh's A5x gate so this gallery PNG byte-matches what A5x compares. No
+# fixture-file existence check needed -- the <src> is a URL, not a file.
+renders_total=$((renders_total + 1))
+if "$BIN" --headless --dump-png about:attestations "$OUTDIR/attestations.png" 2>/dev/null \
+    && [ -s "$OUTDIR/attestations.png" ]; then
+  renders_ok=$((renders_ok + 1))
+else
+  echo "render-gallery: warning: attestations (about:attestations) render failed" >&2
+  failures=$((failures + 1))
+fi
+
+# Same page as a text dump, so a reviewer can read the roster/license text
+# without opening the PNG. --dump-text writes to stdout, not a positional
+# output path, so redirect fd1 to the .txt file (mirrors render_one's own
+# --dump-text redirection above).
+renders_total=$((renders_total + 1))
+if "$BIN" --headless --dump-text about:attestations >"$OUTDIR/attestations.txt" 2>/dev/null \
+    && [ -s "$OUTDIR/attestations.txt" ]; then
+  renders_ok=$((renders_ok + 1))
+else
+  echo "render-gallery: warning: attestations (about:attestations) --dump-text render failed" >&2
+  failures=$((failures + 1))
+fi
+
 cat >> "$INDEX" <<HTML
 </div>
 </body>

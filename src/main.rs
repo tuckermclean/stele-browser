@@ -371,8 +371,8 @@ fn parse_args(argv: &[String]) -> Args {
 }
 
 /// Resolve a CLI-supplied source into a fetchable [`Url`]: `http://`/
-/// `file://` pass through unchanged; anything else (no recognized scheme,
-/// e.g. `fixtures/basic.html` or `/abs/path.html`) is treated as a local
+/// `file://`/`about:` pass through unchanged; anything else (no recognized
+/// scheme, e.g. `fixtures/basic.html` or `/abs/path.html`) is treated as a local
 /// filesystem path and turned into an absolute `file://` URL — relative
 /// paths are resolved against the current working directory first, since
 /// `fetch::file::file_path` expects `file:///abs/path` shaped input (a bare

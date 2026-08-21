@@ -32,7 +32,7 @@ pub struct ChromeLayout {
     pub top: Rect,
     /// The back-navigation button, a roughly-square box at the left of `top`.
     pub back: Rect,
-    /// The address field, the space between `back` and `throbber`.
+    /// The address field, the space between `back` and `attest`.
     pub address: Rect,
     /// The throbber/load-indicator, a roughly-square box at the right of `top`.
     pub throbber: Rect,
