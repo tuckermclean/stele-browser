@@ -753,6 +753,30 @@ pub enum XIntent {
     Click { x: i16, y: i16 },
     Reload,
     Quit,
+    /// `packet/chrome-address-edit`: an address-bar edit op, produced only
+    /// while the address field is focused (see `classify_x11_intent`'s
+    /// `address_focused` parameter) — carries no chrome/focus state itself,
+    /// just which [`EditIntent`] to apply.
+    Edit(EditIntent),
+}
+
+/// One address-bar edit operation — the focused-address-bar counterpart to
+/// every other `XIntent` variant above, kept as its own enum (rather than
+/// flattening into `XIntent` directly) so `classify_x11_intent`'s focused
+/// vs. unfocused `KeyPress` branches stay easy to read side by side (design
+/// doc §3). `run_x11`'s `AddressEdit` is where each of these actually
+/// mutates state; this enum only carries the classified intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditIntent {
+    Insert(char),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Commit,
+    Cancel,
 }
 
 /// Fold a classified batch: adjacent `ScrollBy` sum into one; adjacent

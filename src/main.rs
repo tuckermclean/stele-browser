@@ -1923,7 +1923,13 @@ fn run_x11(source: &str) {
 
         let intents: Vec<xproto::XIntent> = batch
             .iter()
-            .filter_map(|ev| classify_x11_intent(ev, min_keycode, keysyms_per_keycode, &keysyms, height))
+            // packet/chrome-address-edit, Task 3: `address_focused` is
+            // hardcoded `false` here for now -- Task 6 threads the real
+            // `AddressEdit.focused` through once that struct is wired into
+            // `run_x11`'s own local state (this is the documented, deliberate
+            // interim stub the plan calls for; behavior is unchanged from
+            // before this packet until Task 6 lands).
+            .filter_map(|ev| classify_x11_intent(ev, min_keycode, keysyms_per_keycode, &keysyms, height, false))
             .collect();
 
         let mut quit = false;
@@ -2184,13 +2190,36 @@ fn print_x11_stats(stats: &X11Stats) {
 
 /// Classify one raw [`xproto::XEvent`] into an [`xproto::XIntent`] for
 /// [`xproto::coalesce`] to fold, using the keyboard map fetched once in
-/// `run_x11` (`min_keycode`/`keysyms_per_keycode`/`keysyms`) and the
-/// CURRENT window `height` (needed for `PageUp`/`PageDown`'s scroll delta).
-/// `None` for events that carry no actionable intent (an unmapped keycode,
-/// an unrecognized key, a non-wheel/non-button-1 click, `XEvent::Other`) --
-/// same "silently ignore" behavior the old one-event-at-a-time loop had.
-fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], height: u32) -> Option<stele::backend::x11::XIntent> {
-    use stele::backend::x11::{self as xproto, XEvent, XIntent, X11Key};
+/// `run_x11` (`min_keycode`/`keysyms_per_keycode`/`keysyms`), the CURRENT
+/// window `height` (needed for `PageUp`/`PageDown`'s scroll delta), and
+/// `address_focused` (`packet/chrome-address-edit`, `run_x11`'s own
+/// `AddressEdit.focused`, read fresh per batch — see `run_x11`'s call
+/// site). `None` for events that carry no actionable intent (an unmapped
+/// keycode, an unrecognized key, a non-wheel/non-button-1 click,
+/// `XEvent::Other`) -- same "silently ignore" behavior the old
+/// one-event-at-a-time loop had.
+///
+/// `address_focused == false`: BYTE-IDENTICAL to this function's behavior
+/// before this packet, except one deliberate, flagged side effect —
+/// `state`'s Shift bit (`ShiftMask`, bit 0) is now actually read (it used to
+/// be parsed off the wire and discarded) to select `keysym_for_keycode`'s
+/// column, so **Shift+`q` no longer quits**: column 1 for `q`'s keycode is
+/// `Q` (keysym `0x51`), which doesn't match the `Quit` arm's `X11Key::
+/// Char('q')` pattern. Holding Shift had zero effect before this packet, so
+/// this is a minor correctness fix (Shift now does something), not a
+/// preserved-behavior regression — see the design doc §2/Risks.
+///
+/// `address_focused == true`: the SAME `KeyPress` arm routes to
+/// `XIntent::Edit(EditIntent)` instead — typing `q` inserts a `q` rather
+/// than quitting (the collision this whole packet exists to fix), `Escape`
+/// cancels the edit instead of quitting, `Enter` commits, and the global
+/// scroll/reload/quit shortcuts (`Up`/`Down`/`PageUp`/`PageDown`/`F5`/`q`/
+/// `Escape`) are all swallowed (`None`) rather than leaking through --
+/// typing in the address bar must never scroll the document or reload it
+/// out from under the edit. `Tab` maps to `None` in both states (no
+/// multi-field focus cycling exists yet, design doc §3).
+fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], height: u32, address_focused: bool) -> Option<stele::backend::x11::XIntent> {
+    use stele::backend::x11::{self as xproto, EditIntent, XEvent, XIntent, X11Key};
     match ev {
         XEvent::ButtonPress { button: 4, .. } => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
         XEvent::ButtonPress { button: 5, .. } => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
@@ -2204,9 +2233,32 @@ fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysym
                 Some(XIntent::Resize { w: *width, h: *eh })
             }
         }
-        XEvent::KeyPress { keycode, .. } => {
-            let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms, 0)?;
-            match xproto::keysym_to_key(sym)? {
+        XEvent::KeyPress { keycode, state } => {
+            // ShiftMask (bit 0 of the KeyButMask `state`) selects column 1
+            // -- the one real behavior change from reading `state` at all
+            // (see this function's own doc comment above).
+            let column = if state & 0x0001 != 0 { 1 } else { 0 };
+            let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms, column)?;
+            let key = xproto::keysym_to_key(sym)?;
+
+            if address_focused {
+                return match key {
+                    X11Key::Char(c) => Some(XIntent::Edit(EditIntent::Insert(c))),
+                    X11Key::Backspace => Some(XIntent::Edit(EditIntent::Backspace)),
+                    X11Key::Delete => Some(XIntent::Edit(EditIntent::Delete)),
+                    X11Key::Left => Some(XIntent::Edit(EditIntent::Left)),
+                    X11Key::Right => Some(XIntent::Edit(EditIntent::Right)),
+                    X11Key::Home => Some(XIntent::Edit(EditIntent::Home)),
+                    X11Key::End => Some(XIntent::Edit(EditIntent::End)),
+                    X11Key::Enter => Some(XIntent::Edit(EditIntent::Commit)),
+                    X11Key::Escape => Some(XIntent::Edit(EditIntent::Cancel)),
+                    // Global shortcuts (scroll/reload) and Tab are all
+                    // swallowed while typing -- see doc comment above.
+                    X11Key::Up | X11Key::Down | X11Key::PageUp | X11Key::PageDown | X11Key::F5 | X11Key::Tab => None,
+                };
+            }
+
+            match key {
                 X11Key::Escape | X11Key::Char('q') => Some(XIntent::Quit),
                 X11Key::Up => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
                 X11Key::Down => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
@@ -3142,6 +3194,104 @@ mod tests {
         let url = resolve_url("/abs/path.html");
         assert_eq!(url.scheme(), "file");
         assert_eq!(url.path(), "/abs/path.html");
+    }
+
+    // ---------------------------------------------------- classify_x11_intent
+    // packet/chrome-address-edit, Task 3: a synthetic 2-column keysym table
+    // (min_keycode 8, keysyms_per_keycode 2) covering every key this
+    // function's own doc comment discusses -- column 0 unshifted, column 1
+    // shifted, matching the real GetKeyboardMapping layout Task 2's
+    // `keysym_for_keycode` indexes into.
+
+    /// keycode -> (column 0 keysym, column 1 keysym), row-ordered starting
+    /// at `min_keycode = 8`.
+    fn classify_intent_keymap() -> (u8, u8, Vec<u32>) {
+        let min_keycode = 8u8;
+        let keysyms_per_keycode = 2u8;
+        let rows: Vec<(u32, u32)> = vec![
+            (0x71, 0x51),     // 8: 'q' / 'Q'
+            (0xff1b, 0xff1b), // 9: Escape
+            (0xff52, 0xff52), // 10: Up
+            (0xff54, 0xff54), // 11: Down
+            (0xff55, 0xff55), // 12: PageUp
+            (0xff56, 0xff56), // 13: PageDown
+            (0xffc2, 0xffc2), // 14: F5
+            (0xff0d, 0xff0d), // 15: Enter
+            (0xff08, 0xff08), // 16: Backspace
+            (0xffff, 0xffff), // 17: Delete
+            (0xff51, 0xff51), // 18: Left
+            (0xff53, 0xff53), // 19: Right
+            (0xff50, 0xff50), // 20: Home
+            (0xff57, 0xff57), // 21: End
+            (0xff09, 0xff09), // 22: Tab
+        ];
+        let mut keysyms = Vec::with_capacity(rows.len() * 2);
+        for (a, b) in rows {
+            keysyms.push(a);
+            keysyms.push(b);
+        }
+        (min_keycode, keysyms_per_keycode, keysyms)
+    }
+
+    fn key_press(keycode: u8, shift: bool) -> stele::backend::x11::XEvent {
+        stele::backend::x11::XEvent::KeyPress { keycode, state: if shift { 0x0001 } else { 0x0000 } }
+    }
+
+    #[test]
+    fn classify_x11_intent_unfocused_matches_pre_packet_behavior_exactly() {
+        use stele::backend::x11::XIntent;
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let height = 600u32;
+        let cl = |kc: u8| classify_x11_intent(&key_press(kc, false), min_kc, per_kc, &keysyms, height, false);
+
+        assert_eq!(cl(8), Some(XIntent::Quit), "'q'");
+        assert_eq!(cl(9), Some(XIntent::Quit), "Escape");
+        assert_eq!(cl(10), Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))), "Up");
+        assert_eq!(cl(11), Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)), "Down");
+        assert_eq!(cl(12), Some(XIntent::ScrollBy(-(height as i32))), "PageUp");
+        assert_eq!(cl(13), Some(XIntent::ScrollBy(height as i32)), "PageDown");
+        assert_eq!(cl(14), Some(XIntent::Reload), "F5");
+        assert_eq!(cl(200), None, "unmapped keycode");
+    }
+
+    #[test]
+    fn classify_x11_intent_focused_routes_to_edit_and_q_no_longer_quits() {
+        use stele::backend::x11::{EditIntent, XIntent};
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let height = 600u32;
+        let cl = |kc: u8| classify_x11_intent(&key_press(kc, false), min_kc, per_kc, &keysyms, height, true);
+
+        // The collision fix -- the single most important assertion in this
+        // task (design doc Goal #3): 'q' while focused types, never quits.
+        assert_eq!(cl(8), Some(XIntent::Edit(EditIntent::Insert('q'))), "'q' must insert, not quit, while focused");
+        assert_eq!(cl(9), Some(XIntent::Edit(EditIntent::Cancel)), "Escape cancels, doesn't quit");
+        assert_eq!(cl(15), Some(XIntent::Edit(EditIntent::Commit)), "Enter commits");
+        assert_eq!(cl(16), Some(XIntent::Edit(EditIntent::Backspace)));
+        assert_eq!(cl(17), Some(XIntent::Edit(EditIntent::Delete)));
+        assert_eq!(cl(18), Some(XIntent::Edit(EditIntent::Left)));
+        assert_eq!(cl(19), Some(XIntent::Edit(EditIntent::Right)));
+        assert_eq!(cl(20), Some(XIntent::Edit(EditIntent::Home)));
+        assert_eq!(cl(21), Some(XIntent::Edit(EditIntent::End)));
+
+        // Global shortcuts and Tab are swallowed while typing.
+        assert_eq!(cl(14), None, "F5 must not reload while typing");
+        assert_eq!(cl(10), None, "Up must not scroll while typing");
+        assert_eq!(cl(11), None, "Down must not scroll while typing");
+        assert_eq!(cl(12), None, "PageUp must not scroll while typing");
+        assert_eq!(cl(13), None, "PageDown must not scroll while typing");
+        assert_eq!(cl(22), None, "Tab is a flagged no-op in both states");
+    }
+
+    #[test]
+    fn classify_x11_intent_shift_column_reaches_through_to_edit_insert() {
+        // Proves Task 2's `column` plumbing reaches all the way through this
+        // function, not just unit-tested in isolation at the x11.rs level:
+        // Shift+'q' (state bit 0 set) must look up column 1 ('Q', keysym
+        // 0x51) and, while focused, insert the SHIFTED char.
+        use stele::backend::x11::{EditIntent, XIntent};
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let out = classify_x11_intent(&key_press(8, true), min_kc, per_kc, &keysyms, 600, true);
+        assert_eq!(out, Some(XIntent::Edit(EditIntent::Insert('Q'))));
     }
 
     #[test]
