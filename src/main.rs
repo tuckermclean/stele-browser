@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use stele::backend::address_edit::AddressEdit;
 use stele::backend::chrome;
 use stele::backend::fb;
 use stele::backend::raster;
@@ -1731,6 +1732,20 @@ fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading:
     chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back() }
 }
 
+/// `packet/chrome-address-edit`: the `edit` argument every `x11_chrome_state`
+/// call site now needs -- `Some((live buffer, cursor char-index))` while
+/// `address_edit.focused`, `None` otherwise. A tiny, directly unit-tested
+/// pure function so this plumbing has real CI coverage independent of the
+/// full `run_x11` event loop itself (which stays manual-verify-only, per
+/// this codebase's established "no X server in CI" posture).
+fn x11_edit_arg(address_edit: &AddressEdit) -> Option<(&str, usize)> {
+    if address_edit.focused {
+        Some((address_edit.buffer.as_str(), address_edit.cursor))
+    } else {
+        None
+    }
+}
+
 /// Whether window-pixel point `(x, y)` falls inside `rect` — half-open on
 /// the right/bottom edges (`x < rect.x + rect.w`), matching every other
 /// `Rect` hit-test convention in this codebase. Used to test an `XIntent::
@@ -1875,6 +1890,14 @@ fn run_x11(source: &str) {
     let mut loading = false;
     let mut throbber_frame: u8 = 0;
 
+    // packet/chrome-address-edit: the address bar's own edit-buffer state
+    // (focus/buffer/cursor) -- a pure `AddressEdit`, mutated directly by the
+    // new `XIntent::Edit` match arm below and read by every
+    // `x11_chrome_state`/`classify_x11_intent` call site (via `edit_arg`/
+    // `address_edit.focused`) so the chrome always reflects whatever's
+    // currently being typed.
+    let mut address_edit = AddressEdit::default();
+
     let mut scroll_y: u32 = 0;
     let (mut session, mut state) = match load_x11_page(history.current(), width) {
         Ok(v) => v,
@@ -1902,7 +1925,7 @@ fn run_x11(source: &str) {
 
     throbber_frame = throbber_frame.wrapping_add(1);
     conn.begin_frame();
-    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
     let _ = conn.end_frame();
     stats.frames += 1;
     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1923,13 +1946,10 @@ fn run_x11(source: &str) {
 
         let intents: Vec<xproto::XIntent> = batch
             .iter()
-            // packet/chrome-address-edit, Task 3: `address_focused` is
-            // hardcoded `false` here for now -- Task 6 threads the real
-            // `AddressEdit.focused` through once that struct is wired into
-            // `run_x11`'s own local state (this is the documented, deliberate
-            // interim stub the plan calls for; behavior is unchanged from
-            // before this packet until Task 6 lands).
-            .filter_map(|ev| classify_x11_intent(ev, min_keycode, keysyms_per_keycode, &keysyms, height, false))
+            // packet/chrome-address-edit: `address_edit.focused`, read fresh
+            // every batch, is what makes `q`/`Escape`/arrows/`F5` route to
+            // Edit ops instead of the global shortcuts while typing.
+            .filter_map(|ev| classify_x11_intent(ev, min_keycode, keysyms_per_keycode, &keysyms, height, address_edit.focused))
             .collect();
 
         let mut quit = false;
@@ -1951,7 +1971,7 @@ fn run_x11(source: &str) {
                         stats.scrolls += 1;
                         throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                        x11_scroll_to(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, old, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1959,6 +1979,20 @@ fn run_x11(source: &str) {
                 }
                 xproto::XIntent::Click { x, y } => {
                     let lay = chrome::layout(width, height);
+
+                    // packet/chrome-address-edit: "blur first, then act" --
+                    // a click ANYWHERE outside the address field while it's
+                    // focused cancels the in-progress edit (no commit, no
+                    // navigation) before whatever that click normally does
+                    // (back/reload/attest/a document link, or dead chrome
+                    // space) runs below. A click INSIDE the address field
+                    // while already focused is handled by the dedicated
+                    // focus branch further down (a no-op for this MVP -- no
+                    // click-to-position-cursor).
+                    if address_edit.focused && !x11_point_in_rect(lay.address, x, y) {
+                        address_edit.blur();
+                    }
+
                     if x11_point_in_rect(lay.back, x, y) && history.can_go_back() {
                         // Back button: pop history, then reload whatever
                         // that lands on -- same load path/status/throbber
@@ -1969,7 +2003,7 @@ fn run_x11(source: &str) {
                             loading = true;
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -1989,11 +2023,62 @@ fn run_x11(source: &str) {
                             loading = false;
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
                         }
+                    } else if x11_point_in_rect(lay.reload, x, y) {
+                        // Reload button (packet/chrome-address-edit): the
+                        // SAME load/redraw body `XIntent::Reload`'s own arm
+                        // runs (design doc §4 -- "reuse, don't refactor",
+                        // duplicated on purpose, matching every other
+                        // branch's own duplicated load/redraw sequence in
+                        // this match).
+                        status = format!("Loading {}...", history.current().as_str());
+                        loading = true;
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                        match load_x11_page(history.current(), width) {
+                            Ok((sess, s)) => {
+                                session = sess;
+                                state = s;
+                                scroll_y = 0;
+                                status = String::from("Done");
+                            }
+                            Err(e) => {
+                                eprintln!("stele: --x11: reload failed: {e}");
+                                status = format!("Failed to load: {e}");
+                            }
+                        }
+                        loading = false;
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
+                    } else if x11_point_in_rect(lay.address, x, y) && !address_edit.focused {
+                        // packet/chrome-address-edit: click-to-focus, seeded
+                        // with the CURRENT real URL (never whatever was
+                        // mid-edit before -- there's nothing to restore,
+                        // `AddressEdit::blur` never remembered anything, see
+                        // its own doc comment). Chrome-only repaint (a full
+                        // redraw is fine here -- correctness first, per the
+                        // design doc's own "not mandated" note on a cheaper
+                        // partial blit).
+                        address_edit.focus(history.current().as_str());
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
                     } else if x11_point_in_rect(lay.attest, x, y) {
                         // Attestations button (packet/attestation-modal): a
                         // fixed, well-known target URL -- no document
@@ -2007,7 +2092,7 @@ fn run_x11(source: &str) {
                         loading = true;
                         throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2027,7 +2112,7 @@ fn run_x11(source: &str) {
                         loading = false;
                         throbber_frame = throbber_frame.wrapping_add(1);
                         conn.begin_frame();
-                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                         let _ = conn.end_frame();
                         stats.frames += 1;
                         stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2046,7 +2131,7 @@ fn run_x11(source: &str) {
                             loading = true;
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2068,23 +2153,26 @@ fn run_x11(source: &str) {
                             // ConfigureNotify below.
                             throbber_frame = throbber_frame.wrapping_add(1);
                             conn.begin_frame();
-                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                             let _ = conn.end_frame();
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
                         }
                     }
                     // Else: a click somewhere else in the chrome bars (the
-                    // address field, throbber, a disabled back button, or a
+                    // address field WHILE ALREADY FOCUSED -- no click-to-
+                    // position-cursor, an explicit MVP scope cut, design
+                    // doc §3 -- the throbber, a disabled back button, or a
                     // tiny/degenerate window's dead space) -- display-only,
-                    // ignored.
+                    // ignored (the blur-first handling above already ran if
+                    // it needed to).
                 }
                 xproto::XIntent::Reload => {
                     status = format!("Loading {}...", history.current().as_str());
                     loading = true;
                     throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -2104,10 +2192,85 @@ fn run_x11(source: &str) {
                     loading = false;
                     throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
+                }
+                xproto::XIntent::Edit(op) => {
+                    // packet/chrome-address-edit: every op mutates
+                    // `address_edit` directly. `Commit` (on a non-empty,
+                    // non-whitespace buffer) additionally resolves + navigates
+                    // + loads, exactly like the viewport-link/attest/reload
+                    // branches above -- reusing `resolve_url` (not `Url::new`
+                    // directly) so a typed bare `example.com`-shaped string
+                    // gets the same passthrough/fallback treatment every other
+                    // Stele entry point already gives it (design doc §3;
+                    // flagged in the PR description as the pinned resolution
+                    // helper). Every other op just needs the chrome bars
+                    // repainted to reflect the new buffer/cursor/focus state.
+                    let mut already_redrawn = false;
+                    match op {
+                        xproto::EditIntent::Insert(c) => address_edit.insert_char(c),
+                        xproto::EditIntent::Backspace => address_edit.backspace(),
+                        xproto::EditIntent::Delete => address_edit.delete_forward(),
+                        xproto::EditIntent::Left => address_edit.move_left(),
+                        xproto::EditIntent::Right => address_edit.move_right(),
+                        xproto::EditIntent::Home => address_edit.move_home(),
+                        xproto::EditIntent::End => address_edit.move_end(),
+                        xproto::EditIntent::Cancel => address_edit.blur(),
+                        xproto::EditIntent::Commit => {
+                            if let Some(raw) = address_edit.commit() {
+                                let new_url = resolve_url(&raw);
+                                history.navigate(new_url.clone());
+
+                                status = format!("Loading {}...", new_url.as_str());
+                                loading = true;
+                                throbber_frame = throbber_frame.wrapping_add(1);
+                                conn.begin_frame();
+                                x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                                let _ = conn.end_frame();
+                                stats.frames += 1;
+                                stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                                match load_x11_page(&new_url, width) {
+                                    Ok((sess, s)) => {
+                                        session = sess;
+                                        state = s;
+                                        scroll_y = 0;
+                                        status = String::from("Done");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}");
+                                        status = format!("Failed to load: {e}");
+                                    }
+                                }
+                                loading = false;
+                                throbber_frame = throbber_frame.wrapping_add(1);
+                                conn.begin_frame();
+                                x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                                let _ = conn.end_frame();
+                                stats.frames += 1;
+                                stats.put_image_bytes += width as u64 * height as u64 * 4;
+                                already_redrawn = true;
+                            }
+                            // `commit()` returned `None` (empty/whitespace-
+                            // only buffer): a no-op, per `AddressEdit::
+                            // commit`'s own contract -- `focused` stays
+                            // true, nothing to navigate to. Falls through to
+                            // the generic chrome-only redraw below (harmless
+                            // even though nothing visibly changed).
+                        }
+                    }
+
+                    if !already_redrawn {
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
+                    }
                 }
                 xproto::XIntent::Resize { w, h } => {
                     // classify_x11_intent already screens out a 0x0
@@ -2140,7 +2303,7 @@ fn run_x11(source: &str) {
                     // nothing on screen is safe to retain via CopyArea.
                     throbber_frame = throbber_frame.wrapping_add(1);
                     conn.begin_frame();
-                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, None));
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
                     let _ = conn.end_frame();
                     stats.frames += 1;
                     stats.put_image_bytes += width as u64 * height as u64 * 4;
@@ -3292,6 +3455,42 @@ mod tests {
         let (min_kc, per_kc, keysyms) = classify_intent_keymap();
         let out = classify_x11_intent(&key_press(8, true), min_kc, per_kc, &keysyms, 600, true);
         assert_eq!(out, Some(XIntent::Edit(EditIntent::Insert('Q'))));
+    }
+
+    // ------------------------------------------------------- x11_edit_arg
+    // packet/chrome-address-edit, Task 6: a direct unit test of the new
+    // `ChromeState.edit` plumbing, independent of the full `run_x11` event
+    // loop (which stays manual-verify-only -- no X server in CI).
+
+    #[test]
+    fn x11_edit_arg_is_none_when_unfocused_and_some_when_focused() {
+        let mut a = AddressEdit::default();
+        assert_eq!(x11_edit_arg(&a), None, "a freshly-defaulted AddressEdit is unfocused");
+
+        a.focus("http://example.test/");
+        assert_eq!(x11_edit_arg(&a), Some(("http://example.test/", "http://example.test/".chars().count())));
+
+        a.insert_char('x');
+        assert_eq!(x11_edit_arg(&a), Some(("http://example.test/x", "http://example.test/x".chars().count())));
+
+        a.blur();
+        assert_eq!(x11_edit_arg(&a), None, "blurred, even with a non-empty buffer, must report None");
+    }
+
+    #[test]
+    fn resolve_url_used_by_edit_commit_never_panics_on_typed_address_bar_shapes() {
+        // The exact helper `EditIntent::Commit` resolves a typed address
+        // through (Task 6) -- a bare host-shaped string, an absolute
+        // http(s):// string, and an empty string must all resolve to
+        // something sane, never panic. (`AddressEdit::commit` itself already
+        // guarantees the string handed to `resolve_url` is trimmed and
+        // non-empty, but this helper is tested standalone against the wider
+        // set of shapes `resolve_url` itself documents.)
+        let _ = resolve_url("example.com");
+        let _ = resolve_url("http://example.com/path");
+        let _ = resolve_url("https://example.com/path");
+        let _ = resolve_url(""); // never reached via `EditIntent::Commit` (AddressEdit::commit trims to non-empty first), but resolve_url itself must still stay total over it.
+        assert_eq!(resolve_url("about:attestations").as_str(), "about:attestations");
     }
 
     #[test]
