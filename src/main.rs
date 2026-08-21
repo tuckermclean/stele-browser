@@ -387,7 +387,7 @@ fn resolve_url(raw: &str) -> Url {
     // into a bogus `file://<cwd>/about:attestations`, making the scheme
     // handler (`fetch::about`) unreachable from the CLI (design doc's
     // "Current state" finding, packet/attestation-modal).
-    if scheme == "http" || scheme == "file" || scheme == "about" {
+    if scheme == "http" || scheme == "https" || scheme == "file" || scheme == "about" {
         return Url::new(raw);
     }
     let path = std::path::Path::new(raw);
@@ -397,6 +397,31 @@ fn resolve_url(raw: &str) -> Url {
         std::env::current_dir().map(|cwd| cwd.join(path)).unwrap_or_else(|_| path.to_path_buf())
     };
     Url::new(format!("file://{}", abs.display()))
+}
+
+/// Normalize a string typed into the ADDRESS BAR (not a CLI argument) into a
+/// navigable URL string. An address bar treats a bare host like
+/// `example.com` as a WEB address (`http://example.com`) -- unlike
+/// [`resolve_url`], which (CLI-style) would turn it into a bogus
+/// `file://<cwd>/example.com`. Anything already carrying a scheme
+/// (`http://`/`https://`/`file://`, or the opaque `about:`/`data:`) or an
+/// explicit filesystem path (`/...`, `./...`, `../...`, `~...`) is passed
+/// through untouched for [`resolve_url`] to handle. Empty/whitespace input
+/// (already filtered by `AddressEdit::commit`) passes through as-is.
+fn normalize_address_input(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty()
+        || s.contains("://")
+        || s.starts_with("about:")
+        || s.starts_with("data:")
+        || s.starts_with('/')
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with('~')
+    {
+        return s.to_string();
+    }
+    format!("http://{s}")
 }
 
 /// Fetch `url` over whichever of the two live schemes it names, returning
@@ -2236,7 +2261,12 @@ fn run_x11(source: &str) {
                         xproto::EditIntent::Cancel => address_edit.blur(),
                         xproto::EditIntent::Commit => {
                             if let Some(raw) = address_edit.commit() {
-                                let new_url = resolve_url(&raw);
+                                // Address-bar semantics: a bare host typed here
+                                // is a WEB address, not a local file (review
+                                // finding). `normalize_address_input` prepends
+                                // `http://` to scheme-less input before the
+                                // shared `resolve_url`.
+                                let new_url = resolve_url(&normalize_address_input(&raw));
                                 history.navigate(new_url.clone());
 
                                 status = format!("Loading {}...", new_url.as_str());
@@ -3343,6 +3373,30 @@ mod tests {
         let on_disk = std::fs::read(&out).expect("png should be written");
         assert_eq!(on_disk, dump_png_opts("fixtures/color-scheme.html", false, style::ColorScheme::Dark, true, None, None));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalize_address_input_prepends_http_to_a_bare_host() {
+        // A bare host typed in the address bar is a WEB address, not a file.
+        assert_eq!(normalize_address_input("example.com"), "http://example.com");
+        assert_eq!(normalize_address_input("example.com/wiki/X"), "http://example.com/wiki/X");
+        assert_eq!(normalize_address_input("example.com:8080"), "http://example.com:8080");
+        assert_eq!(normalize_address_input("  wikipedia.org  "), "http://wikipedia.org"); // trimmed
+        // End-to-end: the committed URL actually navigates to the WEB, not a file://.
+        assert_eq!(resolve_url(&normalize_address_input("example.com")).scheme(), "http");
+    }
+
+    #[test]
+    fn normalize_address_input_passes_through_schemed_and_path_input() {
+        for s in ["http://example.com", "https://example.com/x", "file:///tmp/a", "about:attestations", "/abs/path", "./rel", "../up"] {
+            assert_eq!(normalize_address_input(s), s, "already-schemed/path input must pass through untouched");
+        }
+    }
+
+    #[test]
+    fn resolve_url_passes_through_https_scheme() {
+        assert_eq!(resolve_url("https://example.com/x").as_str(), "https://example.com/x");
+        assert_eq!(resolve_url("https://example.com/x").scheme(), "https");
     }
 
     #[test]
