@@ -2205,7 +2205,7 @@ fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysym
             }
         }
         XEvent::KeyPress { keycode, .. } => {
-            let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms)?;
+            let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms, 0)?;
             match xproto::keysym_to_key(sym)? {
                 X11Key::Escape | X11Key::Char('q') => Some(XIntent::Quit),
                 X11Key::Up => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),

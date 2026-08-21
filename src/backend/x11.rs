@@ -582,15 +582,26 @@ pub fn parse_keyboard_mapping_reply(buf: &[u8]) -> Result<(u8, Vec<u32>), String
     Ok((keysyms_per_keycode, keysyms))
 }
 
-/// Look up keycode `keycode`'s first (unshifted) keysym column. `None` if
-/// `keycode` is below `min_keycode`, `keysyms_per_keycode` is `0`, or the
-/// computed index runs past `keysyms` — never panics/indexes out of bounds.
-pub fn keysym_for_keycode(keycode: u8, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32]) -> Option<u32> {
-    if keysyms_per_keycode == 0 || keycode < min_keycode {
+/// Look up keycode `keycode`'s keysym at column `column` (`0` = unshifted,
+/// `1` = Shift-held, per X11's `KEYBOARD-MAPPING` reply layout — column `N`
+/// of a keycode's row is `keysyms[row * keysyms_per_keycode + N]`).
+/// `packet/chrome-address-edit`: this used to be hardcoded to column 0
+/// (Shift was parsed off the wire in `state` but never read) — every
+/// pre-existing call site now passes `column: 0` explicitly to preserve
+/// that behavior byte-for-byte; [`crate::backend::x11`]'s caller in
+/// `main.rs`'s `classify_x11_intent` is the one that now reads the real
+/// Shift bit and passes `column: 1` while it's held.
+///
+/// `None` if `keycode` is below `min_keycode`, `keysyms_per_keycode` is `0`,
+/// `column >= keysyms_per_keycode`, or the computed index runs past
+/// `keysyms` — never panics/indexes out of bounds, same totality contract
+/// the column-0-only version already had.
+pub fn keysym_for_keycode(keycode: u8, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], column: usize) -> Option<u32> {
+    if keysyms_per_keycode == 0 || keycode < min_keycode || column >= keysyms_per_keycode as usize {
         return None;
     }
     let row = (keycode - min_keycode) as usize;
-    let idx = row.checked_mul(keysyms_per_keycode as usize)?;
+    let idx = row.checked_mul(keysyms_per_keycode as usize)?.checked_add(column)?;
     keysyms.get(idx).copied()
 }
 
@@ -616,6 +627,15 @@ pub enum X11Key {
     PageUp,
     PageDown,
     F5,
+    /// `packet/chrome-address-edit`: cursor-to-start, for the address-bar
+    /// edit buffer.
+    Home,
+    /// `packet/chrome-address-edit`: cursor-to-end, for the address-bar
+    /// edit buffer.
+    End,
+    /// `packet/chrome-address-edit`: forward-delete, for the address-bar
+    /// edit buffer.
+    Delete,
 }
 
 /// Map an X11 keysym (as [`keysym_for_keycode`] returns) to an [`X11Key`],
@@ -638,6 +658,9 @@ pub fn keysym_to_key(keysym: u32) -> Option<X11Key> {
         0xff55 => Some(X11Key::PageUp),
         0xff56 => Some(X11Key::PageDown),
         0xffc2 => Some(X11Key::F5),
+        0xff50 => Some(X11Key::Home),
+        0xff57 => Some(X11Key::End),
+        0xffff => Some(X11Key::Delete),
         _ => None,
     }
 }
@@ -1663,10 +1686,31 @@ mod tests {
     #[test]
     fn keysym_for_keycode_indexes_correctly() {
         let keysyms = vec![0x61, 0x41, 0x62, 0x42]; // keycode 8 -> [a,A], keycode 9 -> [b,B]
-        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms), Some(0x61));
-        assert_eq!(keysym_for_keycode(9, 8, 2, &keysyms), Some(0x62));
-        assert_eq!(keysym_for_keycode(7, 8, 2, &keysyms), None); // below min
-        assert_eq!(keysym_for_keycode(20, 8, 2, &keysyms), None); // past the end
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 0), Some(0x61));
+        assert_eq!(keysym_for_keycode(9, 8, 2, &keysyms, 0), Some(0x62));
+        assert_eq!(keysym_for_keycode(7, 8, 2, &keysyms, 0), None); // below min
+        assert_eq!(keysym_for_keycode(20, 8, 2, &keysyms, 0), None); // past the end
+    }
+
+    /// `packet/chrome-address-edit`: the `column` parameter — column 0 is
+    /// unshifted, column 1 is the Shift-held keysym, per the same 2-column
+    /// synthetic table the reply-parsing test above already uses (keycode
+    /// 8 -> ['a','A'], keycode 9 -> ['1','!']).
+    #[test]
+    fn keysym_for_keycode_shift_column_selects_the_shifted_keysym() {
+        let keysyms = vec!['a' as u32, 'A' as u32, '1' as u32, '!' as u32];
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 0), Some('a' as u32));
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 1), Some('A' as u32));
+        assert_eq!(keysym_for_keycode(9, 8, 2, &keysyms, 0), Some('1' as u32));
+        assert_eq!(keysym_for_keycode(9, 8, 2, &keysyms, 1), Some('!' as u32));
+    }
+
+    #[test]
+    fn keysym_for_keycode_column_out_of_range_is_none_not_a_panic() {
+        let keysyms = vec!['a' as u32, 'A' as u32, '1' as u32, '!' as u32];
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 5), None);
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 2), None); // == keysyms_per_keycode
+        assert_eq!(keysym_for_keycode(8, 8, 0, &keysyms, 0), None); // keysyms_per_keycode itself 0
     }
 
     // ------------------------------------------------------------ keysym->Key
@@ -1691,6 +1735,14 @@ mod tests {
         assert_eq!(keysym_to_key(0xff55), Some(X11Key::PageUp));
         assert_eq!(keysym_to_key(0xff56), Some(X11Key::PageDown));
         assert_eq!(keysym_to_key(0xffc2), Some(X11Key::F5));
+    }
+
+    /// `packet/chrome-address-edit`, Task 2 — the address-edit-buffer keys.
+    #[test]
+    fn keysym_to_key_maps_home_end_delete() {
+        assert_eq!(keysym_to_key(0xff50), Some(X11Key::Home));
+        assert_eq!(keysym_to_key(0xff57), Some(X11Key::End));
+        assert_eq!(keysym_to_key(0xffff), Some(X11Key::Delete));
     }
 
     #[test]
