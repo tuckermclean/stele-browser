@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head><title>Attestations</title></head>
+<body>
+
+<h1>Attestations</h1>
+
+<p>A stele is an upright stone slab, usually inscribed, raised to record something
+worth keeping: a law, a treaty, a name. This page is the most thoroughly attested
+object on the disc -- it lists Stele's own license, the license of every
+third-party crate compiled into this binary, and the full text of Terminus
+Font's license, all rendered through the very engine you are reading it with.
+No JavaScript wrote this page; no JavaScript could have (charter C3) -- it is
+plain markup, laid out and painted the same way any other document is.</p>
+
+<h2>Stele's own license</h2>
+
+{{STELE_NOTICE}}
+
+<h2>Cargo dependencies</h2>
+
+<p>Stele ships as a single static binary; the crates below are compiled
+directly into it. Each is credited under one SPDX license identifier (MIT
+preferred over Apache-2.0 where a crate offers both -- a complete discharge
+of the grant either way, at a smaller text cost). The full text for each
+identifier appears once in the section below, shared by every crate credited
+under it.</p>
+
+<ul>
+{{ROSTER}}
+</ul>
+
+<h2>Dependency license texts</h2>
+
+<p>Grouped by distinct license text -- several crates in the roster above
+share byte-identical license files, so each text below is reproduced once,
+not once per crate.</p>
+
+{{LICENSE_TEXTS}}
+
+<h2>Terminus Font</h2>
+
+<p>Stele's text is rendered with a 191-glyph subset of Terminus Font by
+Dimitar Toshkov Zhekov, embedded under the SIL Open Font License, Version
+1.1. The full license text, reproduced verbatim below, is also available at
+"third_party/terminus-font/OFL.TXT" in Stele's own source tree.</p>
+
+{{OFL_TEXT}}
+
+</body>
+</html>
