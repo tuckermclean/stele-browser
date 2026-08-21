@@ -371,15 +371,22 @@ fn parse_args(argv: &[String]) -> Args {
 }
 
 /// Resolve a CLI-supplied source into a fetchable [`Url`]: `http://`/
-/// `file://` pass through unchanged; anything else (no recognized scheme,
-/// e.g. `fixtures/basic.html` or `/abs/path.html`) is treated as a local
+/// `file://`/`about:` pass through unchanged; anything else (no recognized
+/// scheme, e.g. `fixtures/basic.html` or `/abs/path.html`) is treated as a local
 /// filesystem path and turned into an absolute `file://` URL — relative
 /// paths are resolved against the current working directory first, since
 /// `fetch::file::file_path` expects `file:///abs/path` shaped input (a bare
 /// `file://relative/path` would misparse the first path segment as a host).
 fn resolve_url(raw: &str) -> Url {
     let scheme = Url::new(raw).scheme();
-    if scheme == "http" || scheme == "file" {
+    // `about` passes through unresolved, same as `http`/`file` --
+    // packet/attestation-modal: without this, every CLI entry point
+    // (`--dump-text`, `--dump-png`, `--render-fb`, `--x11`) falls through to
+    // the filesystem-path branch below and mangles `about:attestations`
+    // into a bogus `file://<cwd>/about:attestations`, making the scheme
+    // handler (`fetch::about`) unreachable from the CLI (design doc's
+    // "Current state" finding, packet/attestation-modal).
+    if scheme == "http" || scheme == "file" || scheme == "about" {
         return Url::new(raw);
     }
     let path = std::path::Path::new(raw);
@@ -1981,6 +1988,43 @@ fn run_x11(source: &str) {
                             stats.frames += 1;
                             stats.put_image_bytes += width as u64 * height as u64 * 4;
                         }
+                    } else if x11_point_in_rect(lay.attest, x, y) {
+                        // Attestations button (packet/attestation-modal): a
+                        // fixed, well-known target URL -- no document
+                        // `href` to resolve, unlike the in-page-link branch
+                        // below, but otherwise the same
+                        // navigate/load/redraw sequence.
+                        let new_url = Url::new("about:attestations");
+                        history.navigate(new_url.clone());
+
+                        status = format!("Loading {}...", new_url.as_str());
+                        loading = true;
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                        match load_x11_page(&new_url, width) {
+                            Ok((sess, s)) => {
+                                session = sess;
+                                state = s;
+                                scroll_y = 0;
+                                status = String::from("Done");
+                            }
+                            Err(e) => {
+                                eprintln!("stele: --x11: navigation to {new_url:?} failed: {e}");
+                                status = format!("Failed to load: {e}");
+                            }
+                        }
+                        loading = false;
+                        throbber_frame = throbber_frame.wrapping_add(1);
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
                     } else if y >= chrome::TOP_H as i16 && (y as u32) < chrome::TOP_H + lay.viewport.h {
                         // Inside the viewport band: hit-test in DOCUMENT
                         // coordinates, offset by the top bar's height and
@@ -3075,6 +3119,14 @@ mod tests {
     fn resolve_url_passes_through_http_and_file_schemes() {
         assert_eq!(resolve_url("http://example.com/x").as_str(), "http://example.com/x");
         assert_eq!(resolve_url("file:///abs/path.html").as_str(), "file:///abs/path.html");
+    }
+
+    #[test]
+    fn resolve_url_passes_through_about_scheme() {
+        // packet/attestation-modal: without this, `about:attestations`
+        // resolves to a bogus `file://<cwd>/about:attestations` and no CLI
+        // entry point can ever reach `fetch::about`.
+        assert_eq!(resolve_url("about:attestations").as_str(), "about:attestations");
     }
 
     #[test]

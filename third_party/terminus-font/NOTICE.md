@@ -24,7 +24,9 @@ OFL-1.1's Condition 1 (no standalone sale of the font software) is not a
 concern: the subset is embedded as an inseparable rendering dependency, not
 a product. Condition 2 (the license text must accompany any copy) is
 satisfied at the source/repository level — `OFL.TXT` ships alongside every
-checkout — the compiled `stele-i486` binary does not additionally embed the
-license text as bytes (the same posture Stele already took for font8x8's
-Public Domain notice: documented in `REPORT.md`/doc comments, not shipped as
-in-binary string data).
+checkout — **and**, as of packet/attestation-modal, at the compiled-binary
+level too: `about:attestations` (`src/fetch/about.rs`) embeds `OFL.TXT`
+verbatim via `include_str!` and renders it in-binary (reachable from the
+`--x11` chrome's attestations affordance), so the license text now travels
+with the binary itself, not only the source checkout — the "forthcoming
+attestation modal" this note previously pointed at has now landed.

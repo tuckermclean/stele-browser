@@ -3,6 +3,45 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Fetch / chrome — `about:` scheme + the `about:attestations` attribution page
+
+### D67 — `about:` scheme handler serving a self-rendered `about:attestations` page (Stele's own license, generated dep roster, Terminus OFL text)
+Stele now serves its own attribution page in-process: a new `about:` scheme (`src/fetch/about.rs`, one match
+arm in `fetch::fetch`) is infallible over all input (never `Err`, unknown `about:*` paths fall back to a small
+unknown-page body) and reached from the `--x11` chrome via a new affordance rect (`ChromeLayout::attest`,
+between `address` and `throbber`) that navigates to `Url::new("about:attestations")`. `resolve_url` (`main.rs`)
+gained a one-line passthrough fix (`scheme == "about"`) — without it every CLI entry point (`--dump-text`,
+`--dump-png`, `--render-fb`, `--x11`) mangled `about:attestations` into a bogus
+`file://<cwd>/about:attestations`, making the handler unreachable from any CLI path; a real, previously-latent
+bug this packet's own Task 1 test caught red before green. The page body embeds **real per-dependency license
+text, not summaries**: `tools/gen-attestations.py` (build-time-only, no new Cargo dependency) walks the real,
+i486-target-filtered `cargo metadata` graph from `stele`'s root, excludes proc-macro/build-only and
+Windows-only-cfg nodes, and emits a committed `src/fetch/attestations_data.rs` — **24 runtime dependencies**,
+content-hash-deduped into **19 distinct license-text blocks** (rustix/linux-raw-sys/serde share one MIT block;
+MIT preferred over Apache-2.0 where a crate dual-licenses), each text pre-split into blank-line-delimited
+paragraphs by the generator, ~28.8 KB embedded total. That pre-split matters: `about::fetch`'s render step
+found (and this page's own regression test pins) that **`white-space: pre` is cascaded but not yet enforced
+by `layout::inline`** — a real, previously-undocumented engine gap — so license text is rendered as
+`<p>`-per-paragraph sections rather than a single `<pre>` block, which would silently collapse to one run of
+whitespace under the current (correct, spec-following) collapsing-whitespace default. Stele's own GPL-3.0
+notice ships as a **short in-page notice, not the full license text** (a judgment call, flagged for the
+operator, not a legal ruling — mirrors D66's own analogous flag for Terminus's OFL condition 2); Terminus's
+`OFL.TXT` ships in full via `include_str!`. `taffy` 0.13.0 publishes no `LICENSE*` file in its crate at all —
+its MIT text is pinned from the upstream repository instead (tag `v0.13.0`, commit
+`45a56299d366ddb383e593a1f0372158d00e8530`, SHA-256
+`f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a`), the same pin-from-upstream posture D66
+used for Terminus's own OFL.TXT. **Incidental fix, not new scope:** running a real `cargo metadata` for the
+generator surfaced that `smallvec` — a real, pre-existing transitive dependency pulled in via `taffy`'s grid
+feature — was missing from the committed `Cargo.lock`; this diff's `cargo metadata` invocation corrects that
+drift (`Cargo.lock` now lists it), it does not add a new dependency. **Charter:** a new URL scheme + a
+self-served page (headings, `<p>`, `<ul>`/`<li>` — zero new elements/properties), not new document
+vocabulary — the same "transport surface, not dialect surface" category `data:` (Acid2 Packet 4) and `https`
+were — **no C2 amendment**. The chrome affordance's click-to-navigate wiring is manual-verify only (no X11
+test harness in this repo, same posture as every other `--x11` interaction); its geometry/paint are
+CI-golden-tested (non-overlap with `back`/`address`/`throbber`, degenerate-window totality, `draw` guard
+clauses). **Size:** reported against the ≈24–28 KB design estimate and the 97,124 B (D66) headroom once the
+CI-measured `stele-i486` delta lands (Task 5, not this entry).
+
 ## Text — Terminus font replaces font8x8
 
 ### D66 — embed a Terminus (OFL-1.1) subset as the render font, dropping font8x8
