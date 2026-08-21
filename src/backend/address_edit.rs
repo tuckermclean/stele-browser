@@ -174,7 +174,7 @@ mod tests {
         a.focus("http://example.test/");
         assert_eq!(a.buffer, "http://example.test/");
         assert_eq!(a.cursor, "http://example.test/".chars().count());
-        assert_eq!(a.cursor, 21);
+        assert_eq!(a.cursor, 20); // "http://example.test/" is 20 chars
         assert!(a.focused);
     }
 
