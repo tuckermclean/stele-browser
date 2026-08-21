@@ -3,6 +3,29 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Chrome — editable address bar + reload
+
+### D68 — editable address bar + reload button in the `--x11` chrome
+The chrome address bar becomes editable (click to focus, type, Enter navigates, Esc/click-away cancels) and
+gains a reload button, extending the existing `run_x11` keyboard pipeline (the `shell-keyboard` packet already
+decodes `KeyPress`; `XIntent::Reload`/F5 already existed). New pure `src/backend/address_edit.rs`
+(`AddressEdit { buffer, cursor, focused }`, char-indexed, UTF-8-total, fuzz-tested) is the CI-tested core;
+`classify_x11_intent` gained an `address_focused` flag that routes keystrokes to `XIntent::Edit(..)` while
+focused; `chrome::draw` renders the live buffer + a caret when focused; a `ChromeLayout.reload` rect (glyph
+`'R'`) re-triggers the existing reload path. The X11 event WIRING (focus/blur/commit/reload-click) is
+manual-verify, consistent with the rest of `run_x11`; the edit-buffer, keysym-Shift-column, focus routing, and
+chrome geometry/paint ARE CI-tested.
+DELIBERATE BEHAVIOR CHANGES: (1) the KeyPress `state`/Shift bit is now READ (was parsed-but-discarded), so
+Shift-held keys select the shifted keysym (uppercase/symbols) — a side effect is **Shift+Q no longer quits**
+the window (Shift previously did nothing; plain `q` still quits when NOT editing). (2) The address bar treats a
+typed BARE host (`example.com`) as a WEB address via `normalize_address_input` (prepends `http://`), NOT a
+local file — an address bar's expectation, distinct from the CLI's file-path resolution. This also surfaced +
+fixed a latent gap: `resolve_url` didn't pass through the `https` scheme (only http/file/about), so a typed
+`https://` URL would have been file-mangled. KNOWN MINOR GAPS (revisit triggers): a mouse-wheel spin while the
+address bar is focused still scrolls the document under the edit (keyboard scroll is correctly swallowed); no
+click-to-position-cursor or horizontal scroll within an over-long field; CapsLock unhandled. Charter: an
+interactive-shell (C5) feature, not dialect surface — no C2 amendment.
+
 ## Fetch / chrome — `about:` scheme + the `about:attestations` attribution page
 
 ### D67 — `about:` scheme handler serving a self-rendered `about:attestations` page (Stele's own license, generated dep roster, Terminus OFL text)

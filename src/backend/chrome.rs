@@ -32,7 +32,15 @@ pub struct ChromeLayout {
     pub top: Rect,
     /// The back-navigation button, a roughly-square box at the left of `top`.
     pub back: Rect,
-    /// The address field, the space between `back` and `attest`.
+    /// The reload button (`packet/chrome-address-edit`): a roughly-square
+    /// box immediately right of `back` — both are "page navigation"
+    /// actions, grouped left, matching the back-then-address reading order
+    /// most browsers use. Clicking it re-runs the SAME load/redraw
+    /// sequence `XIntent::Reload`/`F5` already trigger (`run_x11`) — this
+    /// rect is purely a second, discoverable trigger for that existing
+    /// logic, not new reload machinery.
+    pub reload: Rect,
+    /// The address field, the space between `reload` and `attest`.
     pub address: Rect,
     /// The throbber/load-indicator, a roughly-square box at the right of `top`.
     pub throbber: Rect,
@@ -81,6 +89,15 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
 
     const GAP: i64 = 4;
 
+    // Reload button (packet/chrome-address-edit): another ~20px square,
+    // immediately right of `back` -- same size/clamp discipline as
+    // `attest`/`throbber`. `address`'s left bound (below) is computed
+    // against THIS rect, not `back` directly, now that it sits in between.
+    let reload_size = 20u32.min(top_h.saturating_sub(4)).min(win_w.saturating_sub(4));
+    let reload_x = (back.x as i64 + back.w as i64 + GAP) as i32;
+    let reload_y = INSET + ((top_h.saturating_sub(4).saturating_sub(reload_size)) / 2) as i32;
+    let reload = Rect { x: reload_x, y: reload_y, w: reload_size, h: reload_size };
+
     // Attestations button: another ~20px square, immediately left of the
     // throbber (same size/clamp discipline) -- packet/attestation-modal.
     // Sits between `address` and `throbber`, so `address`'s right bound
@@ -90,23 +107,33 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
     let attest_y = INSET + ((top_h.saturating_sub(4).saturating_sub(attest_size)) / 2) as i32;
     let attest = Rect { x: attest_x, y: attest_y, w: attest_size, h: attest_size };
 
-    // Address field: whatever's left between `back` and `attest` (which
-    // itself sits left of `throbber`), clamped to never go negative-width
-    // (a tiny window can make these boxes overlap or even swap order — the
-    // field just collapses to zero rather than underflowing).
-    let addr_x = back.x as i64 + back.w as i64 + GAP;
+    // Address field: whatever's left between `reload` (which itself sits
+    // right of `back`) and `attest` (which sits left of `throbber`),
+    // clamped to never go negative-width (a tiny window can make these
+    // boxes overlap or even swap order — the field just collapses to zero
+    // rather than underflowing).
+    let addr_x = reload.x as i64 + reload.w as i64 + GAP;
     let addr_right = attest.x as i64 - GAP;
     let addr_w = (addr_right - addr_x).max(0) as u32;
     let address = Rect { x: addr_x as i32, y: back.y, w: addr_w, h: back.h };
 
-    ChromeLayout { top, back, address, throbber, attest, viewport, status }
+    ChromeLayout { top, back, reload, address, throbber, attest, viewport, status }
 }
 
 /// A snapshot of the interactive state `draw` needs to paint one frame.
 /// Owned/updated by `run_x11` (T3); this struct itself carries no behavior.
 pub struct ChromeState<'a> {
-    /// The current page URL, shown display-only in the address field.
+    /// The current page URL, shown display-only in the address field when
+    /// `edit` is `None`.
     pub url: &'a str,
+    /// `packet/chrome-address-edit`: `Some((live buffer, cursor char-index))`
+    /// while the address bar is focused/being edited, `None` otherwise. When
+    /// `Some`, `draw_address` renders the LIVE buffer + a cursor caret
+    /// instead of `url` — `url` itself is untouched either way (it always
+    /// tracks the real current, navigated page; the caller, `run_x11`, never
+    /// needs to "restore" it because it was never overwritten by an in-
+    /// progress edit).
+    pub edit: Option<(&'a str, usize)>,
     /// The status line, shown in the bottom status bar.
     pub status: &'a str,
     /// Whether a page fetch is in flight (drives the throbber's animated frame).
@@ -148,7 +175,8 @@ pub fn draw(surface: &mut dyn Surface, lay: &ChromeLayout, st: &ChromeState) {
     }
 
     draw_back_button(surface, lay.back, st.can_go_back);
-    draw_address(surface, lay.address, st.url);
+    draw_reload_button(surface, lay.reload);
+    draw_address(surface, lay.address, st.url, st.edit);
     draw_attest_button(surface, lay.attest);
     draw_throbber(surface, lay.throbber, st.loading, st.throbber_frame);
     draw_status(surface, lay.status, st.status);
@@ -178,12 +206,69 @@ fn draw_attest_button(surface: &mut dyn Surface, rect: Rect) {
     draw_centered_glyph(surface, rect, '\u{00A9}', INK);
 }
 
-fn draw_address(surface: &mut dyn Surface, rect: Rect, url: &str) {
+/// The reload button (`packet/chrome-address-edit`): always painted
+/// "enabled" (like `attest`, unlike `back` — reloading the current page is
+/// always a valid action, no disabled state to represent). Glyph `'R'` — a
+/// plain, already-embedded ASCII capital letter (zero new glyph-atlas
+/// bytes), the leanest option that's still legible next to `back`'s `'<'`
+/// and `attest`'s `'\u{00A9}'`. Click wiring lives in `run_x11` (manual-
+/// verify, same posture as `back`'s own click handling) and reuses
+/// `XIntent::Reload`'s existing load/redraw logic — this function only
+/// paints.
+fn draw_reload_button(surface: &mut dyn Surface, rect: Rect) {
+    if rect.w == 0 || rect.h == 0 {
+        return;
+    }
+    surface.fill_rect(rect, BUTTON_COLOR);
+    draw_centered_glyph(surface, rect, 'R', INK);
+}
+
+/// Left padding inside the address field before text/caret starts — shared
+/// between [`draw_left_aligned_clipped`] (the text) and [`draw_address`]'s
+/// own caret offset math, so the two never drift apart.
+const ADDRESS_PAD_X: i32 = 4;
+
+/// Cursor-caret fill color — same ink as the text itself.
+const CARET_COLOR: Color = INK;
+
+/// `packet/chrome-address-edit`: `edit` branches this between the live,
+/// focused edit buffer (+ a cursor caret) and today's exact unfocused
+/// behavior (draw `url`, byte-identical to before this packet — `edit:
+/// None` never touches the caret code path at all).
+fn draw_address(surface: &mut dyn Surface, rect: Rect, url: &str, edit: Option<(&str, usize)>) {
     if rect.w == 0 || rect.h == 0 {
         return;
     }
     surface.fill_rect(rect, Color::WHITE);
-    draw_left_aligned_clipped(surface, rect, url, INK);
+    match edit {
+        None => draw_left_aligned_clipped(surface, rect, url, INK),
+        Some((buf, cursor)) => {
+            draw_left_aligned_clipped(surface, rect, buf, INK);
+            draw_address_caret(surface, rect, buf, cursor);
+        }
+    }
+}
+
+/// Paint a 2px-wide vertical caret at the pixel x-offset corresponding to
+/// char index `cursor` into `buf` — computed via `Metrics::measure` on the
+/// prefix `buf[..cursor]` chars, the SAME per-char-advance machinery
+/// `draw_left_aligned_clipped`'s own `TextRun` painting already uses, so the
+/// caret always lands exactly where the text it's next to was drawn (no
+/// separate/duplicated advance table to drift out of sync). Clipped to
+/// `rect` exactly like the text itself -- a caret past the field's visible
+/// right edge is simply invisible (no horizontal scroll-within-field, a
+/// flagged, accepted MVP simplification, design doc §5), never a panic or a
+/// paint outside the field.
+fn draw_address_caret(surface: &mut dyn Surface, rect: Rect, buf: &str, cursor: usize) {
+    const CARET_W: u32 = 2;
+    let font = TerminusFont::new();
+    let prefix: String = buf.chars().take(cursor).collect();
+    let offset = Metrics::measure(&font, &prefix, TEXT_SIZE_PX) as i32;
+    let caret_x = rect.x + ADDRESS_PAD_X + offset;
+
+    surface.set_clip(Some(rect));
+    surface.fill_rect(Rect { x: caret_x, y: rect.y, w: CARET_W, h: rect.h }, CARET_COLOR);
+    surface.set_clip(None);
 }
 
 fn draw_status(surface: &mut dyn Surface, rect: Rect, status: &str) {
@@ -231,7 +316,9 @@ fn draw_throbber(surface: &mut dyn Surface, rect: Rect, loading: bool, frame: u8
 /// itself); the clip is always reset to `None` afterward so it doesn't leak
 /// into whatever draws next.
 fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, color: Color) {
-    const PAD_X: i32 = 4;
+    // packet/chrome-address-edit: shared with draw_address_caret's own
+    // offset math (both must agree on where text starts inside the field).
+    let pad_x = ADDRESS_PAD_X;
     // packet/terminus-font, Task 4: TerminusFont replaces BitmapFont::
     // vga_8x16() everywhere -- numerically identical at TEXT_SIZE_PX (16px,
     // the default bucket both agree on exactly), so this swap is a pure
@@ -249,7 +336,7 @@ fn draw_left_aligned_clipped(surface: &mut dyn Surface, rect: Rect, text: &str, 
 
     surface.set_clip(Some(rect));
     // Chrome labels never carry an author `font-weight` -- always Normal.
-    surface.draw_text(&TextRun { text, x: rect.x + PAD_X, baseline, size_px: TEXT_SIZE_PX, color, weight: FontWeight::Normal });
+    surface.draw_text(&TextRun { text, x: rect.x + pad_x, baseline, size_px: TEXT_SIZE_PX, color, weight: FontWeight::Normal });
     surface.set_clip(None);
 }
 
@@ -313,6 +400,44 @@ mod tests {
         assert!(lay.address.x + lay.address.w as i32 <= lay.throbber.x);
     }
 
+    /// packet/chrome-address-edit, Task 4 — mirrors
+    /// `layout_attest_button_has_nonzero_size_and_does_not_overlap_siblings`.
+    #[test]
+    fn layout_reload_button_has_nonzero_size_and_does_not_overlap_siblings() {
+        let lay = layout(1024, 768);
+        assert!(lay.reload.w > 0 && lay.reload.h > 0, "reload rect: {:?}", lay.reload);
+
+        fn overlaps(a: Rect, b: Rect) -> bool {
+            a.x < b.x + b.w as i32
+                && b.x < a.x + a.w as i32
+                && a.y < b.y + b.h as i32
+                && b.y < a.y + a.h as i32
+        }
+        assert!(!overlaps(lay.reload, lay.back), "reload overlaps back: {:?} / {:?}", lay.reload, lay.back);
+        assert!(!overlaps(lay.reload, lay.address), "reload overlaps address: {:?} / {:?}", lay.reload, lay.address);
+        assert!(!overlaps(lay.reload, lay.attest), "reload overlaps attest: {:?} / {:?}", lay.reload, lay.attest);
+        assert!(!overlaps(lay.reload, lay.throbber), "reload overlaps throbber: {:?} / {:?}", lay.reload, lay.throbber);
+    }
+
+    /// packet/chrome-address-edit, Task 4 — mirrors
+    /// `layout_attest_button_tiny_window_never_panics_and_stays_in_bounds`.
+    #[test]
+    fn layout_reload_button_tiny_window_never_panics_and_stays_in_bounds() {
+        for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (5, 40), (40, 5), (3, 3)] {
+            let lay = layout(w, h);
+            assert!(lay.reload.w <= w, "reload width {} exceeds window width {w}", lay.reload.w);
+            assert!(lay.reload.h <= h, "reload height {} exceeds window height {h}", lay.reload.h);
+        }
+    }
+
+    /// Confirms the recompute, not just that `reload` exists in isolation:
+    /// `address`'s left bound must now sit at or past `reload`'s right edge.
+    #[test]
+    fn layout_address_left_bound_now_starts_after_reload() {
+        let lay = layout(1024, 768);
+        assert!(lay.address.x >= lay.reload.x + lay.reload.w as i32, "address {:?} starts before reload {:?} ends", lay.address, lay.reload);
+    }
+
     #[test]
     fn layout_attest_button_has_nonzero_size_and_does_not_overlap_siblings() {
         let lay = layout(1024, 768);
@@ -348,7 +473,7 @@ mod tests {
             // window bounds, and the three vertically-stacked bands
             // (top/viewport/status) never claim more height than the
             // window actually has.
-            for r in [lay.top, lay.back, lay.address, lay.throbber, lay.viewport, lay.status] {
+            for r in [lay.top, lay.back, lay.reload, lay.address, lay.throbber, lay.viewport, lay.status] {
                 assert!(r.w <= w, "rect width {} exceeds window width {} for ({w},{h})", r.w, w);
                 assert!(r.h <= h, "rect height {} exceeds window height {} for ({w},{h})", r.h, h);
             }
@@ -374,7 +499,7 @@ mod tests {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
-        let st = ChromeState { url: "http://example.test/", status: "Done", loading: false, throbber_frame: 0, can_go_back: false };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false };
         draw(&mut s, &lay, &st);
 
         // A point in the top bar away from the back/address/throbber boxes:
@@ -393,7 +518,7 @@ mod tests {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
-        let st = ChromeState { url: "http://example.test/", status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.address.w > 0 && lay.address.h > 0, "test window should yield a real address field");
@@ -417,7 +542,7 @@ mod tests {
         let long_url: String = std::iter::repeat("http://example.test/very/long/path/segment/")
             .take(50)
             .collect();
-        let st = ChromeState { url: &long_url, status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: &long_url, edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true };
         draw(&mut s, &lay, &st);
 
         // Just past the address field's right edge, inside the top bar
@@ -431,13 +556,94 @@ mod tests {
         }
     }
 
+    /// packet/chrome-address-edit, Task 5: focused rendering shows the LIVE
+    /// buffer (not `url`) plus a caret at the pixel offset independently
+    /// computed the same way `draw_address_caret` does.
+    #[test]
+    fn draw_address_focused_shows_live_buffer_and_caret_at_expected_offset() {
+        let (w, h) = (300u32, 200u32);
+        let lay = layout(w, h);
+        let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let buf = "http://x/";
+        let cursor = 5;
+        let st = ChromeState { url: "http://unused/", edit: Some((buf, cursor)), status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        draw(&mut s, &lay, &st);
+
+        assert!(lay.address.w > 0 && lay.address.h > 0, "test window should yield a real address field");
+        let mid_y = lay.address.y + lay.address.h as i32 / 2;
+
+        let mut saw_non_background = false;
+        for x in lay.address.x..(lay.address.x + lay.address.w as i32) {
+            let px = bar_pixel(&s, x, mid_y);
+            if px != (255, 255, 255, 255) {
+                saw_non_background = true;
+            }
+        }
+        assert!(saw_non_background, "expected the live buffer's ink somewhere in the address field");
+
+        // Independently compute the expected caret x-offset (same formula
+        // draw_address_caret uses) and confirm a caret-colored pixel column
+        // actually lands there, not just "a caret exists somewhere".
+        let font = TerminusFont::new();
+        let prefix: String = buf.chars().take(cursor).collect();
+        let expected_offset = Metrics::measure(&font, &prefix, TEXT_SIZE_PX) as i32;
+        let expected_x = lay.address.x + ADDRESS_PAD_X + expected_offset;
+
+        let mut saw_caret = false;
+        for y in lay.address.y..(lay.address.y + lay.address.h as i32) {
+            if bar_pixel(&s, expected_x, y) == (17, 17, 17, 255) {
+                saw_caret = true;
+                break;
+            }
+        }
+        assert!(saw_caret, "expected a caret-colored pixel column at the computed x-offset {expected_x}");
+    }
+
+    /// Mirrors `draw_a_hostile_long_url_does_not_spill_outside_the_address_field`,
+    /// now exercised through the `edit` path instead of `url`.
+    #[test]
+    fn draw_a_hostile_long_edit_buffer_does_not_spill_outside_the_address_field() {
+        let (w, h) = (300u32, 200u32);
+        let lay = layout(w, h);
+        let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let long_buf: String = std::iter::repeat("http://example.test/very/long/path/segment/")
+            .take(50)
+            .collect();
+        let cursor = long_buf.chars().count();
+        let st = ChromeState { url: "http://unused/", edit: Some((&long_buf, cursor)), status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        draw(&mut s, &lay, &st);
+
+        let probe_x = lay.address.x + lay.address.w as i32 + 1;
+        if probe_x < lay.throbber.x {
+            let mid_y = lay.address.y + lay.address.h as i32 / 2;
+            let px = bar_pixel(&s, probe_x, mid_y);
+            assert_eq!(px, (221, 221, 221, 255), "pixel just outside the address field must stay the bar color, not spill-over ink or caret");
+        }
+    }
+
+    /// Edge case: a freshly-focused field over a blank seed (empty buffer,
+    /// cursor 0) still draws a caret at the field's left edge, no panic.
+    #[test]
+    fn draw_address_empty_focused_buffer_draws_a_caret_at_the_left_edge_without_panicking() {
+        let (w, h) = (300u32, 200u32);
+        let lay = layout(w, h);
+        let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let st = ChromeState { url: "http://unused/", edit: Some(("", 0)), status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        draw(&mut s, &lay, &st);
+
+        assert!(lay.address.w > 0 && lay.address.h > 0);
+        let expected_x = lay.address.x + ADDRESS_PAD_X;
+        let mid_y = lay.address.y + lay.address.h as i32 / 2;
+        assert_eq!(bar_pixel(&s, expected_x, mid_y), (17, 17, 17, 255), "expected the caret at the field's left edge for an empty buffer");
+    }
+
     #[test]
     fn draw_never_touches_the_viewport_region() {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
         let long_status: String = std::iter::repeat('x').take(500).collect();
-        let st = ChromeState { url: "http://example.test/", status: &long_status, loading: true, throbber_frame: 7, can_go_back: true };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: &long_status, loading: true, throbber_frame: 7, can_go_back: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.viewport.h > 0, "test window should yield a real viewport");
@@ -455,12 +661,44 @@ mod tests {
         draw_attest_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 });
     }
 
+    /// packet/chrome-address-edit, Task 4 — mirrors
+    /// `draw_attest_button_guards_zero_size_rect_without_panicking`.
+    #[test]
+    fn draw_reload_button_guards_zero_size_rect_without_panicking() {
+        let mut s = MemSurface::new(1, 1, Color::WHITE);
+        draw_reload_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 });
+    }
+
+    /// Confirms the glyph actually painted, not just that the rect exists —
+    /// mirrors `draw_address_field_is_white_or_dark_ink_never_untouched`'s
+    /// probe style.
+    #[test]
+    fn draw_paints_a_non_background_pixel_inside_the_reload_button() {
+        let (w, h) = (300u32, 200u32);
+        let lay = layout(w, h);
+        let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let st = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        draw(&mut s, &lay, &st);
+
+        assert!(lay.reload.w > 0 && lay.reload.h > 0, "test window should yield a real reload button");
+        let mut saw_non_button_color = false;
+        for y in lay.reload.y..(lay.reload.y + lay.reload.h as i32) {
+            for x in lay.reload.x..(lay.reload.x + lay.reload.w as i32) {
+                let px = bar_pixel(&s, x, y);
+                if px != (200, 200, 200, 255) {
+                    saw_non_button_color = true;
+                }
+            }
+        }
+        assert!(saw_non_button_color, "expected the 'R' glyph to paint at least one non-button-color pixel inside the reload rect");
+    }
+
     #[test]
     fn draw_never_panics_on_a_tiny_or_degenerate_window() {
         for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (2, 2)] {
             let lay = layout(w, h);
             let mut s = MemSurface::new(w.max(1), h.max(1), Color::WHITE);
-            let st = ChromeState { url: "x", status: "y", loading: true, throbber_frame: 200, can_go_back: false };
+            let st = ChromeState { url: "x", edit: None, status: "y", loading: true, throbber_frame: 200, can_go_back: false };
             draw(&mut s, &lay, &st);
         }
     }
@@ -471,7 +709,7 @@ mod tests {
         let lay = layout(w, h);
         for frame in 0..=255u8 {
             let mut s = MemSurface::new(w, h, Color::WHITE);
-            let st = ChromeState { url: "", status: "", loading: frame % 2 == 0, throbber_frame: frame, can_go_back: frame % 3 == 0 };
+            let st = ChromeState { url: "", edit: None, status: "", loading: frame % 2 == 0, throbber_frame: frame, can_go_back: frame % 3 == 0 };
             draw(&mut s, &lay, &st);
         }
     }
