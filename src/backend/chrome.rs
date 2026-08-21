@@ -32,7 +32,15 @@ pub struct ChromeLayout {
     pub top: Rect,
     /// The back-navigation button, a roughly-square box at the left of `top`.
     pub back: Rect,
-    /// The address field, the space between `back` and `attest`.
+    /// The reload button (`packet/chrome-address-edit`): a roughly-square
+    /// box immediately right of `back` — both are "page navigation"
+    /// actions, grouped left, matching the back-then-address reading order
+    /// most browsers use. Clicking it re-runs the SAME load/redraw
+    /// sequence `XIntent::Reload`/`F5` already trigger (`run_x11`) — this
+    /// rect is purely a second, discoverable trigger for that existing
+    /// logic, not new reload machinery.
+    pub reload: Rect,
+    /// The address field, the space between `reload` and `attest`.
     pub address: Rect,
     /// The throbber/load-indicator, a roughly-square box at the right of `top`.
     pub throbber: Rect,
@@ -81,6 +89,15 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
 
     const GAP: i64 = 4;
 
+    // Reload button (packet/chrome-address-edit): another ~20px square,
+    // immediately right of `back` -- same size/clamp discipline as
+    // `attest`/`throbber`. `address`'s left bound (below) is computed
+    // against THIS rect, not `back` directly, now that it sits in between.
+    let reload_size = 20u32.min(top_h.saturating_sub(4)).min(win_w.saturating_sub(4));
+    let reload_x = (back.x as i64 + back.w as i64 + GAP) as i32;
+    let reload_y = INSET + ((top_h.saturating_sub(4).saturating_sub(reload_size)) / 2) as i32;
+    let reload = Rect { x: reload_x, y: reload_y, w: reload_size, h: reload_size };
+
     // Attestations button: another ~20px square, immediately left of the
     // throbber (same size/clamp discipline) -- packet/attestation-modal.
     // Sits between `address` and `throbber`, so `address`'s right bound
@@ -90,16 +107,17 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
     let attest_y = INSET + ((top_h.saturating_sub(4).saturating_sub(attest_size)) / 2) as i32;
     let attest = Rect { x: attest_x, y: attest_y, w: attest_size, h: attest_size };
 
-    // Address field: whatever's left between `back` and `attest` (which
-    // itself sits left of `throbber`), clamped to never go negative-width
-    // (a tiny window can make these boxes overlap or even swap order — the
-    // field just collapses to zero rather than underflowing).
-    let addr_x = back.x as i64 + back.w as i64 + GAP;
+    // Address field: whatever's left between `reload` (which itself sits
+    // right of `back`) and `attest` (which sits left of `throbber`),
+    // clamped to never go negative-width (a tiny window can make these
+    // boxes overlap or even swap order — the field just collapses to zero
+    // rather than underflowing).
+    let addr_x = reload.x as i64 + reload.w as i64 + GAP;
     let addr_right = attest.x as i64 - GAP;
     let addr_w = (addr_right - addr_x).max(0) as u32;
     let address = Rect { x: addr_x as i32, y: back.y, w: addr_w, h: back.h };
 
-    ChromeLayout { top, back, address, throbber, attest, viewport, status }
+    ChromeLayout { top, back, reload, address, throbber, attest, viewport, status }
 }
 
 /// A snapshot of the interactive state `draw` needs to paint one frame.
@@ -148,6 +166,7 @@ pub fn draw(surface: &mut dyn Surface, lay: &ChromeLayout, st: &ChromeState) {
     }
 
     draw_back_button(surface, lay.back, st.can_go_back);
+    draw_reload_button(surface, lay.reload);
     draw_address(surface, lay.address, st.url);
     draw_attest_button(surface, lay.attest);
     draw_throbber(surface, lay.throbber, st.loading, st.throbber_frame);
@@ -176,6 +195,23 @@ fn draw_attest_button(surface: &mut dyn Surface, rect: Rect) {
     }
     surface.fill_rect(rect, BUTTON_COLOR);
     draw_centered_glyph(surface, rect, '\u{00A9}', INK);
+}
+
+/// The reload button (`packet/chrome-address-edit`): always painted
+/// "enabled" (like `attest`, unlike `back` — reloading the current page is
+/// always a valid action, no disabled state to represent). Glyph `'R'` — a
+/// plain, already-embedded ASCII capital letter (zero new glyph-atlas
+/// bytes), the leanest option that's still legible next to `back`'s `'<'`
+/// and `attest`'s `'\u{00A9}'`. Click wiring lives in `run_x11` (manual-
+/// verify, same posture as `back`'s own click handling) and reuses
+/// `XIntent::Reload`'s existing load/redraw logic — this function only
+/// paints.
+fn draw_reload_button(surface: &mut dyn Surface, rect: Rect) {
+    if rect.w == 0 || rect.h == 0 {
+        return;
+    }
+    surface.fill_rect(rect, BUTTON_COLOR);
+    draw_centered_glyph(surface, rect, 'R', INK);
 }
 
 fn draw_address(surface: &mut dyn Surface, rect: Rect, url: &str) {
@@ -313,6 +349,44 @@ mod tests {
         assert!(lay.address.x + lay.address.w as i32 <= lay.throbber.x);
     }
 
+    /// packet/chrome-address-edit, Task 4 — mirrors
+    /// `layout_attest_button_has_nonzero_size_and_does_not_overlap_siblings`.
+    #[test]
+    fn layout_reload_button_has_nonzero_size_and_does_not_overlap_siblings() {
+        let lay = layout(1024, 768);
+        assert!(lay.reload.w > 0 && lay.reload.h > 0, "reload rect: {:?}", lay.reload);
+
+        fn overlaps(a: Rect, b: Rect) -> bool {
+            a.x < b.x + b.w as i32
+                && b.x < a.x + a.w as i32
+                && a.y < b.y + b.h as i32
+                && b.y < a.y + a.h as i32
+        }
+        assert!(!overlaps(lay.reload, lay.back), "reload overlaps back: {:?} / {:?}", lay.reload, lay.back);
+        assert!(!overlaps(lay.reload, lay.address), "reload overlaps address: {:?} / {:?}", lay.reload, lay.address);
+        assert!(!overlaps(lay.reload, lay.attest), "reload overlaps attest: {:?} / {:?}", lay.reload, lay.attest);
+        assert!(!overlaps(lay.reload, lay.throbber), "reload overlaps throbber: {:?} / {:?}", lay.reload, lay.throbber);
+    }
+
+    /// packet/chrome-address-edit, Task 4 — mirrors
+    /// `layout_attest_button_tiny_window_never_panics_and_stays_in_bounds`.
+    #[test]
+    fn layout_reload_button_tiny_window_never_panics_and_stays_in_bounds() {
+        for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (5, 40), (40, 5), (3, 3)] {
+            let lay = layout(w, h);
+            assert!(lay.reload.w <= w, "reload width {} exceeds window width {w}", lay.reload.w);
+            assert!(lay.reload.h <= h, "reload height {} exceeds window height {h}", lay.reload.h);
+        }
+    }
+
+    /// Confirms the recompute, not just that `reload` exists in isolation:
+    /// `address`'s left bound must now sit at or past `reload`'s right edge.
+    #[test]
+    fn layout_address_left_bound_now_starts_after_reload() {
+        let lay = layout(1024, 768);
+        assert!(lay.address.x >= lay.reload.x + lay.reload.w as i32, "address {:?} starts before reload {:?} ends", lay.address, lay.reload);
+    }
+
     #[test]
     fn layout_attest_button_has_nonzero_size_and_does_not_overlap_siblings() {
         let lay = layout(1024, 768);
@@ -348,7 +422,7 @@ mod tests {
             // window bounds, and the three vertically-stacked bands
             // (top/viewport/status) never claim more height than the
             // window actually has.
-            for r in [lay.top, lay.back, lay.address, lay.throbber, lay.viewport, lay.status] {
+            for r in [lay.top, lay.back, lay.reload, lay.address, lay.throbber, lay.viewport, lay.status] {
                 assert!(r.w <= w, "rect width {} exceeds window width {} for ({w},{h})", r.w, w);
                 assert!(r.h <= h, "rect height {} exceeds window height {} for ({w},{h})", r.h, h);
             }
@@ -453,6 +527,38 @@ mod tests {
     fn draw_attest_button_guards_zero_size_rect_without_panicking() {
         let mut s = MemSurface::new(1, 1, Color::WHITE);
         draw_attest_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 });
+    }
+
+    /// packet/chrome-address-edit, Task 4 — mirrors
+    /// `draw_attest_button_guards_zero_size_rect_without_panicking`.
+    #[test]
+    fn draw_reload_button_guards_zero_size_rect_without_panicking() {
+        let mut s = MemSurface::new(1, 1, Color::WHITE);
+        draw_reload_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 });
+    }
+
+    /// Confirms the glyph actually painted, not just that the rect exists —
+    /// mirrors `draw_address_field_is_white_or_dark_ink_never_untouched`'s
+    /// probe style.
+    #[test]
+    fn draw_paints_a_non_background_pixel_inside_the_reload_button() {
+        let (w, h) = (300u32, 200u32);
+        let lay = layout(w, h);
+        let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let st = ChromeState { url: "http://example.test/", status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        draw(&mut s, &lay, &st);
+
+        assert!(lay.reload.w > 0 && lay.reload.h > 0, "test window should yield a real reload button");
+        let mut saw_non_button_color = false;
+        for y in lay.reload.y..(lay.reload.y + lay.reload.h as i32) {
+            for x in lay.reload.x..(lay.reload.x + lay.reload.w as i32) {
+                let px = bar_pixel(&s, x, y);
+                if px != (200, 200, 200, 255) {
+                    saw_non_button_color = true;
+                }
+            }
+        }
+        assert!(saw_non_button_color, "expected the 'R' glyph to paint at least one non-button-color pixel inside the reload rect");
     }
 
     #[test]
