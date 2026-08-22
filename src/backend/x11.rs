@@ -592,14 +592,20 @@ pub fn parse_keyboard_mapping_reply(buf: &[u8]) -> Result<(u8, Vec<u32>), String
 /// `main.rs`'s `classify_x11_intent` is the one that now reads the real
 /// Shift bit and passes `column: 1` while it's held.
 ///
-/// `None` if `keycode` is below `min_keycode`, `keysyms_per_keycode` is `0`,
-/// `column >= keysyms_per_keycode`, or the computed index runs past
-/// `keysyms` — never panics/indexes out of bounds, same totality contract
-/// the column-0-only version already had.
+/// `packet/chrome-ux-fixes`: `column >= keysyms_per_keycode` now FALLS BACK
+/// to column 0 (the unshifted keysym) instead of dropping the key entirely
+/// -- a keymap that's narrower than the column a caller asked for (e.g. a
+/// hypothetical single-column keymap with Shift held, `column: 1`) still
+/// yields the base key rather than silently eating the keypress. `None` is
+/// still returned for `keycode` below `min_keycode` or `keysyms_per_keycode
+/// == 0` (there's no column 0 to fall back to either) — never
+/// panics/indexes out of bounds, same totality contract the column-0-only
+/// version already had.
 pub fn keysym_for_keycode(keycode: u8, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], column: usize) -> Option<u32> {
-    if keysyms_per_keycode == 0 || keycode < min_keycode || column >= keysyms_per_keycode as usize {
+    if keysyms_per_keycode == 0 || keycode < min_keycode {
         return None;
     }
+    let column = if column >= keysyms_per_keycode as usize { 0 } else { column };
     let row = (keycode - min_keycode) as usize;
     let idx = row.checked_mul(keysyms_per_keycode as usize)?.checked_add(column)?;
     keysyms.get(idx).copied()
@@ -1729,12 +1735,19 @@ mod tests {
         assert_eq!(keysym_for_keycode(9, 8, 2, &keysyms, 1), Some('!' as u32));
     }
 
+    /// `packet/chrome-ux-fixes`: a column past the keymap's own width no
+    /// longer drops the key -- it falls back to column 0 (the unshifted
+    /// keysym), same as if the caller had asked for column 0 directly.
+    /// `keysyms_per_keycode == 0` (no column 0 to fall back to) and
+    /// `keycode < min_keycode` are unaffected and still `None`.
     #[test]
-    fn keysym_for_keycode_column_out_of_range_is_none_not_a_panic() {
+    fn keysym_for_keycode_column_out_of_range_falls_back_to_column_0() {
         let keysyms = vec!['a' as u32, 'A' as u32, '1' as u32, '!' as u32];
-        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 5), None);
-        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 2), None); // == keysyms_per_keycode
-        assert_eq!(keysym_for_keycode(8, 8, 0, &keysyms, 0), None); // keysyms_per_keycode itself 0
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 5), Some('a' as u32), "column past the width falls back to column 0");
+        assert_eq!(keysym_for_keycode(8, 8, 2, &keysyms, 2), Some('a' as u32), "column == keysyms_per_keycode falls back to column 0");
+        assert_eq!(keysym_for_keycode(9, 8, 2, &keysyms, 2), Some('1' as u32), "the fallback still uses the RIGHT row, not just row 0");
+        assert_eq!(keysym_for_keycode(8, 8, 0, &keysyms, 0), None, "keysyms_per_keycode itself 0: no column 0 to fall back to");
+        assert_eq!(keysym_for_keycode(7, 8, 2, &keysyms, 5), None, "keycode below min_keycode is still None regardless of column");
     }
 
     // ------------------------------------------------------------ keysym->Key
