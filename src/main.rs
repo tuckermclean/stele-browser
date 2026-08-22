@@ -2462,11 +2462,18 @@ fn print_x11_stats(stats: &X11Stats) {
 /// typing in the address bar must never scroll the document or reload it
 /// out from under the edit. `Tab` maps to `None` in both states (no
 /// multi-field focus cycling exists yet, design doc §3).
+///
+/// `packet/chrome-ux-fixes`: the mouse-wheel `ButtonPress` arms (buttons
+/// 4/5) are now ALSO gated on `!address_focused` — a wheel spin while the
+/// address bar is focused must not scroll the document out from under the
+/// edit, matching how the keyboard `Up`/`Down`/`PageUp`/`PageDown` arms
+/// already behave while focused.
 fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], height: u32, address_focused: bool) -> Option<stele::backend::x11::XIntent> {
     use stele::backend::x11::{self as xproto, EditIntent, XEvent, XIntent, X11Key};
     match ev {
-        XEvent::ButtonPress { button: 4, .. } => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
-        XEvent::ButtonPress { button: 5, .. } => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+        XEvent::ButtonPress { button: 4, .. } if !address_focused => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
+        XEvent::ButtonPress { button: 5, .. } if !address_focused => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+        XEvent::ButtonPress { button: 4, .. } | XEvent::ButtonPress { button: 5, .. } => None,
         XEvent::ButtonPress { button: 1, x, y } => Some(XIntent::Click { x: *x, y: *y }),
         XEvent::ButtonPress { .. } => None,
         XEvent::Expose { x, y, w, h, .. } => Some(XIntent::Expose { x: *x, y: *y, w: *w, h: *h }),
@@ -3560,6 +3567,31 @@ mod tests {
         let (min_kc, per_kc, keysyms) = classify_intent_keymap();
         let out = classify_x11_intent(&key_press(8, true), min_kc, per_kc, &keysyms, 600, true);
         assert_eq!(out, Some(XIntent::Edit(EditIntent::Insert('Q'))));
+    }
+
+    /// `packet/chrome-ux-fixes`: a wheel spin while the address bar is
+    /// focused must not scroll the document -- the mouse-wheel mirror of
+    /// the keyboard `Up`/`Down`/`PageUp`/`PageDown` gating already covered
+    /// by `classify_x11_intent_focused_routes_to_edit_and_q_no_longer_quits`.
+    #[test]
+    fn classify_x11_intent_wheel_scroll_is_gated_on_address_focus() {
+        use stele::backend::x11::{XEvent, XIntent};
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let up = XEvent::ButtonPress { button: 4, x: 0, y: 0 };
+        let down = XEvent::ButtonPress { button: 5, x: 0, y: 0 };
+
+        assert_eq!(
+            classify_x11_intent(&up, min_kc, per_kc, &keysyms, 600, false),
+            Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
+            "wheel-up scrolls when unfocused"
+        );
+        assert_eq!(
+            classify_x11_intent(&down, min_kc, per_kc, &keysyms, 600, false),
+            Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+            "wheel-down scrolls when unfocused"
+        );
+        assert_eq!(classify_x11_intent(&up, min_kc, per_kc, &keysyms, 600, true), None, "wheel-up must not scroll while the address bar is focused");
+        assert_eq!(classify_x11_intent(&down, min_kc, per_kc, &keysyms, 600, true), None, "wheel-down must not scroll while the address bar is focused");
     }
 
     // ------------------------------------------------------- x11_edit_arg
