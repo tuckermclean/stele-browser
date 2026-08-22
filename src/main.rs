@@ -1747,13 +1747,13 @@ struct X11Stats {
 /// Build the live `ChromeState` for one `run_x11` redraw from the shell's
 /// own history/status/loading/throbber state — `history.current()`'s URL
 /// (the display-only address bar), the caller-owned `status` line/`loading`
-/// flag, `throbber_frame`, and `history.can_go_back()`/`history.
-/// can_go_forward()`. A tiny free function rather than a closure so every
-/// one of `run_x11`'s several redraw sites can call it without fighting the
-/// borrow checker over `state`/`session`/`scroll_y`, which are ALSO mutated
-/// around the same call sites (a closure capturing `history`/`status` by
-/// reference would otherwise have to coexist with those other mutable
-/// borrows in scope).
+/// flag, `throbber_frame`, and `history.can_go_back()`/`can_go_forward()`.
+/// A tiny free function rather than a closure so every one of `run_x11`'s
+/// several redraw sites can call it without fighting the borrow checker
+/// over `state`/`session`/`scroll_y`, which are ALSO mutated around the
+/// same call sites (a closure capturing `history`/`status` by reference
+/// would otherwise have to coexist with those other mutable borrows in
+/// scope).
 fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading: bool, throbber_frame: u8, edit: Option<(&'a str, usize)>) -> chrome::ChromeState<'a> {
     chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back(), can_go_forward: history.can_go_forward() }
 }
