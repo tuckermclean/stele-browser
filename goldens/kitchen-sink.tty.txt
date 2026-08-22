@@ -21,7 +21,9 @@ Lists
   A blockquote: set apart from the surrounding text, per 1996 convention.
 
 
- preformatted text keeps its spacing
+
+ preformatted   text
+    keeps    its   spacing
 
 
 ────────────────────────────────────────────────────────────────────────────────

@@ -54,7 +54,7 @@ use std::rc::Rc;
 
 use crate::img::RgbaImage;
 use crate::layout::{Point, Rect, Size};
-use crate::style::computed::{Float as CssFloat, LineHeight, TextAlign};
+use crate::style::computed::{Float as CssFloat, LineHeight, TextAlign, WhiteSpace};
 use crate::style::ComputedStyle;
 use crate::text::{text_render_px, Metrics};
 
@@ -268,15 +268,28 @@ fn tokenize(runs: &[InlineRun]) -> Vec<Token> {
     for (i, r) in runs.iter().enumerate() {
         match &r.content {
             InlineContent::Text(text) => {
+                // `white-space: pre` (UA-set on `<pre>`, and inherited): a
+                // source newline is a HARD line break and interior whitespace
+                // is significant (kept in the word), instead of the default
+                // `normal` collapse-run-of-whitespace-to-one-break-opportunity.
+                // A bare `\r` is dropped so `\r\n` yields a single break; a tab
+                // renders as one space (no 8-col tab-stop expansion yet).
+                let pre = r.style.white_space == WhiteSpace::Pre;
                 for ch in text.chars() {
-                    if ch == LINE_BREAK_SENTINEL {
+                    if ch == LINE_BREAK_SENTINEL || (pre && ch == '\n') {
                         flush(&mut cur, &mut pending_space, &mut tokens);
                         tokens.push(Token::Break(i));
                         pending_space = false;
-                    } else if ch.is_whitespace() {
+                    } else if pre && ch == '\r' {
+                        // dropped: the paired '\n' already produced the break
+                    } else if !pre && ch.is_whitespace() {
                         flush(&mut cur, &mut pending_space, &mut tokens);
                         pending_space = true;
                     } else {
+                        // Non-`pre`: only non-whitespace reaches here.
+                        // `pre`: everything except newline/CR, INCLUDING
+                        // significant spaces, is kept verbatim (tab -> space).
+                        let ch = if pre && ch == '\t' { ' ' } else { ch };
                         match &mut cur {
                             Some((run, t)) if *run == i => t.push(ch),
                             _ => {
@@ -850,6 +863,23 @@ mod tests {
         let runs = [run("   \t\n  ")];
         let out = layout_runs(&runs, 1000.0, TextAlign::Left, &FixedMetrics);
         assert_eq!(out.lines.len(), 0);
+    }
+
+    #[test]
+    fn white_space_pre_breaks_on_newline_and_preserves_interior_spaces() {
+        let pre_run = |text: &str| {
+            let mut style = ComputedStyle::default();
+            style.white_space = WhiteSpace::Pre;
+            InlineRun { content: InlineContent::Text(text.to_string()), style, interactive: None }
+        };
+        // Default `white-space: normal` collapses "a    b\n c" to one line;
+        // `pre` keeps the newline as a hard break AND the four interior spaces.
+        let normal = layout_runs(&[run("a    b\nc")], 1000.0, TextAlign::Left, &FixedMetrics);
+        assert_eq!(normal.lines.len(), 1, "normal white-space collapses the source newline");
+        let pre = layout_runs(&[pre_run("a    b\nc")], 1000.0, TextAlign::Left, &FixedMetrics);
+        assert_eq!(pre.lines.len(), 2, "pre honors the source newline as a hard break");
+        assert_eq!(pre.lines[0].runs[0].text, "a    b", "pre preserves interior spaces");
+        assert_eq!(pre.lines[1].runs[0].text, "c");
     }
 
     #[test]
