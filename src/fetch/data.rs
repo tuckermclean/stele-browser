@@ -5,6 +5,15 @@
 //! `%2B`/`%2F`/`%3D`) to survive contexts (CSS `url()`, HTML attributes)
 //! that could otherwise misparse those characters literally. The payload is
 //! therefore always percent-decoded FIRST, then base64-decoded.
+//!
+//! `packet/chrome-ux-fixes`: the same reasoning applies to the MEDIA-TYPE
+//! portion (everything before the comma) -- it's just as much URI content
+//! as the payload, so a media type/charset param may legitimately
+//! percent-escape characters that would otherwise be awkward in whatever
+//! embeds the `data:` URI (e.g. `%3B` for a literal `;` inside an HTML
+//! attribute, `%2F` for `/`). It's percent-decoded before the `;base64`
+//! suffix is checked, so an escaped `;base64` flag (`%3Bbase64`) is
+//! detected too, not just a literal one.
 use super::{FetchError, Request, Response};
 
 pub fn fetch(request: &Request) -> Result<Response, FetchError> {
@@ -19,16 +28,22 @@ pub fn fetch(request: &Request) -> Result<Response, FetchError> {
         .split_once(',')
         .ok_or_else(|| FetchError::Protocol("malformed data: URL (no comma)".to_string()))?;
 
-    let (media_type, is_base64) = match meta.strip_suffix_ci(";base64") {
-        Some(mt) => (mt, true),
-        None => (meta, false),
+    // Percent-decode the media-type portion FIRST (same "decode, then
+    // interpret" order the payload already gets -- see this module's own
+    // doc comment), then check for the `;base64` suffix on the DECODED
+    // string. `from_utf8_lossy` keeps this total: a hostile media type that
+    // decodes to invalid UTF-8 never panics, it just gets the replacement
+    // character where the bytes don't form valid UTF-8.
+    let decoded_meta = String::from_utf8_lossy(&percent_decode(meta.as_bytes())).into_owned();
+    let (media_type, is_base64) = match decoded_meta.strip_suffix_ci(";base64") {
+        Some(mt) => (mt.to_string(), true),
+        None => (decoded_meta.clone(), false),
     };
     let media_type = if media_type.is_empty() {
-        "text/plain;charset=US-ASCII"
+        "text/plain;charset=US-ASCII".to_string()
     } else {
         media_type
-    }
-    .to_string();
+    };
 
     let body = if is_base64 {
         decode_base64(&percent_decode(payload.as_bytes()))?
@@ -301,6 +316,46 @@ mod tests {
     fn fetch_non_data_scheme_is_protocol_error() {
         let err = fetch(&get("http://example.com")).unwrap_err();
         assert!(matches!(err, FetchError::Protocol(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn fetch_percent_escaped_slash_in_media_type_resolves_correctly() {
+        // `packet/chrome-ux-fixes`: `%2F` in the media-type portion (before
+        // the comma) must decode to `/`, exactly like a literal slash would.
+        let resp = fetch(&get("data:text%2Fplain,Hello")).unwrap();
+        assert_eq!(resp.body, b"Hello");
+        assert_eq!(resp.header("content-type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn fetch_percent_escaped_charset_param_in_media_type_resolves_correctly() {
+        // A percent-escaped `;` (`%3B`) introducing the charset param.
+        let resp = fetch(&get("data:text/plain%3Bcharset=utf-8,Hi")).unwrap();
+        assert_eq!(resp.body, b"Hi");
+        assert_eq!(resp.header("content-type"), Some("text/plain;charset=utf-8"));
+    }
+
+    #[test]
+    fn fetch_percent_escaped_base64_flag_in_media_type_is_still_detected() {
+        // The `;base64` flag itself, percent-escaped (`%3Bbase64`), must
+        // still be detected as the base64 flag AFTER decoding -- proves the
+        // "decode first, then check the suffix" order (module doc comment).
+        let raw: &[u8] = b"Hi";
+        let b64 = encode_base64_for_test(raw);
+        let url = format!("data:text/plain%3Bbase64,{b64}");
+        let resp = fetch(&get(&url)).unwrap();
+        assert_eq!(resp.body, raw);
+        assert_eq!(resp.header("content-type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn fetch_malformed_percent_escape_in_media_type_does_not_panic() {
+        // Totality: a bad hex escape in the media type must not panic --
+        // `percent_decode`'s existing literal-passthrough behavior handles
+        // it, same as it already does for the payload.
+        let resp = fetch(&get("data:text%ZZplain,Hello")).unwrap();
+        assert_eq!(resp.body, b"Hello");
+        assert_eq!(resp.header("content-type"), Some("text%ZZplain"));
     }
 
     #[test]

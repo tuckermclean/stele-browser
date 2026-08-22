@@ -32,13 +32,20 @@ pub struct ChromeLayout {
     pub top: Rect,
     /// The back-navigation button, a roughly-square box at the left of `top`.
     pub back: Rect,
+    /// The forward-navigation button (`packet/chrome-ux-fixes`): a
+    /// roughly-square box immediately right of `back` -- same size/clamp
+    /// discipline, mirroring it exactly except for the glyph `draw` paints
+    /// and which `ChromeState` flag (`can_go_forward` vs `can_go_back`) it
+    /// dims on. `reload`'s own left bound (below) is now computed against
+    /// THIS rect instead of `back` directly, since it sits in between.
+    pub forward: Rect,
     /// The reload button (`packet/chrome-address-edit`): a roughly-square
-    /// box immediately right of `back` — both are "page navigation"
-    /// actions, grouped left, matching the back-then-address reading order
-    /// most browsers use. Clicking it re-runs the SAME load/redraw
-    /// sequence `XIntent::Reload`/`F5` already trigger (`run_x11`) — this
-    /// rect is purely a second, discoverable trigger for that existing
-    /// logic, not new reload machinery.
+    /// box immediately right of `forward` — all three are "page navigation"
+    /// actions, grouped left, matching the back/forward-then-address
+    /// reading order most browsers use. Clicking it re-runs the SAME
+    /// load/redraw sequence `XIntent::Reload`/`F5` already trigger
+    /// (`run_x11`) — this rect is purely a second, discoverable trigger for
+    /// that existing logic, not new reload machinery.
     pub reload: Rect,
     /// The address field, the space between `reload` and `attest`.
     pub address: Rect,
@@ -89,12 +96,22 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
 
     const GAP: i64 = 4;
 
+    // Forward button (packet/chrome-ux-fixes): mirrors `back` exactly --
+    // same ~24px-square size/clamp discipline, sitting immediately right of
+    // it. `reload`'s own left bound (below) is computed against THIS rect,
+    // not `back` directly, now that it sits in between.
+    let forward_size = 24u32.min(top_h.saturating_sub(4)).min(win_w.saturating_sub(4));
+    let forward_x = (back.x as i64 + back.w as i64 + GAP) as i32;
+    let forward_y = INSET + ((top_h.saturating_sub(4).saturating_sub(forward_size)) / 2) as i32;
+    let forward = Rect { x: forward_x, y: forward_y, w: forward_size, h: forward_size };
+
     // Reload button (packet/chrome-address-edit): another ~20px square,
-    // immediately right of `back` -- same size/clamp discipline as
+    // immediately right of `forward` -- same size/clamp discipline as
     // `attest`/`throbber`. `address`'s left bound (below) is computed
-    // against THIS rect, not `back` directly, now that it sits in between.
+    // against THIS rect, not `back`/`forward` directly, now that they sit
+    // in between.
     let reload_size = 20u32.min(top_h.saturating_sub(4)).min(win_w.saturating_sub(4));
-    let reload_x = (back.x as i64 + back.w as i64 + GAP) as i32;
+    let reload_x = (forward.x as i64 + forward.w as i64 + GAP) as i32;
     let reload_y = INSET + ((top_h.saturating_sub(4).saturating_sub(reload_size)) / 2) as i32;
     let reload = Rect { x: reload_x, y: reload_y, w: reload_size, h: reload_size };
 
@@ -117,7 +134,7 @@ pub fn layout(win_w: u32, win_h: u32) -> ChromeLayout {
     let addr_w = (addr_right - addr_x).max(0) as u32;
     let address = Rect { x: addr_x as i32, y: back.y, w: addr_w, h: back.h };
 
-    ChromeLayout { top, back, reload, address, throbber, attest, viewport, status }
+    ChromeLayout { top, back, forward, reload, address, throbber, attest, viewport, status }
 }
 
 /// A snapshot of the interactive state `draw` needs to paint one frame.
@@ -142,6 +159,10 @@ pub struct ChromeState<'a> {
     pub throbber_frame: u8,
     /// Whether the back button should render enabled (a non-empty history stack).
     pub can_go_back: bool,
+    /// `packet/chrome-ux-fixes`: whether the forward button should render
+    /// enabled (a non-empty `History::forward` stack) -- the mirror of
+    /// `can_go_back` for the new forward button.
+    pub can_go_forward: bool,
 }
 
 /// Bar background (top bar + status bar).
@@ -175,6 +196,7 @@ pub fn draw(surface: &mut dyn Surface, lay: &ChromeLayout, st: &ChromeState) {
     }
 
     draw_back_button(surface, lay.back, st.can_go_back);
+    draw_forward_button(surface, lay.forward, st.can_go_forward);
     draw_reload_button(surface, lay.reload);
     draw_address(surface, lay.address, st.url, st.edit);
     draw_attest_button(surface, lay.attest);
@@ -189,6 +211,20 @@ fn draw_back_button(surface: &mut dyn Surface, rect: Rect, can_go_back: bool) {
     let (box_color, ink) = if can_go_back { (BUTTON_COLOR, INK) } else { (BUTTON_DISABLED_COLOR, INK_DIMMED) };
     surface.fill_rect(rect, box_color);
     draw_centered_glyph(surface, rect, '<', ink);
+}
+
+/// The forward-navigation button (`packet/chrome-ux-fixes`): mirrors
+/// `draw_back_button` exactly, dimmed on `!can_go_forward` the same way
+/// `back` dims on `!can_go_back`. Glyph `'>'` -- a plain, already-embedded
+/// ASCII char (zero new glyph-atlas bytes), the mirror image of `back`'s
+/// `'<'`.
+fn draw_forward_button(surface: &mut dyn Surface, rect: Rect, can_go_forward: bool) {
+    if rect.w == 0 || rect.h == 0 {
+        return;
+    }
+    let (box_color, ink) = if can_go_forward { (BUTTON_COLOR, INK) } else { (BUTTON_DISABLED_COLOR, INK_DIMMED) };
+    surface.fill_rect(rect, box_color);
+    draw_centered_glyph(surface, rect, '>', ink);
 }
 
 /// The attestations affordance (packet/attestation-modal): always painted
@@ -400,6 +436,45 @@ mod tests {
         assert!(lay.address.x + lay.address.w as i32 <= lay.throbber.x);
     }
 
+    /// `packet/chrome-ux-fixes` — mirrors
+    /// `layout_reload_button_has_nonzero_size_and_does_not_overlap_siblings`.
+    #[test]
+    fn layout_forward_button_has_nonzero_size_and_does_not_overlap_siblings() {
+        let lay = layout(1024, 768);
+        assert!(lay.forward.w > 0 && lay.forward.h > 0, "forward rect: {:?}", lay.forward);
+
+        fn overlaps(a: Rect, b: Rect) -> bool {
+            a.x < b.x + b.w as i32
+                && b.x < a.x + a.w as i32
+                && a.y < b.y + b.h as i32
+                && b.y < a.y + a.h as i32
+        }
+        assert!(!overlaps(lay.forward, lay.back), "forward overlaps back: {:?} / {:?}", lay.forward, lay.back);
+        assert!(!overlaps(lay.forward, lay.reload), "forward overlaps reload: {:?} / {:?}", lay.forward, lay.reload);
+        assert!(!overlaps(lay.forward, lay.address), "forward overlaps address: {:?} / {:?}", lay.forward, lay.address);
+        assert!(!overlaps(lay.forward, lay.attest), "forward overlaps attest: {:?} / {:?}", lay.forward, lay.attest);
+        assert!(!overlaps(lay.forward, lay.throbber), "forward overlaps throbber: {:?} / {:?}", lay.forward, lay.throbber);
+    }
+
+    /// `packet/chrome-ux-fixes` — mirrors
+    /// `layout_reload_button_tiny_window_never_panics_and_stays_in_bounds`.
+    #[test]
+    fn layout_forward_button_tiny_window_never_panics_and_stays_in_bounds() {
+        for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (5, 40), (40, 5), (3, 3)] {
+            let lay = layout(w, h);
+            assert!(lay.forward.w <= w, "forward width {} exceeds window width {w}", lay.forward.w);
+            assert!(lay.forward.h <= h, "forward height {} exceeds window height {h}", lay.forward.h);
+        }
+    }
+
+    /// Confirms the recompute, not just that `forward` exists in isolation:
+    /// `reload`'s left bound must now sit at or past `forward`'s right edge.
+    #[test]
+    fn layout_reload_left_bound_now_starts_after_forward() {
+        let lay = layout(1024, 768);
+        assert!(lay.reload.x >= lay.forward.x + lay.forward.w as i32, "reload {:?} starts before forward {:?} ends", lay.reload, lay.forward);
+    }
+
     /// packet/chrome-address-edit, Task 4 — mirrors
     /// `layout_attest_button_has_nonzero_size_and_does_not_overlap_siblings`.
     #[test]
@@ -473,7 +548,7 @@ mod tests {
             // window bounds, and the three vertically-stacked bands
             // (top/viewport/status) never claim more height than the
             // window actually has.
-            for r in [lay.top, lay.back, lay.reload, lay.address, lay.throbber, lay.viewport, lay.status] {
+            for r in [lay.top, lay.back, lay.forward, lay.reload, lay.address, lay.throbber, lay.viewport, lay.status] {
                 assert!(r.w <= w, "rect width {} exceeds window width {} for ({w},{h})", r.w, w);
                 assert!(r.h <= h, "rect height {} exceeds window height {} for ({w},{h})", r.h, h);
             }
@@ -499,7 +574,7 @@ mod tests {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
-        let st = ChromeState { url: "http://example.test/", edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false, can_go_forward: false };
         draw(&mut s, &lay, &st);
 
         // A point in the top bar away from the back/address/throbber boxes:
@@ -518,7 +593,7 @@ mod tests {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
-        let st = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.address.w > 0 && lay.address.h > 0, "test window should yield a real address field");
@@ -542,7 +617,7 @@ mod tests {
         let long_url: String = std::iter::repeat("http://example.test/very/long/path/segment/")
             .take(50)
             .collect();
-        let st = ChromeState { url: &long_url, edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: &long_url, edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         // Just past the address field's right edge, inside the top bar
@@ -566,7 +641,7 @@ mod tests {
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
         let buf = "http://x/";
         let cursor = 5;
-        let st = ChromeState { url: "http://unused/", edit: Some((buf, cursor)), status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: "http://unused/", edit: Some((buf, cursor)), status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.address.w > 0 && lay.address.h > 0, "test window should yield a real address field");
@@ -610,7 +685,7 @@ mod tests {
             .take(50)
             .collect();
         let cursor = long_buf.chars().count();
-        let st = ChromeState { url: "http://unused/", edit: Some((&long_buf, cursor)), status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: "http://unused/", edit: Some((&long_buf, cursor)), status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         let probe_x = lay.address.x + lay.address.w as i32 + 1;
@@ -628,7 +703,7 @@ mod tests {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
-        let st = ChromeState { url: "http://unused/", edit: Some(("", 0)), status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: "http://unused/", edit: Some(("", 0)), status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.address.w > 0 && lay.address.h > 0);
@@ -643,7 +718,7 @@ mod tests {
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
         let long_status: String = std::iter::repeat('x').take(500).collect();
-        let st = ChromeState { url: "http://example.test/", edit: None, status: &long_status, loading: true, throbber_frame: 7, can_go_back: true };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: &long_status, loading: true, throbber_frame: 7, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.viewport.h > 0, "test window should yield a real viewport");
@@ -669,6 +744,15 @@ mod tests {
         draw_reload_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 });
     }
 
+    /// `packet/chrome-ux-fixes` — mirrors
+    /// `draw_reload_button_guards_zero_size_rect_without_panicking`.
+    #[test]
+    fn draw_forward_button_guards_zero_size_rect_without_panicking() {
+        let mut s = MemSurface::new(1, 1, Color::WHITE);
+        draw_forward_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 }, true);
+        draw_forward_button(&mut s, Rect { x: 0, y: 0, w: 0, h: 0 }, false);
+    }
+
     /// Confirms the glyph actually painted, not just that the rect exists —
     /// mirrors `draw_address_field_is_white_or_dark_ink_never_untouched`'s
     /// probe style.
@@ -677,7 +761,7 @@ mod tests {
         let (w, h) = (300u32, 200u32);
         let lay = layout(w, h);
         let mut s = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
-        let st = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true };
+        let st = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
         draw(&mut s, &lay, &st);
 
         assert!(lay.reload.w > 0 && lay.reload.h > 0, "test window should yield a real reload button");
@@ -693,12 +777,36 @@ mod tests {
         assert!(saw_non_button_color, "expected the 'R' glyph to paint at least one non-button-color pixel inside the reload rect");
     }
 
+    /// `packet/chrome-ux-fixes`: confirms the forward button dims like
+    /// `back` does — enabled uses `BUTTON_COLOR`/`INK`, disabled uses
+    /// `BUTTON_DISABLED_COLOR`/`INK_DIMMED`, and the two box fills differ.
+    #[test]
+    fn draw_forward_button_dims_when_can_go_forward_is_false() {
+        let (w, h) = (300u32, 200u32);
+        let lay = layout(w, h);
+
+        let mut enabled = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let st_enabled = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: true };
+        draw(&mut enabled, &lay, &st_enabled);
+
+        let mut disabled = MemSurface::new(w, h, Color::rgba(0, 0, 0, 0));
+        let st_disabled = ChromeState { url: "http://example.test/", edit: None, status: "", loading: false, throbber_frame: 0, can_go_back: true, can_go_forward: false };
+        draw(&mut disabled, &lay, &st_disabled);
+
+        assert!(lay.forward.w > 0 && lay.forward.h > 0, "test window should yield a real forward button");
+        // The box fill itself (a corner pixel, away from the glyph) must
+        // differ between enabled/disabled.
+        let corner_enabled = bar_pixel(&enabled, lay.forward.x, lay.forward.y);
+        let corner_disabled = bar_pixel(&disabled, lay.forward.x, lay.forward.y);
+        assert_ne!(corner_enabled, corner_disabled, "enabled/disabled forward button box fill must differ");
+    }
+
     #[test]
     fn draw_never_panics_on_a_tiny_or_degenerate_window() {
         for (w, h) in [(10u32, 10u32), (0, 0), (1, 1), (2, 2)] {
             let lay = layout(w, h);
             let mut s = MemSurface::new(w.max(1), h.max(1), Color::WHITE);
-            let st = ChromeState { url: "x", edit: None, status: "y", loading: true, throbber_frame: 200, can_go_back: false };
+            let st = ChromeState { url: "x", edit: None, status: "y", loading: true, throbber_frame: 200, can_go_back: false, can_go_forward: false };
             draw(&mut s, &lay, &st);
         }
     }
@@ -709,7 +817,7 @@ mod tests {
         let lay = layout(w, h);
         for frame in 0..=255u8 {
             let mut s = MemSurface::new(w, h, Color::WHITE);
-            let st = ChromeState { url: "", edit: None, status: "", loading: frame % 2 == 0, throbber_frame: frame, can_go_back: frame % 3 == 0 };
+            let st = ChromeState { url: "", edit: None, status: "", loading: frame % 2 == 0, throbber_frame: frame, can_go_back: frame % 3 == 0, can_go_forward: frame % 5 == 0 };
             draw(&mut s, &lay, &st);
         }
     }

@@ -1048,7 +1048,7 @@ fn dump_png_chrome_opts(
     chrome::draw(
         &mut window,
         &lay,
-        &chrome::ChromeState { url: &final_url, edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false },
+        &chrome::ChromeState { url: &final_url, edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false, can_go_forward: false },
     );
 
     raster::encode_png(&window)
@@ -1747,14 +1747,15 @@ struct X11Stats {
 /// Build the live `ChromeState` for one `run_x11` redraw from the shell's
 /// own history/status/loading/throbber state — `history.current()`'s URL
 /// (the display-only address bar), the caller-owned `status` line/`loading`
-/// flag, `throbber_frame`, and `history.can_go_back()`. A tiny free function
-/// rather than a closure so every one of `run_x11`'s several redraw sites
-/// can call it without fighting the borrow checker over `state`/`session`/
-/// `scroll_y`, which are ALSO mutated around the same call sites (a closure
-/// capturing `history`/`status` by reference would otherwise have to
-/// coexist with those other mutable borrows in scope).
+/// flag, `throbber_frame`, and `history.can_go_back()`/`can_go_forward()`.
+/// A tiny free function rather than a closure so every one of `run_x11`'s
+/// several redraw sites can call it without fighting the borrow checker
+/// over `state`/`session`/`scroll_y`, which are ALSO mutated around the
+/// same call sites (a closure capturing `history`/`status` by reference
+/// would otherwise have to coexist with those other mutable borrows in
+/// scope).
 fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading: bool, throbber_frame: u8, edit: Option<(&'a str, usize)>) -> chrome::ChromeState<'a> {
-    chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back() }
+    chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back(), can_go_forward: history.can_go_forward() }
 }
 
 /// `packet/chrome-address-edit`: the `edit` argument every `x11_chrome_state`
@@ -2057,6 +2058,41 @@ fn run_x11(source: &str) {
                                 }
                                 Err(e) => {
                                     eprintln!("stele: --x11: back-navigation reload failed: {e}");
+                                    status = format!("Failed to load: {e}");
+                                }
+                            }
+                            loading = false;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+                        }
+                    } else if x11_point_in_rect(lay.forward, x, y) && history.can_go_forward() {
+                        // Forward button (`packet/chrome-ux-fixes`): the
+                        // mirror image of the back-button branch above --
+                        // pop `history.forward`, then reload whatever that
+                        // lands on, same load/status/throbber treatment.
+                        if history.forward() {
+                            status = format!("Loading {}...", history.current().as_str());
+                            loading = true;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                            match load_x11_page(history.current(), width) {
+                                Ok((sess, s)) => {
+                                    session = sess;
+                                    state = s;
+                                    scroll_y = 0;
+                                    status = String::from("Done");
+                                }
+                                Err(e) => {
+                                    eprintln!("stele: --x11: forward-navigation reload failed: {e}");
                                     status = format!("Failed to load: {e}");
                                 }
                             }
@@ -2426,11 +2462,25 @@ fn print_x11_stats(stats: &X11Stats) {
 /// typing in the address bar must never scroll the document or reload it
 /// out from under the edit. `Tab` maps to `None` in both states (no
 /// multi-field focus cycling exists yet, design doc §3).
+///
+/// `packet/chrome-ux-fixes`: the mouse-wheel `ButtonPress` arms (buttons
+/// 4/5) are now ALSO gated on `!address_focused` — a wheel spin while the
+/// address bar is focused must not scroll the document out from under the
+/// edit, matching how the keyboard `Up`/`Down`/`PageUp`/`PageDown` arms
+/// already behave while focused.
+///
+/// `packet/chrome-ux-fixes`: `Ctrl+Q` (`ControlMask`, bit 2 of the
+/// KeyButMask `state`, mask `0x0004`) maps to `XIntent::Quit`
+/// UNCONDITIONALLY — checked before the `address_focused` branch, so it
+/// works whether or not the address bar is focused. A modifier chord is
+/// never meant as text input, unlike bare `q` (which only quits while
+/// unfocused, per the collision fix above).
 fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], height: u32, address_focused: bool) -> Option<stele::backend::x11::XIntent> {
     use stele::backend::x11::{self as xproto, EditIntent, XEvent, XIntent, X11Key};
     match ev {
-        XEvent::ButtonPress { button: 4, .. } => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
-        XEvent::ButtonPress { button: 5, .. } => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+        XEvent::ButtonPress { button: 4, .. } if !address_focused => Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
+        XEvent::ButtonPress { button: 5, .. } if !address_focused => Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+        XEvent::ButtonPress { button: 4, .. } | XEvent::ButtonPress { button: 5, .. } => None,
         XEvent::ButtonPress { button: 1, x, y } => Some(XIntent::Click { x: *x, y: *y }),
         XEvent::ButtonPress { .. } => None,
         XEvent::Expose { x, y, w, h, .. } => Some(XIntent::Expose { x: *x, y: *y, w: *w, h: *h }),
@@ -2448,6 +2498,15 @@ fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysym
             let column = if state & 0x0001 != 0 { 1 } else { 0 };
             let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms, column)?;
             let key = xproto::keysym_to_key(sym)?;
+
+            // Ctrl+Q: a modifier quit that works regardless of address-bar
+            // focus (see doc comment above) -- checked before the
+            // `address_focused` split so it can never be swallowed/routed
+            // to `Edit(Insert('q'))` like a bare `q` is while focused.
+            const CONTROL_MASK: u16 = 0x0004;
+            if state & CONTROL_MASK != 0 && key == X11Key::Char('q') {
+                return Some(XIntent::Quit);
+            }
 
             if address_focused {
                 return match key {
@@ -3524,6 +3583,54 @@ mod tests {
         let (min_kc, per_kc, keysyms) = classify_intent_keymap();
         let out = classify_x11_intent(&key_press(8, true), min_kc, per_kc, &keysyms, 600, true);
         assert_eq!(out, Some(XIntent::Edit(EditIntent::Insert('Q'))));
+    }
+
+    /// `packet/chrome-ux-fixes`: a wheel spin while the address bar is
+    /// focused must not scroll the document -- the mouse-wheel mirror of
+    /// the keyboard `Up`/`Down`/`PageUp`/`PageDown` gating already covered
+    /// by `classify_x11_intent_focused_routes_to_edit_and_q_no_longer_quits`.
+    #[test]
+    fn classify_x11_intent_wheel_scroll_is_gated_on_address_focus() {
+        use stele::backend::x11::{XEvent, XIntent};
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let up = XEvent::ButtonPress { button: 4, x: 0, y: 0 };
+        let down = XEvent::ButtonPress { button: 5, x: 0, y: 0 };
+
+        assert_eq!(
+            classify_x11_intent(&up, min_kc, per_kc, &keysyms, 600, false),
+            Some(XIntent::ScrollBy(-(X11_LINE_SCROLL as i32))),
+            "wheel-up scrolls when unfocused"
+        );
+        assert_eq!(
+            classify_x11_intent(&down, min_kc, per_kc, &keysyms, 600, false),
+            Some(XIntent::ScrollBy(X11_LINE_SCROLL as i32)),
+            "wheel-down scrolls when unfocused"
+        );
+        assert_eq!(classify_x11_intent(&up, min_kc, per_kc, &keysyms, 600, true), None, "wheel-up must not scroll while the address bar is focused");
+        assert_eq!(classify_x11_intent(&down, min_kc, per_kc, &keysyms, 600, true), None, "wheel-down must not scroll while the address bar is focused");
+    }
+
+    /// `packet/chrome-ux-fixes`: Ctrl+Q quits regardless of address-bar
+    /// focus; plain `q` keeps its existing, focus-dependent behavior
+    /// (quits unfocused, inserts while focused -- already pinned by the two
+    /// tests above this one).
+    #[test]
+    fn classify_x11_intent_ctrl_q_quits_focused_or_unfocused() {
+        use stele::backend::x11::{EditIntent, XEvent, XIntent};
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let ctrl_q = XEvent::KeyPress { keycode: 8, state: 0x0004 };
+
+        assert_eq!(classify_x11_intent(&ctrl_q, min_kc, per_kc, &keysyms, 600, false), Some(XIntent::Quit), "Ctrl+Q quits while unfocused");
+        assert_eq!(classify_x11_intent(&ctrl_q, min_kc, per_kc, &keysyms, 600, true), Some(XIntent::Quit), "Ctrl+Q quits while focused too -- a chord is never text input");
+
+        // Unchanged plain-`q` behavior, pinned again here for contrast with
+        // the Ctrl+Q assertions right above.
+        assert_eq!(classify_x11_intent(&key_press(8, false), min_kc, per_kc, &keysyms, 600, false), Some(XIntent::Quit), "plain 'q' unfocused still quits");
+        assert_eq!(
+            classify_x11_intent(&key_press(8, false), min_kc, per_kc, &keysyms, 600, true),
+            Some(XIntent::Edit(EditIntent::Insert('q'))),
+            "plain 'q' focused still inserts, unchanged"
+        );
     }
 
     // ------------------------------------------------------- x11_edit_arg
