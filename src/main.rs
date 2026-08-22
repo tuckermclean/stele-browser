@@ -1048,7 +1048,7 @@ fn dump_png_chrome_opts(
     chrome::draw(
         &mut window,
         &lay,
-        &chrome::ChromeState { url: &final_url, edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false },
+        &chrome::ChromeState { url: &final_url, edit: None, status: "Done", loading: false, throbber_frame: 0, can_go_back: false, can_go_forward: false },
     );
 
     raster::encode_png(&window)
@@ -1747,14 +1747,15 @@ struct X11Stats {
 /// Build the live `ChromeState` for one `run_x11` redraw from the shell's
 /// own history/status/loading/throbber state — `history.current()`'s URL
 /// (the display-only address bar), the caller-owned `status` line/`loading`
-/// flag, `throbber_frame`, and `history.can_go_back()`. A tiny free function
-/// rather than a closure so every one of `run_x11`'s several redraw sites
-/// can call it without fighting the borrow checker over `state`/`session`/
-/// `scroll_y`, which are ALSO mutated around the same call sites (a closure
-/// capturing `history`/`status` by reference would otherwise have to
-/// coexist with those other mutable borrows in scope).
+/// flag, `throbber_frame`, and `history.can_go_back()`/`history.
+/// can_go_forward()`. A tiny free function rather than a closure so every
+/// one of `run_x11`'s several redraw sites can call it without fighting the
+/// borrow checker over `state`/`session`/`scroll_y`, which are ALSO mutated
+/// around the same call sites (a closure capturing `history`/`status` by
+/// reference would otherwise have to coexist with those other mutable
+/// borrows in scope).
 fn x11_chrome_state<'a>(history: &'a browser::History, status: &'a str, loading: bool, throbber_frame: u8, edit: Option<(&'a str, usize)>) -> chrome::ChromeState<'a> {
-    chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back() }
+    chrome::ChromeState { url: history.current().as_str(), edit, status, loading, throbber_frame, can_go_back: history.can_go_back(), can_go_forward: history.can_go_forward() }
 }
 
 /// `packet/chrome-address-edit`: the `edit` argument every `x11_chrome_state`
@@ -2057,6 +2058,41 @@ fn run_x11(source: &str) {
                                 }
                                 Err(e) => {
                                     eprintln!("stele: --x11: back-navigation reload failed: {e}");
+                                    status = format!("Failed to load: {e}");
+                                }
+                            }
+                            loading = false;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+                        }
+                    } else if x11_point_in_rect(lay.forward, x, y) && history.can_go_forward() {
+                        // Forward button (`packet/chrome-ux-fixes`): the
+                        // mirror image of the back-button branch above --
+                        // pop `history.forward`, then reload whatever that
+                        // lands on, same load/status/throbber treatment.
+                        if history.forward() {
+                            status = format!("Loading {}...", history.current().as_str());
+                            loading = true;
+                            throbber_frame = throbber_frame.wrapping_add(1);
+                            conn.begin_frame();
+                            x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                            let _ = conn.end_frame();
+                            stats.frames += 1;
+                            stats.put_image_bytes += width as u64 * height as u64 * 4;
+
+                            match load_x11_page(history.current(), width) {
+                                Ok((sess, s)) => {
+                                    session = sess;
+                                    state = s;
+                                    scroll_y = 0;
+                                    status = String::from("Done");
+                                }
+                                Err(e) => {
+                                    eprintln!("stele: --x11: forward-navigation reload failed: {e}");
                                     status = format!("Failed to load: {e}");
                                 }
                             }

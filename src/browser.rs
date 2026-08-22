@@ -1316,11 +1316,19 @@ fn mouse_click(col: usize, row: usize, view: ViewState, page: &Page) -> (ViewSta
 #[derive(Debug, Clone)]
 pub struct History {
     stack: Vec<Url>,
+    /// `packet/chrome-ux-fixes`: URLs popped off `stack` by `back()`, most-
+    /// recently-popped last — the mirror image of `stack` itself, so
+    /// `forward()` is just "pop here, push there" (see its own doc comment).
+    /// A fresh `navigate()` CLEARS this — standard browser behavior: once
+    /// you branch off onto a new URL, the old "future" is gone, exactly
+    /// like every desktop/mobile browser's forward button greying out after
+    /// a fresh navigation from a back-visited page.
+    forward: Vec<Url>,
 }
 
 impl History {
     pub fn new(initial: Url) -> Self {
-        History { stack: vec![initial] }
+        History { stack: vec![initial], forward: Vec::new() }
     }
 
     /// The current URL. `stack` is never empty by construction (`new`
@@ -1330,17 +1338,22 @@ impl History {
         self.stack.last().expect("History::stack is never empty")
     }
 
+    /// A new navigation abandons whatever `forward` history existed —
+    /// see the field's own doc comment.
     pub fn navigate(&mut self, url: Url) {
+        self.forward.clear();
         self.stack.push(url);
     }
 
     /// Pop back to the previous URL; a no-op (returns `false`) at the very
     /// first entry — there's nothing further back to go, and popping the
     /// last element would violate the "never empty" invariant `current`
-    /// relies on.
+    /// relies on. The popped (soon-to-be-former) current URL is pushed onto
+    /// `forward` first, so `forward()` can undo this exact step.
     pub fn back(&mut self) -> bool {
         if self.stack.len() > 1 {
-            self.stack.pop();
+            let popped = self.stack.pop().expect("checked len() > 1 above");
+            self.forward.push(popped);
             true
         } else {
             false
@@ -1354,6 +1367,25 @@ impl History {
     /// enabled WITHOUT mutating history just to find out.
     pub fn can_go_back(&self) -> bool {
         self.stack.len() > 1
+    }
+
+    /// Redo the most recent `back()`: pop `forward`'s last entry back onto
+    /// `stack`. A no-op (returns `false`) when `forward` is empty — nothing
+    /// to redo (either never went back, or a `navigate()` since cleared it).
+    pub fn forward(&mut self) -> bool {
+        match self.forward.pop() {
+            Some(url) => {
+                self.stack.push(url);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `forward()` would actually go anywhere — the read-only
+    /// mirror `can_go_back` is to `back`, for the chrome's forward button.
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
     }
 }
 
@@ -1756,6 +1788,50 @@ mod tests {
         // across calls with no intervening navigate/back.
         let h = History::new(Url::new("http://example.com/a".to_string()));
         assert_eq!(h.current().as_str(), h.current().as_str());
+    }
+
+    /// `packet/chrome-ux-fixes`: the full back/forward interplay in one
+    /// scenario -- navigate A->B->C, back twice (to A, with forward
+    /// available), forward once (to B), then a fresh navigate to D, which
+    /// must clear the abandoned forward history. Also covers the two bounds
+    /// (`forward()` at an empty stack, `back()` at the first entry) so
+    /// neither ever panics.
+    #[test]
+    fn back_and_forward_interplay_and_bounds() {
+        let a = Url::new("http://example.com/a".to_string());
+        let b = Url::new("http://example.com/b".to_string());
+        let c = Url::new("http://example.com/c".to_string());
+        let d = Url::new("http://example.com/d".to_string());
+
+        let mut h = History::new(a.clone());
+        h.navigate(b.clone());
+        h.navigate(c.clone());
+        assert_eq!(h.current(), &c);
+        assert!(!h.can_go_forward());
+
+        assert!(h.back());
+        assert_eq!(h.current(), &b);
+        assert!(h.back());
+        assert_eq!(h.current(), &a);
+        assert!(h.can_go_forward());
+
+        // Bounds: no further back to go, but that must not disturb `forward`.
+        assert!(!h.back());
+        assert_eq!(h.current(), &a);
+        assert!(h.can_go_forward());
+
+        assert!(h.forward());
+        assert_eq!(h.current(), &b);
+        assert!(h.can_go_forward());
+
+        // A fresh navigation abandons the rest of the forward history (c).
+        h.navigate(d.clone());
+        assert_eq!(h.current(), &d);
+        assert!(!h.can_go_forward());
+
+        // Bounds: forward() at empty is a no-op, not a panic.
+        assert!(!h.forward());
+        assert_eq!(h.current(), &d);
     }
 
     // --------------------------------------------------------- key parsing
