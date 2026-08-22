@@ -2468,6 +2468,13 @@ fn print_x11_stats(stats: &X11Stats) {
 /// address bar is focused must not scroll the document out from under the
 /// edit, matching how the keyboard `Up`/`Down`/`PageUp`/`PageDown` arms
 /// already behave while focused.
+///
+/// `packet/chrome-ux-fixes`: `Ctrl+Q` (`ControlMask`, bit 2 of the
+/// KeyButMask `state`, mask `0x0004`) maps to `XIntent::Quit`
+/// UNCONDITIONALLY — checked before the `address_focused` branch, so it
+/// works whether or not the address bar is focused. A modifier chord is
+/// never meant as text input, unlike bare `q` (which only quits while
+/// unfocused, per the collision fix above).
 fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32], height: u32, address_focused: bool) -> Option<stele::backend::x11::XIntent> {
     use stele::backend::x11::{self as xproto, EditIntent, XEvent, XIntent, X11Key};
     match ev {
@@ -2491,6 +2498,15 @@ fn classify_x11_intent(ev: &stele::backend::x11::XEvent, min_keycode: u8, keysym
             let column = if state & 0x0001 != 0 { 1 } else { 0 };
             let sym = xproto::keysym_for_keycode(*keycode, min_keycode, keysyms_per_keycode, keysyms, column)?;
             let key = xproto::keysym_to_key(sym)?;
+
+            // Ctrl+Q: a modifier quit that works regardless of address-bar
+            // focus (see doc comment above) -- checked before the
+            // `address_focused` split so it can never be swallowed/routed
+            // to `Edit(Insert('q'))` like a bare `q` is while focused.
+            const CONTROL_MASK: u16 = 0x0004;
+            if state & CONTROL_MASK != 0 && key == X11Key::Char('q') {
+                return Some(XIntent::Quit);
+            }
 
             if address_focused {
                 return match key {
@@ -3592,6 +3608,29 @@ mod tests {
         );
         assert_eq!(classify_x11_intent(&up, min_kc, per_kc, &keysyms, 600, true), None, "wheel-up must not scroll while the address bar is focused");
         assert_eq!(classify_x11_intent(&down, min_kc, per_kc, &keysyms, 600, true), None, "wheel-down must not scroll while the address bar is focused");
+    }
+
+    /// `packet/chrome-ux-fixes`: Ctrl+Q quits regardless of address-bar
+    /// focus; plain `q` keeps its existing, focus-dependent behavior
+    /// (quits unfocused, inserts while focused -- already pinned by the two
+    /// tests above this one).
+    #[test]
+    fn classify_x11_intent_ctrl_q_quits_focused_or_unfocused() {
+        use stele::backend::x11::{EditIntent, XEvent, XIntent};
+        let (min_kc, per_kc, keysyms) = classify_intent_keymap();
+        let ctrl_q = XEvent::KeyPress { keycode: 8, state: 0x0004 };
+
+        assert_eq!(classify_x11_intent(&ctrl_q, min_kc, per_kc, &keysyms, 600, false), Some(XIntent::Quit), "Ctrl+Q quits while unfocused");
+        assert_eq!(classify_x11_intent(&ctrl_q, min_kc, per_kc, &keysyms, 600, true), Some(XIntent::Quit), "Ctrl+Q quits while focused too -- a chord is never text input");
+
+        // Unchanged plain-`q` behavior, pinned again here for contrast with
+        // the Ctrl+Q assertions right above.
+        assert_eq!(classify_x11_intent(&key_press(8, false), min_kc, per_kc, &keysyms, 600, false), Some(XIntent::Quit), "plain 'q' unfocused still quits");
+        assert_eq!(
+            classify_x11_intent(&key_press(8, false), min_kc, per_kc, &keysyms, 600, true),
+            Some(XIntent::Edit(EditIntent::Insert('q'))),
+            "plain 'q' focused still inserts, unchanged"
+        );
     }
 
     // ------------------------------------------------------- x11_edit_arg
