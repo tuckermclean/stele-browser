@@ -77,6 +77,12 @@ struct Args {
     /// shell. Independent of `headless`/`source` -- checked first in
     /// `main`, same "first recognized mode wins" posture as `--dump-text`/
     /// `--dump-png`/`--render-fb` already have under `--headless`.
+    ///
+    /// packet/x11-autodetect: this remains the explicit FORCE-GUI override.
+    /// A bare `stele <path-or-url>` (no `--x11`, no `--tty`) now
+    /// auto-selects between `run_x11` and `run_browser` by display presence
+    /// (see [`graphical_display_available`]) -- `--x11` still always wins
+    /// outright since it's checked before that auto-detection ever runs.
     x11: Option<String>,
     cols: usize,
     /// `--stats` (M5, C2 "count what we refuse"): print the aggregated
@@ -99,10 +105,17 @@ struct Args {
     no_bg_images: bool,
     /// packet/shell-keyboard: the first bare (non-`--flag`) argument, e.g.
     /// `stele fixtures/basic.html` or `stele http://example.com/` — when
-    /// `headless` is `false` and this is `Some`, `main` launches the
-    /// interactive shell on it (see [`run_browser`]) instead of falling
-    /// back to the M0 hello. Not consulted at all in `--headless` mode
-    /// (those paths read `dump_text`/`dump_png`/`render_fb` directly).
+    /// `headless` is `false` and this is `Some`, `main` launches an
+    /// interactive shell on it instead of falling back to the M0 hello. Not
+    /// consulted at all in `--headless` mode (those paths read `dump_text`/
+    /// `dump_png`/`render_fb` directly).
+    ///
+    /// packet/x11-autodetect: WHICH shell is no longer hardcoded to
+    /// `run_browser` (tty). `main` now auto-selects `run_x11` (GUI) when
+    /// [`graphical_display_available`] says a display is present, else
+    /// falls back to `run_browser` (tty) -- unless `tty` below forces the
+    /// tty shell regardless of display, or `x11` above already forced the
+    /// GUI shell (checked earlier, wins outright).
     source: Option<String>,
     /// `--color-scheme <light|dark|auto>` (packet t1b-color-scheme): the
     /// resolved [`style::ColorScheme`] every headless render path evaluates
@@ -170,6 +183,13 @@ struct Args {
     /// 0.0` -- never a panic, never a hard CLI error, same totality posture
     /// every other flag here already has.
     scroll_to_id: Option<String>,
+    /// `--tty` (packet/x11-autodetect): force the tty shell (`run_browser`)
+    /// for a bare `stele <path-or-url>` invocation even when a graphical
+    /// display IS present -- the explicit opposite of `--x11`. Only
+    /// consulted in the plain-`source`, non-`--headless`, non-`--x11` branch
+    /// of `main`'s dispatch; a simple boolean flag, same shape as
+    /// `--headless`/`--stats`/`--chrome`/`--no-bg-images` above.
+    tty: bool,
 }
 
 impl Default for Args {
@@ -190,6 +210,7 @@ impl Default for Args {
             chrome: false,
             viewport_height: None,
             scroll_to_id: None,
+            tty: false,
         }
     }
 }
@@ -314,6 +335,7 @@ fn parse_args(argv: &[String]) -> Args {
                 }
             }
             "--stats" => out.stats = true,
+            "--tty" => out.tty = true,
             "--no-bg-images" => out.no_bg_images = true,
             "--chrome" => out.chrome = true,
             "--color-scheme" => {
@@ -397,6 +419,24 @@ fn resolve_url(raw: &str) -> Url {
         std::env::current_dir().map(|cwd| cwd.join(path)).unwrap_or_else(|_| path.to_path_buf())
     };
     Url::new(format!("file://{}", abs.display()))
+}
+
+/// packet/x11-autodetect: is a graphical display available to launch the
+/// X11 GUI shell (`run_x11`) against, as opposed to falling back to the tty
+/// shell (`run_browser`)? True iff EITHER `display` (X11's `$DISPLAY`) or
+/// `wayland` (`$WAYLAND_DISPLAY`) is `Some` and non-empty after trimming
+/// whitespace -- most Wayland compositors still run XWayland (which needs
+/// `$DISPLAY` too), but a bare `$WAYLAND_DISPLAY` alone is still an honest
+/// signal that SOME graphical session is present, so either one flips this
+/// `true`. A `Some("")` or `Some("   ")` (set-but-empty, e.g. an env var
+/// inherited from a stripped-down container/init) is treated the same as
+/// `None` -- not a real display. Pure and total: no I/O, no env reads of
+/// its own (the caller passes `std::env::var(..).ok().as_deref()` in) --
+/// that split is exactly what makes this unit-testable without a real X
+/// server or `$DISPLAY` mutation in the test process.
+fn graphical_display_available(display: Option<&str>, wayland: Option<&str>) -> bool {
+    let non_empty = |v: Option<&str>| v.map(|s| !s.trim().is_empty()).unwrap_or(false);
+    non_empty(display) || non_empty(wayland)
 }
 
 /// Normalize a string typed into the ADDRESS BAR (not a CLI argument) into a
@@ -1838,7 +1878,21 @@ fn x11_point_in_rect(rect: Rect, x: i16, y: i16) -> bool {
 /// whole session and printed to stderr on quit. It's loop instrumentation
 /// only -- no dedicated unit test -- see the struct doc for what each field
 /// means and how it's counted.
-fn run_x11(source: &str) {
+///
+/// Returns whether the INITIAL `XConnection::connect()` succeeded --
+/// `false` only when that very first connect attempt fails (a stale/
+/// unreachable `$DISPLAY`), so a caller can fall back to another shell
+/// instead of the connect failure being fatal by construction. Deliberately
+/// NOT what it sounds like for every other failure mode: once connected,
+/// every LATER setup failure (`CreateWindow`/`MapWindow`/`CreateGC`/...) is
+/// a genuine, unexpected error against a server we DID reach, so those keep
+/// their existing "print and exit the process" handling rather than
+/// returning `false` -- this return value only ever answers "did we manage
+/// to connect at all", not "did the whole session go well". See
+/// packet/x11-autodetect's two call sites in `main` for how the two
+/// outcomes (explicit `--x11` vs. auto-detect) are meant to react
+/// differently to a `false`.
+fn run_x11(source: &str) -> bool {
     use stele::backend::x11::{self as xproto, XConnection};
 
     // Debug-only counters, gated on STELE_X11_STATS so a normal run pays
@@ -1853,10 +1907,11 @@ fn run_x11(source: &str) {
 
     let mut conn = match XConnection::connect() {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("stele: --x11: failed to connect to the X server: {e}");
-            std::process::exit(1);
-        }
+        // packet/x11-autodetect: this is the ONE failure a caller might
+        // want to recover from (fall back to the tty shell, or report a
+        // clean error for an explicit `--x11`) -- so no eprintln here at
+        // all; the caller decides what to say and whether to fall back.
+        Err(_) => return false,
     };
 
     let depth = conn.setup.root_depth;
@@ -2419,6 +2474,11 @@ fn run_x11(source: &str) {
             break;
         }
     }
+    // Reached only via the loop's `break`s above (a clean quit, or the
+    // server closing the connection) -- both mean we DID connect and ran a
+    // real session, so this is always `true` (see the connect-failure
+    // early `return false` above for the only `false` case).
+    true
 }
 
 /// Prints [`X11Stats`]'s one-line summary to stderr. Split out of
@@ -2969,7 +3029,14 @@ fn main() {
 
     let args = parse_args(&argv);
     if let Some(source) = args.x11 {
-        run_x11(&source);
+        // Explicit `--x11` is a direct request for the GUI shell -- a
+        // connect failure here is a loud, non-zero-exit error, NOT a
+        // silent fallback to the tty shell (packet/x11-autodetect: only
+        // the auto-detect branch below falls back quietly).
+        if !run_x11(&source) {
+            eprintln!("stele: --x11: could not connect to the X server (is $DISPLAY correct and an X server running?)");
+            std::process::exit(1);
+        }
         return;
     }
     if args.headless {
@@ -3048,11 +3115,34 @@ fn main() {
     }
 
     // packet/shell-keyboard: `stele <path-or-url>` with no `--headless` and
-    // no dump flag launches the interactive shell. `--headless`'s own
-    // branches above already returned, so reaching here with a `source`
-    // unambiguously means "plain interactive invocation".
+    // no dump flag launches an interactive shell. `--headless`'s own
+    // branches above already returned (and `--x11` was already checked
+    // before those, so an explicit `--x11` never reaches here at all), so
+    // reaching here with a `source` unambiguously means "plain interactive
+    // invocation" -- packet/x11-autodetect decides WHICH shell:
+    // `--tty` forces the tty shell outright; otherwise a graphical display
+    // (`$DISPLAY`/`$WAYLAND_DISPLAY`, see [`graphical_display_available`])
+    // auto-selects the GUI shell (`run_x11`), falling back to the tty shell
+    // if that connect attempt fails (a stale/unreachable `$DISPLAY` must
+    // NOT break a bare `stele <url>` invocation -- unlike explicit `--x11`
+    // above, this is an auto-detected guess, not a direct request, so it
+    // degrades quietly rather than erroring out); no display at all falls
+    // back to the tty shell (`run_browser`) outright, same as every build
+    // before this packet.
     if let Some(source) = args.source {
-        run_browser(&source);
+        if args.tty {
+            run_browser(&source);
+        } else if graphical_display_available(
+            std::env::var("DISPLAY").ok().as_deref(),
+            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        ) {
+            if !run_x11(&source) {
+                eprintln!("stele: no reachable X server; falling back to the terminal shell");
+                run_browser(&source);
+            }
+        } else {
+            run_browser(&source);
+        }
         return;
     }
 
@@ -3230,6 +3320,46 @@ mod tests {
     fn parse_args_non_numeric_cols_falls_back_to_default() {
         let a = parse_args(&args(&["--cols", "not-a-number"]));
         assert_eq!(a.cols, DEFAULT_COLS);
+    }
+
+    // ---- packet/x11-autodetect: graphical_display_available / --tty -----
+
+    #[test]
+    fn graphical_display_available_false_when_neither_var_is_set() {
+        assert!(!graphical_display_available(None, None));
+    }
+
+    #[test]
+    fn graphical_display_available_false_when_both_are_empty_strings() {
+        assert!(!graphical_display_available(Some(""), Some("")));
+    }
+
+    #[test]
+    fn graphical_display_available_true_when_display_is_set() {
+        assert!(graphical_display_available(Some(":0"), None));
+    }
+
+    #[test]
+    fn graphical_display_available_true_when_only_wayland_display_is_set() {
+        assert!(graphical_display_available(None, Some("wayland-0")));
+    }
+
+    #[test]
+    fn graphical_display_available_false_when_whitespace_only() {
+        assert!(!graphical_display_available(Some("   "), Some("\t")));
+    }
+
+    #[test]
+    fn parse_args_reads_tty_flag() {
+        let a = parse_args(&args(&["--tty", "fixtures/basic.html"]));
+        assert!(a.tty);
+        assert_eq!(a.source.as_deref(), Some("fixtures/basic.html"));
+    }
+
+    #[test]
+    fn parse_args_tty_defaults_to_false_when_absent() {
+        let a = parse_args(&args(&["fixtures/basic.html"]));
+        assert!(!a.tty);
     }
 
     // ---- packet/fixed-viewport: --viewport-height CLI parsing -----------
