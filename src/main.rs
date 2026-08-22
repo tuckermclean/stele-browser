@@ -1878,7 +1878,21 @@ fn x11_point_in_rect(rect: Rect, x: i16, y: i16) -> bool {
 /// whole session and printed to stderr on quit. It's loop instrumentation
 /// only -- no dedicated unit test -- see the struct doc for what each field
 /// means and how it's counted.
-fn run_x11(source: &str) {
+///
+/// Returns whether the INITIAL `XConnection::connect()` succeeded --
+/// `false` only when that very first connect attempt fails (a stale/
+/// unreachable `$DISPLAY`), so a caller can fall back to another shell
+/// instead of the connect failure being fatal by construction. Deliberately
+/// NOT what it sounds like for every other failure mode: once connected,
+/// every LATER setup failure (`CreateWindow`/`MapWindow`/`CreateGC`/...) is
+/// a genuine, unexpected error against a server we DID reach, so those keep
+/// their existing "print and exit the process" handling rather than
+/// returning `false` -- this return value only ever answers "did we manage
+/// to connect at all", not "did the whole session go well". See
+/// packet/x11-autodetect's two call sites in `main` for how the two
+/// outcomes (explicit `--x11` vs. auto-detect) are meant to react
+/// differently to a `false`.
+fn run_x11(source: &str) -> bool {
     use stele::backend::x11::{self as xproto, XConnection};
 
     // Debug-only counters, gated on STELE_X11_STATS so a normal run pays
@@ -1893,10 +1907,11 @@ fn run_x11(source: &str) {
 
     let mut conn = match XConnection::connect() {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("stele: --x11: failed to connect to the X server: {e}");
-            std::process::exit(1);
-        }
+        // packet/x11-autodetect: this is the ONE failure a caller might
+        // want to recover from (fall back to the tty shell, or report a
+        // clean error for an explicit `--x11`) -- so no eprintln here at
+        // all; the caller decides what to say and whether to fall back.
+        Err(_) => return false,
     };
 
     let depth = conn.setup.root_depth;
@@ -2459,6 +2474,11 @@ fn run_x11(source: &str) {
             break;
         }
     }
+    // Reached only via the loop's `break`s above (a clean quit, or the
+    // server closing the connection) -- both mean we DID connect and ran a
+    // real session, so this is always `true` (see the connect-failure
+    // early `return false` above for the only `false` case).
+    true
 }
 
 /// Prints [`X11Stats`]'s one-line summary to stderr. Split out of
@@ -3009,7 +3029,14 @@ fn main() {
 
     let args = parse_args(&argv);
     if let Some(source) = args.x11 {
-        run_x11(&source);
+        // Explicit `--x11` is a direct request for the GUI shell -- a
+        // connect failure here is a loud, non-zero-exit error, NOT a
+        // silent fallback to the tty shell (packet/x11-autodetect: only
+        // the auto-detect branch below falls back quietly).
+        if !run_x11(&source) {
+            eprintln!("stele: --x11: could not connect to the X server (is $DISPLAY correct and an X server running?)");
+            std::process::exit(1);
+        }
         return;
     }
     if args.headless {
@@ -3095,9 +3122,13 @@ fn main() {
     // invocation" -- packet/x11-autodetect decides WHICH shell:
     // `--tty` forces the tty shell outright; otherwise a graphical display
     // (`$DISPLAY`/`$WAYLAND_DISPLAY`, see [`graphical_display_available`])
-    // auto-selects the GUI shell (`run_x11`); no display at all falls back
-    // to the tty shell (`run_browser`), same as every build before this
-    // packet.
+    // auto-selects the GUI shell (`run_x11`), falling back to the tty shell
+    // if that connect attempt fails (a stale/unreachable `$DISPLAY` must
+    // NOT break a bare `stele <url>` invocation -- unlike explicit `--x11`
+    // above, this is an auto-detected guess, not a direct request, so it
+    // degrades quietly rather than erroring out); no display at all falls
+    // back to the tty shell (`run_browser`) outright, same as every build
+    // before this packet.
     if let Some(source) = args.source {
         if args.tty {
             run_browser(&source);
@@ -3105,7 +3136,10 @@ fn main() {
             std::env::var("DISPLAY").ok().as_deref(),
             std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
         ) {
-            run_x11(&source);
+            if !run_x11(&source) {
+                eprintln!("stele: no reachable X server; falling back to the terminal shell");
+                run_browser(&source);
+            }
         } else {
             run_browser(&source);
         }
