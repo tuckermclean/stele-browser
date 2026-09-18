@@ -3,6 +3,27 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Fetch — `view-source:` scheme (C7 teaching keys, first of three)
+
+### D69 — `view-source:<url>` re-dispatches through the real scheme table, renders raw bytes as escaped `<pre>`
+DCX-72 asks for three C7 "teaching key" surfaces (view-source, Provenance, Transcript); this packet is the
+first and cheapest. **Choice:** a new `src/fetch/view_source.rs` module, one match arm in `fetch::fetch`
+("view-source"), splitting the wrapped URL off the first `:` and re-entering `fetch::fetch` with it (so
+`view-source:http://x`, `view-source:file://x`, `view-source:about:attestations`, even
+`view-source:data:...` all work, and any future scheme gets `view-source:` support for free). The wrapped
+response's body is HTML-escaped (`&`/`<`/`>` only) into a single `<pre>` and wrapped in a minimal
+`<!DOCTYPE html><html><body>...</body></html>` shell — no new layout code, since `<pre>` + `white-space:
+pre` is already real (`style/ua.rs`, enforced by `layout::inline`). **Total vs. not:** unlike `about::fetch`
+(D67), this is NOT total — the wrapped URL can legitimately be unsupported/unreachable, and that failure
+is propagated as the same `FetchError` the wrapped fetch itself would have produced (an empty
+`view-source:` or `view-source:` wrapping nothing is the one synthetic `FetchError::Protocol`). `resolve_url`
+and `normalize_address_input` (`main.rs`) both gained a `view-source:`/`view-source` passthrough, mirroring
+`about:`'s D67 fix (same failure mode: without it, no CLI entry point or address-bar input could ever reach
+the new handler). **Charter ruling:** same as D67 — a transport surface (a new URL scheme, zero new
+elements/properties), not dialect surface. No C2 amendment. Revisit-trigger: Provenance/Transcript (the
+other two C7 keys) may want to reuse this module's escape-into-`<pre>` helper if their own rendering turns
+out to be textual too — re-check before duplicating it.
+
 ## Chrome — editable address bar + reload
 
 ### D68 — editable address bar + reload button in the `--x11` chrome

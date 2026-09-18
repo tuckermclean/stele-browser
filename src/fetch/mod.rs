@@ -19,6 +19,7 @@ pub mod http1;
 pub mod https;
 pub mod transport;
 pub mod url;
+pub mod view_source;
 
 /// A minimal URL. P3 decides bespoke-vs-crate for the real parser and may swap
 /// the internals; this newtype is the frozen shape callers hold.
@@ -118,6 +119,7 @@ pub fn fetch(request: &Request) -> Result<Response, FetchError> {
         "data" => data::fetch(request),
         "file" => file::FileFetcher::new().fetch(request),
         "http" | "https" => http1::Http1Client::new().fetch(request),
+        "view-source" => view_source::fetch(request),
         other => Err(FetchError::UnsupportedScheme(other.to_string())),
     }
 }
@@ -158,6 +160,16 @@ mod dispatch_tests {
         // here (not `UnsupportedScheme`) is itself the dispatch proof.
         let resp = fetch(&Request::get(Url::new("about:attestations")))
             .expect("about: must dispatch to about::fetch, not fall through to UnsupportedScheme");
+        assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn fetch_routes_view_source_scheme_to_the_view_source_fetcher() {
+        // `view-source:about:attestations` must dispatch to
+        // `view_source::fetch`, which re-enters this same table for the
+        // wrapped URL -- success (not UnsupportedScheme) proves dispatch.
+        let resp = fetch(&Request::get(Url::new("view-source:about:attestations")))
+            .expect("view-source: must dispatch to view_source::fetch");
         assert_eq!(resp.status, 200);
     }
 

@@ -1632,3 +1632,31 @@ Append-only running log. Newest at the bottom.
 - **Size:** report the CI-measured `stele-i486` delta here once `m0-acceptance` runs on this packet's push
   (against the ≈24-28 KB design estimate and the 97,124 B / 1,474,560 B floppy ceiling) -- not measured in
   this docs-only commit.
+
+## 2026-09-18 -- `view-source:` scheme (packet/view-source, DCX-72, first of three C7 teaching keys)
+
+- **Landed** `view-source:<url>` (`src/fetch/view_source.rs`, one match arm in `fetch::fetch`): re-dispatches
+  the wrapped URL through the real scheme table, then renders the raw response body as HTML-escaped text
+  inside a single `<pre>` -- no new layout code, reuses the already-real `white-space: pre` (`style/ua.rs`,
+  enforced by `layout::inline`). Works over any wrapped scheme (`http`, `file`, `about:`, `data:`), not just
+  documents. `resolve_url`/`normalize_address_input` (`main.rs`) gained a `view-source:` passthrough,
+  mirroring the `about:` fix from D67 (same latent-unreachability failure mode). Unlike `about::fetch`, NOT
+  total -- an unsupported/unreachable wrapped URL propagates its real `FetchError`, same as navigating there
+  directly would. Tests: unit tests in `fetch/view_source.rs` (escaping, dispatch-through-the-real-table,
+  error propagation, hostile-input totality-over-panics) plus a `main.rs` integration test proving
+  `dump_text("view-source:<fixture>", ..)` shows literal `<h1>Welcome</h1>` tag soup where the plain fixture
+  dump shows the rendered "Welcome" heading text. DECISIONS D69.
+- **Charter ruling:** transport surface (new URL scheme, zero new elements/properties), same category as
+  `about:`/`data:`/`https` -- no C2 amendment.
+- **Size:** report the CI-measured `stele-i486` delta here once `m0-acceptance` runs on this packet's push
+  (against the 97,124 B / 1,474,560 B floppy headroom, D66 -- itself stale, not re-measured since the
+  attestation-modal packet) -- not measured locally (no toolchain in this sandbox, per AGENTS.md rule 3).
+- **Scope note for the remaining two C7 keys (Provenance, Transcript):** DCX-72 cites `layout/mod.rs:74`,
+  `style/parser.rs:48`, `layout/inline.rs:149` as already-plumbed Provenance data. Ground-truthed: none of
+  the three carry "which rule/stylesheet won this declaration" -- the first two are link/form-action
+  provenance (P7, interactive), the third is a dropped-declaration COUNT, not per-declaration attribution.
+  The charter's own C7 text separately defines Provenance as "URL, bytes, hash, what the proxy translated"
+  (network/fetch provenance) -- cheap and available today via `Response.final_url`/`body`, and NOT the same
+  reading as cascade-winner attribution. Flagging for the Tech Lead before starting Provenance: two
+  materially different, both-defensible readings, needs a ruling before committing to one (the
+  cascade-attribution reading needs real new plumbing through `fold_matching_declarations` that isn't cheap).

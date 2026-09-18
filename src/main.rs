@@ -409,7 +409,7 @@ fn resolve_url(raw: &str) -> Url {
     // into a bogus `file://<cwd>/about:attestations`, making the scheme
     // handler (`fetch::about`) unreachable from the CLI (design doc's
     // "Current state" finding, packet/attestation-modal).
-    if scheme == "http" || scheme == "https" || scheme == "file" || scheme == "about" {
+    if scheme == "http" || scheme == "https" || scheme == "file" || scheme == "about" || scheme == "view-source" {
         return Url::new(raw);
     }
     let path = std::path::Path::new(raw);
@@ -454,6 +454,7 @@ fn normalize_address_input(raw: &str) -> String {
         || s.contains("://")
         || s.starts_with("about:")
         || s.starts_with("data:")
+        || s.starts_with("view-source:")
         || s.starts_with('/')
         || s.starts_with("./")
         || s.starts_with("../")
@@ -3577,7 +3578,17 @@ mod tests {
 
     #[test]
     fn normalize_address_input_passes_through_schemed_and_path_input() {
-        for s in ["http://example.com", "https://example.com/x", "file:///tmp/a", "about:attestations", "/abs/path", "./rel", "../up"] {
+        for s in [
+            "http://example.com",
+            "https://example.com/x",
+            "file:///tmp/a",
+            "about:attestations",
+            "view-source:http://example.com/",
+            "view-source:about:attestations",
+            "/abs/path",
+            "./rel",
+            "../up",
+        ] {
             assert_eq!(normalize_address_input(s), s, "already-schemed/path input must pass through untouched");
         }
     }
@@ -3600,6 +3611,18 @@ mod tests {
         // resolves to a bogus `file://<cwd>/about:attestations` and no CLI
         // entry point can ever reach `fetch::about`.
         assert_eq!(resolve_url("about:attestations").as_str(), "about:attestations");
+    }
+
+    #[test]
+    fn resolve_url_passes_through_view_source_scheme() {
+        // packet/view-source: same failure mode as `about:` above --
+        // without this, `view-source:http://x` resolves to a bogus
+        // `file://<cwd>/view-source:http://x` and no CLI entry point can
+        // ever reach `fetch::view_source`.
+        assert_eq!(
+            resolve_url("view-source:http://example.com/").as_str(),
+            "view-source:http://example.com/"
+        );
     }
 
     #[test]
@@ -3845,6 +3868,24 @@ mod tests {
             text.contains("Visible again"),
             "the paragraph re-enabled by the later <style> block should stay visible, overriding the earlier <link>'s rule"
         );
+    }
+
+    /// End-to-end proof that `view-source:<url>` (charter C7's cheapest
+    /// teaching key) reaches the CLI: `resolve_url` passes the scheme
+    /// through, `fetch::fetch` dispatches to `fetch::view_source`, and the
+    /// result is literal escaped tag soup, NOT the rendered page --
+    /// `dump_text` over the plain fixture shows "Welcome" as a heading's
+    /// text content, while `view-source:` over the same fixture shows the
+    /// literal `<h1>` markup instead.
+    #[test]
+    fn dump_text_over_view_source_shows_literal_tag_soup_not_the_rendered_page() {
+        let plain = dump_text("fixtures/basic.html", 80);
+        assert!(plain.contains("Welcome"), "sanity: the rendered page has an H1 with this text");
+        assert!(!plain.contains("<h1>"), "sanity: the rendered page must not show raw markup");
+
+        let wrapped = format!("view-source:{}", resolve_url("fixtures/basic.html").as_str());
+        let source = dump_text(&wrapped, 80);
+        assert!(source.contains("<h1>Welcome</h1>"), "expected literal markup in the view-source dump, got: {source}");
     }
 
     #[test]
