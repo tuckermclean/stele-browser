@@ -64,10 +64,13 @@ Windows-only-cfg nodes, and emits a committed `src/fetch/attestations_data.rs` �
 content-hash-deduped into **19 distinct license-text blocks** (rustix/linux-raw-sys/serde share one MIT block;
 MIT preferred over Apache-2.0 where a crate dual-licenses), each text pre-split into blank-line-delimited
 paragraphs by the generator, ~28.8 KB embedded total. That pre-split matters: `about::fetch`'s render step
-found (and this page's own regression test pins) that **`white-space: pre` is cascaded but not yet enforced
-by `layout::inline`** — a real, previously-undocumented engine gap — so license text is rendered as
-`<p>`-per-paragraph sections rather than a single `<pre>` block, which would silently collapse to one run of
-whitespace under the current (correct, spec-following) collapsing-whitespace default. Stele's own GPL-3.0
+found that at the time **`white-space: pre` was cascaded but not yet enforced by `layout::inline`** — a real
+engine gap — so license text is rendered as `<p>`-per-paragraph sections rather than a single `<pre>` block,
+which would otherwise have silently collapsed to one run of whitespace under the collapsing-whitespace default.
+**Update:** that gap is now closed — `white-space: pre` **IS enforced** (`src/layout/inline.rs:278`, test at
+`:869`), consistent with D69 (line 16), which relies on `<pre>` + `white-space: pre` being real. The
+`<p>`-per-paragraph rendering above is retained as-is; switching it to a single `<pre>` is optional cleanup, not
+a correctness fix. Stele's own GPL-3.0
 notice ships as a **short in-page notice, not the full license text** (a judgment call, flagged for the
 operator, not a legal ruling — mirrors D66's own analogous flag for Terminus's OFL condition 2); Terminus's
 `OFL.TXT` ships in full via `include_str!`. `taffy` 0.13.0 publishes no `LICENSE*` file in its crate at all —

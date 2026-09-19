@@ -23,8 +23,9 @@
 //!
 //! Whitespace handling: consecutive whitespace collapses to a single space
 //! (CSS `white-space: normal`), matching the curated `WhiteSpace` property's
-//! only two states (`Normal`/`Pre`) — `Pre` is not yet honored (documented
-//! scope call: v1 always collapses; a `Pre` fast-path is a follow-up). Line
+//! only two states (`Normal`/`Pre`). `Pre` IS enforced (see the `pre` branch
+//! at `src/layout/inline.rs:278`: a source `\n` is a hard break, interior
+//! whitespace is kept). Line
 //! breaking only happens at those collapsed-space opportunities: a single
 //! "word" (including one that is itself wider than the available width, or a
 //! replaced atom wider than the available width) never splits — it just
