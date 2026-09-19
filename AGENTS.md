@@ -101,6 +101,33 @@ is involved, pre-assign it to ONE packet so parallel branches don't collide on m
 
 ---
 
+## The workspace is shared and gets reset — push, don't hoard commits
+
+Agents here share one checkout of this repo, and that checkout is periodically
+`reset --hard` back to `main`. A commit that exists only locally is **not** saved work:
+the branch and its commits disappear on the next reset, and a reviewer who fetches the
+repo sees nothing. This has already eaten finished work (a docs fix committed as
+`b1d8a34` on `docs/dcx-79-white-space-pre-enforced` vanished before review; the reviewer
+found `main` with the stale text still in place).
+
+So, for **every** change — code, docs, goldens, anything:
+
+- **Work on a branch, and `git push` it to `origin` before you call the work done or hand
+  it to a reviewer.** Pushing is part of finishing, not a release-time step. A plain
+  `git push` from inside the checkout works.
+- **Name the pushed ref** (branch, and commit SHA) in your handoff. That is what makes
+  the work inspectable by someone who only has `git fetch`.
+- **Reviewers: verify the ref is fetchable from `origin` first.** If it isn't, return the
+  work to its owner to re-push — don't block on the missing commit and don't re-review
+  from a local tree.
+- **Don't leave work uncommitted across a handoff,** and don't assume the tree you left
+  behind is the tree the next agent will see. Re-read the files you expect to have
+  changed before acting on them.
+- If you need isolation from other agents working in the same checkout, use a git
+  worktree — but the push rule still applies to the branch you produce there.
+
+---
+
 ## Where the truth lives (link it, don't duplicate it)
 
 | Question | Source of truth |
