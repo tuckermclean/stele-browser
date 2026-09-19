@@ -7,11 +7,16 @@ report is the M6 release summary.
 
 ## Status
 
-Milestones **M0–M5 complete; M6 hardening substantially complete.** 30 packet
-PRs, each test-first (visible red→green in history), independently reviewed,
-CI-green (in-image i486 cross-build + `qemu-i386 -cpu 486` execution), and
-merged one-per-PR. 33 recorded fork decisions (`DECISIONS.md`), full narrative
-in `JOURNAL.md`.
+Milestones **M0–M5 complete; M6 substantially complete** — where "M6" means the
+*build brief's* M6 (Hardening + acceptance: fuzz, size gate, A1–A7;
+`stele-build-brief.md:245`), **not** the *charter's* M6 (Transcript + Provenance
+keys; `stele-charter.md:228`), which has **not been started**. The charter and the
+build brief number their milestones differently — this report follows the build
+brief throughout, so "M6 substantially complete" is a hardening claim, not a
+transcript/provenance claim. Every packet PR is test-first (visible red→green in
+history), independently reviewed, CI-green (in-image i486 cross-build +
+`qemu-i386 -cpu 486` execution), and merged one-per-PR. Fork decisions are recorded
+in `DECISIONS.md`; the full narrative is in `JOURNAL.md`.
 
 | Milestone | | |
 |---|---|---|
@@ -22,19 +27,27 @@ in `JOURNAL.md`.
 | M4 | fb backend + images + floats — **the screenshot** | ✅ |
 | M5 | Dialect completeness (author CSS, flexbox, @media, details, noscript, entities, --stats) | ✅ |
 | M6 | Hardening (fuzz, size gate, kitchen-sink, list markers) | ◑ core done; attestation ceremony pending |
+| M7 (build-brief stretch) | X11 backend — self-drawn chrome, editable address bar, back/forward, GUI-vs-TTY auto-select (`src/main.rs::run_x11`) | ◑ X11 shipped; Lua chair / Transcript pane / no-libc spike untouched |
+| Milestone A (Acid2) | Acid2 face **composes** in an 800×600 viewport (`--scroll-to` + fixed viewport, D64) — **not** a WaSP byte-match; fills/geometry deferred | ✅ composes (not byte-exact) |
+
+*Milestone numbers above follow `stele-build-brief.md`, not the charter (see
+Status). "Milestone A" is the Acid2 program (`DECISIONS.md` D64,
+`JOURNAL.md:1373`–`1577`), tracked separately from the M-series.*
 
 ## What Stele does
 
 - **Fetch** — bespoke HTTP/1.1 over `std::net` (status line, folded headers,
   Content-Length + chunked bodies, redirects ≤5, cookie jar), `file://` for
-  local docs. **No TLS** (charter: the proxy's job). Total on malformed
-  responses.
+  local docs. **HTTPS** is served by delegating to the user's own
+  `openssl s_client` — zero cryptography in the binary (charter C2 / D14,
+  `src/fetch/https.rs`). Total on malformed responses.
 - **Parse** — bespoke 1996-grade tag-soup HTML: full HTML 4.01 named + numeric
   (decimal & hex) entities, void/raw-text/implied-close/mis-nesting recovery,
   total (never panics; explicit-stack, no unbounded recursion).
 - **Style** — bespoke CSS tokenizer + selectors + cascade with real origin &
-  specificity ordering. Author `<style>` blocks **and** inline `style=` apply
-  (inline is highest origin); **`@media`** width queries evaluated against the
+  specificity ordering. Author `<style>` blocks, external
+  `<link rel=stylesheet>` (fetched in a pre-pass, `src/stylesheets.rs`), **and**
+  inline `style=` apply (inline is highest origin); **`@media`** width queries evaluated against the
   render viewport; the curated §4 property set (block/inline/**flexbox**/float/
   clear/tables/text/color/border/list-style/…). Unknown declarations are
   ignored **and counted** (`--stats`, charter C2).
@@ -49,9 +62,15 @@ in `JOURNAL.md`.
   decoders behind one trait, decompression-bomb-capped, wired into `<img>` and
   blitted (nearest-neighbor scale + alpha).
 - **Render backends** — a **tty** text grid (`--dump-text`), a **pixel**
-  raster to PNG (`--dump-png`, via an embedded bitmap font), and a real
+  raster to PNG (`--dump-png`, via an embedded bitmap font), a real
   **Linux framebuffer** (`--render-fb`, sysfs geometry + `/dev/fb0`, no
-  `unsafe`).
+  `unsafe`), and an **X11** interactive shell (`--x11`, `src/main.rs::run_x11`)
+  with self-drawn chrome — back/forward/reload, editable address bar, throbber,
+  no GUI toolkit (`src/backend/chrome.rs`, `src/backend/address_edit.rs`). A bare
+  `stele <src>` auto-selects the X11 GUI shell when a display is present
+  (`graphical_display_available`) and the interactive **tty** shell otherwise
+  (`src/main.rs::run_browser`: raw-mode scroll / follow-links / back, backed by
+  `src/browser.rs`).
 
 ## The screenshots (`goldens/`)
 
@@ -68,8 +87,13 @@ in `JOURNAL.md`.
 ## Acceptance (accept.sh)
 
 - **A1** static i386-class ELF — **PASS**.
-- **A2** size ≤ 2.0 MB stripped — **PASS**, i486 binary ≈ **542 KB** (huge
-  headroom); now a hard gate.
+- **A2** size ≤ 2.0 MB stripped — **PASS** (now a hard gate). The last
+  CI-measured `stele-i486` binary is **1,377,436 bytes** (`JOURNAL.md:1605`,
+  2026-08-20 Terminus packet; D66) — **93.4 % of the 1.44 MB floppy**
+  (1,474,560 B), leaving only **97,124 B** of headroom. Budget future work
+  against the floppy ceiling, not the looser 2.0 MB A2 gate. (Packets since —
+  attestation modal, `view-source:` — were docs-/small and not re-measured; see
+  `JOURNAL.md:1633`, `:1652`.)
 - **A3** fixture golden renders (tty + PNG, blessed under §10 discipline) —
   **PASS** across basic/tables/forms/frames/images/flex-polite/media/details/
   noscript/entities/lists/kitchen-sink.
@@ -126,15 +150,10 @@ automated — flagged, not silently deferred.
   tools added to the image. **Operator action.**
 - **A5 instruction-speed budget** — the <50M-instructions / <150ms gate needs
   `qemu` instruction-count instrumentation; not yet wired.
-- **Interactive tty shell (P7b)** — raw-mode scroll / follow-links / back.
-  Rendering is complete; the interactive driver is not. Link-following needs a
-  small `Fragment`/`LayoutNode` freeze amendment to carry `href` provenance.
-- **External `<link rel=stylesheet>` CSS** — needs a fetch pre-pass like
-  images; inline `<style>` + `style=` work today.
 - **Cookie-jar file persistence** (charter C6) — the jar exists and is wired
   into HTTP; cross-invocation plain-file persistence is not wired.
-- **Rendering fidelity nits** — `<pre>` whitespace preserved (currently
-  collapsed); `&nbsp;` as a non-collapsing space (currently collapses);
+- **Rendering fidelity nits** — `&nbsp;` as a non-collapsing space (currently
+  collapses);
   CMYK/16-bit JPEG and APNG (Unsupported, fall back to alt). Unicode glyphs
   beyond ASCII: **narrowed** by packet t2-glyph-fallback — the atlas now
   covers Latin-1 (`U+00A0..=U+00FF`) directly, and General-Punctuation
@@ -143,8 +162,12 @@ automated — flagged, not silently deferred.
   plain ASCII at render time instead of showing tofu. Anything still outside
   BOTH (CJK, emoji, ...) is now dropped and counted (`--stats`'s
   "N missing glyphs"), not tofu'd — see `text::translit`'s own module doc.
-- **Stretch (M7, untouched by design)** — Lua chair, X11 backend, Transcript
-  pane, no-libc spike.
+- **Stretch (build-brief M7)** — the **X11 backend shipped** (see Render
+  backends / the milestone table); still untouched: Lua chair, Transcript pane,
+  no-libc spike. *(Note: `<pre>` / `white-space:pre` and the interactive tty and
+  X11 shells, previously listed here as deferred, have all shipped — see What
+  Stele does. The charter's own M6 — Transcript + Provenance — is the remaining
+  large piece; it has not been started, see Status.)*
 
 ## Build & run
 
