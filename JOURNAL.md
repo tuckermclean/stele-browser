@@ -1675,3 +1675,31 @@ Append-only running log. Newest at the bottom.
   regress against.
 - Decision recorded: D69 (see DECISIONS.md) -- the label choice and the "wall-clock gates today, insn-count
   takes over once a plugin exists" fork.
+
+## 2026-09-22 — A2 size gate: floppy line becomes a loud soft warning (DCX-67)
+
+- `accept.sh`'s A2 gate measured the stripped i486 binary against a single
+  `SIZE_BUDGET_BYTES=2,000,000` threshold, so the 1,474,560-byte (1.44 MB) floppy
+  ceiling that `AGENTS.md` non-negotiable #2 calls non-negotiable appeared nowhere
+  in CI output. Any binary up to 2 MB printed a clean PASS with no hint of how
+  close to a floppy it was.
+- Per the operator's standing scope call on DCX-76, crossing the floppy line is a
+  **soft warning, not a refusal** — deciding what to cut is a human call, not a CI
+  action. A2 now splits the two numbers by kind:
+    - `FLOPPY_CEILING_BYTES=1474560` — soft. Over it, a new `warn()` helper prints a
+      greppable `A2 WARN: binary exceeds 1.44MB floppy by N bytes` line and the gate
+      still PASSES.
+    - `SIZE_BUDGET_BYTES=2,000,000` — unchanged absolute hard-fail backstop for
+      pathological bloat.
+- A2 now prints the measurement on **every** run as bytes, percent-of-floppy (one
+  decimal, integer math — no bc/awk dependency), and remaining headroom. Headroom
+  goes negative once over the line; that sign is the signal.
+- **Boundary behaviour verified locally** with mocked binaries of exact sizes
+  (this environment has no cargo/qemu; policy is CI-driven build/test, never build
+  the i486 target locally):
+    - 1,377,436 B (CI's current HEAD measurement) → `93.4% of floppy, 97124 B headroom`, PASS, no warning.
+    - 1,474,560 B (exactly at the ceiling) → `100.0%, 0 B headroom`, PASS, no warning — the line is inclusive.
+    - 1,474,561 B (one byte over) → `A2 WARN: ... by 1 bytes`, gate still PASSES.
+    - 2,000,000 B (exactly at the hard budget) → WARN + PASS.
+    - 2,000,001 B (one byte over the hard budget) → `FAIL A2: OVER hard size budget`.
+- Decision recorded: D70 (see DECISIONS.md).
