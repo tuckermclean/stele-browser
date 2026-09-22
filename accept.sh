@@ -59,6 +59,8 @@ TARGET_STEM="i486-monolith-linux-musl"
 BIN="target/${TARGET_STEM}/release/stele"
 GOLDEN_HELLO="goldens/m0-hello.txt"
 SIZE_BUDGET_BYTES=$(( 2 * 1000 * 1000 ))   # A2: 2.0 MB stripped
+SPEED_INSN_BUDGET="${SPEED_INSN_BUDGET:-50000000}"             # A5z: < 50M retired instrs (qemu-i386)
+SPEED_WALLCLOCK_BUDGET_MS="${SPEED_WALLCLOCK_BUDGET_MS:-150}"  # A5z: < 150ms host wall-clock fallback
 
 BLESS=0
 TTY_ONLY=0
@@ -156,6 +158,81 @@ elif [ -f "$BIN" ]; then
     pass "A2: within size budget (${bytes} <= ${SIZE_BUDGET_BYTES} bytes)"
   else
     bad "A2: OVER size budget (${bytes} > ${SIZE_BUDGET_BYTES} bytes)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# A5z — first-paint SPEED budget over kitchen-sink.html (build brief §0;
+# charter C10 requires a speed budget in CI forever). K1 (beat Navigator 4
+# to first paint) is the project's kill condition, so this is a real
+# regression fence, not decoration. Two independent measurement methods:
+#
+#   1. (this block) qemu-i386 retired-instruction count over
+#      `$BIN --headless --dump-text fixtures/kitchen-sink.html`, budget
+#      SPEED_INSN_BUDGET (default 50,000,000). Deterministic across CI
+#      hardware — the brief's stated preference — but needs a QEMU TCG
+#      plugin that reports a retired-instruction count; the `qemu-user`
+#      apt package alone does not ship one, so this method PENDs (not
+#      fails) when no plugin is found rather than blocking every CI run on
+#      a packaging gap. Lives here (not in the cargo-gated block below)
+#      because it only needs the pre-built i486 binary + qemu — no cargo —
+#      same as A4 just above, and is skipped under --tty-only for the same
+#      reason A1/A4 are (no $BIN business in that host-only run).
+#   2. Host wall-clock fallback (see the cargo-gated block below, next to
+#      A5a/A5b), budget SPEED_WALLCLOCK_BUDGET_MS (default 150ms) — the
+#      build brief's own documented alternative when instruction counting
+#      isn't available. This is the check that actually gates today: the
+#      `accept` CI job installs only `qemu-user file` (see
+#      m0-acceptance.yml), no plugin, so method 1 PENDs there and method 2
+#      (running in the `build` job via --tty-only) is the live gate until a
+#      plugin is wired into the image.
+#
+# New label A5z, not a renumber of the existing A5a-A5x checks below (those
+# are golden-render checks from an earlier M6 packet that reused "A5" for
+# an unrelated purpose before this speed gate existed) — renumbering would
+# churn golden-check history for no benefit. See DECISIONS D69.
+# ---------------------------------------------------------------------------
+find_qemu_insn_plugin() {
+  if [ -n "${QEMU_INSN_PLUGIN:-}" ] && [ -f "$QEMU_INSN_PLUGIN" ]; then
+    echo "$QEMU_INSN_PLUGIN"; return 0
+  fi
+  for p in \
+    /usr/lib/qemu/plugins/libinsn.so \
+    /usr/lib/x86_64-linux-gnu/qemu/plugins/libinsn.so \
+    /usr/lib/aarch64-linux-gnu/qemu/plugins/libinsn.so \
+    /usr/local/lib/qemu/plugins/libinsn.so \
+    /usr/lib/qemu-plugins/libinsn.so
+  do
+    [ -f "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+FIXTURE_KITCHEN_SINK_A5Z="fixtures/kitchen-sink.html"
+if [ "$TTY_ONLY" = 1 ]; then
+  :
+elif [ ! -f "$BIN" ]; then
+  bad "A5z: binary not found at $BIN"
+elif ! QEMU="$(find_qemu)"; then
+  pend "A5z: no qemu-i386 found — instruction-count method unavailable; relying on host wall-clock fallback below"
+elif ! INSN_PLUGIN="$(find_qemu_insn_plugin)"; then
+  pend "A5z: no qemu TCG instruction-count plugin found (checked \$QEMU_INSN_PLUGIN + common install paths) — relying on host wall-clock fallback below"
+else
+  note "qemu: $QEMU -plugin $INSN_PLUGIN -- counting retired instructions over $FIXTURE_KITCHEN_SINK_A5Z"
+  rm -f /tmp/stele_a5z_insn.log
+  if ! "$QEMU" -plugin "${INSN_PLUGIN}" -d plugin -D /tmp/stele_a5z_insn.log \
+       "$BIN" --headless --dump-text "$FIXTURE_KITCHEN_SINK_A5Z" >/tmp/stele_a5z.out 2>/tmp/stele_a5z.err; then
+    bad "A5z: stele --headless --dump-text crashed under qemu-i386 on $FIXTURE_KITCHEN_SINK_A5Z"
+    sed 's/^/    /' /tmp/stele_a5z.err
+  elif ! insns="$(grep -Eo '[0-9]+' /tmp/stele_a5z_insn.log | tail -1)" || [ -z "$insns" ]; then
+    pend "A5z: qemu plugin ran but no instruction count could be parsed from its output — relying on host wall-clock fallback below"
+  else
+    note "A5z: ${insns} retired instructions (budget ${SPEED_INSN_BUDGET})"
+    if [ "$insns" -le "$SPEED_INSN_BUDGET" ]; then
+      pass "A5z: first paint within instruction budget (${insns} <= ${SPEED_INSN_BUDGET})"
+    else
+      bad "A5z: first paint OVER instruction budget (${insns} > ${SPEED_INSN_BUDGET})"
+    fi
   fi
 fi
 
@@ -924,10 +1001,10 @@ else
   # (< 50M retired instructions under qemu-i386, or < 150ms host wall-clock)
   # -- a performance regression fence, not a golden-render check. This M6
   # packet's own brief explicitly directed "Wire accept.sh A5 (kitchen-sink
-  # tty + png golden checks)" instead, which is what's implemented here;
-  # flagged so the orchestrator can decide whether the speed-budget check
-  # belongs alongside this (as A5c, say) in a follow-up, since the two are
-  # not mutually exclusive and this packet did not implement the former.
+  # tty + png golden checks)" instead, which is what's implemented here.
+  # The speed-budget check the original brief meant is now implemented too,
+  # as label A5z (see the block near A4, and its wall-clock fallback below,
+  # after A5b) -- DECISIONS D69.
   # ---------------------------------------------------------------------
   GOLDEN_TTY_KITCHEN_SINK="goldens/kitchen-sink.tty.txt"
   FIXTURE_KITCHEN_SINK="fixtures/kitchen-sink.html"
@@ -962,6 +1039,42 @@ else
   else
     bad "A5b: PNG dump of $FIXTURE_KITCHEN_SINK differs from $GOLDEN_PNG_KITCHEN_SINK"
     note "sizes: golden=$(wc -c < "$GOLDEN_PNG_KITCHEN_SINK") actual=$(wc -c < /tmp/stele_a5b.png)"
+  fi
+
+  # ---------------------------------------------------------------------
+  # A5z (fallback) -- host wall-clock timing of first paint over
+  # kitchen-sink.html, budget SPEED_WALLCLOCK_BUDGET_MS (default 150ms).
+  # This is the build brief's own documented allowance for when the
+  # deterministic qemu-i386 instruction count (see the A5z block near A4,
+  # above) isn't available -- which is exactly the `accept` CI job's
+  # situation today (qemu-user + file only, no TCG plugin: that block
+  # PENDs there), so THIS is the check that actually gates in CI right now.
+  # Times the same `--headless --dump-text` first-paint pipeline the tty
+  # golden above already exercises (fetch+parse+cascade+layout+tty), on the
+  # HOST target -- not under qemu, since timing an emulated CPU would
+  # measure qemu's overhead, not stele's. `date +%s%N` (nanosecond epoch)
+  # for millisecond resolution -- bash has no sub-second `$SECONDS`.
+  # SPEED_WALLCLOCK_BUDGET_MS is env-overridable specifically so the gate
+  # can be proven to fail without touching this budget's real value (see
+  # JOURNAL's A5z baseline entry for that demonstration).
+  # ---------------------------------------------------------------------
+  if [ ! -f "$HOST_BIN" ]; then
+    bad "A5z: host binary still not found at $HOST_BIN (wall-clock fallback)"
+  else
+    t0=$(date +%s%N)
+    if ! "$HOST_BIN" --headless --dump-text "$FIXTURE_KITCHEN_SINK" >/dev/null 2>/tmp/stele_a5z_wall.err; then
+      bad "A5z: stele --headless --dump-text crashed on $FIXTURE_KITCHEN_SINK (wall-clock fallback)"
+      sed 's/^/    /' /tmp/stele_a5z_wall.err
+    else
+      t1=$(date +%s%N)
+      ms=$(( (t1 - t0) / 1000000 ))
+      note "A5z: first paint of $FIXTURE_KITCHEN_SINK took ${ms}ms (budget ${SPEED_WALLCLOCK_BUDGET_MS}ms, host wall-clock fallback)"
+      if [ "$ms" -le "$SPEED_WALLCLOCK_BUDGET_MS" ]; then
+        pass "A5z: first paint within wall-clock budget (${ms}ms <= ${SPEED_WALLCLOCK_BUDGET_MS}ms)"
+      else
+        bad "A5z: first paint OVER wall-clock budget (${ms}ms > ${SPEED_WALLCLOCK_BUDGET_MS}ms)"
+      fi
+    fi
   fi
 
   # ---------------------------------------------------------------------
