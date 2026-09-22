@@ -3751,8 +3751,8 @@ mod tests {
         // The <map> lives AFTER the <img> and is not its ancestor/sibling in
         // any structural sense that matters -- a flat scan must still find it.
         let d = dom::parser::parse(
-            r#"<div><img src="a.gif" usemap="#nav"></div>
-               <map name="nav"><area shape="rect" coords="0,0,10,10" href="/left"></map>"#,
+            r##"<div><img src="a.gif" usemap="#nav"></div>
+               <map name="nav"><area shape="rect" coords="0,0,10,10" href="/left"></map>"##,
         );
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
@@ -3773,8 +3773,8 @@ mod tests {
         // the anchor's `tag_interactive` propagation must not clobber the
         // img's own `Interactive::ImageMap`.
         let d = dom::parser::parse(
-            r#"<a href="/fallback"><img src="a.gif" usemap="#m"></a>
-               <map name="m"><area shape="rect" coords="0,0,10,10" href="/left"></map>"#,
+            r##"<a href="/fallback"><img src="a.gif" usemap="#m"></a>
+               <map name="m"><area shape="rect" coords="0,0,10,10" href="/left"></map>"##,
         );
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
@@ -3799,7 +3799,7 @@ mod tests {
 
     #[test]
     fn dangling_usemap_with_no_matching_map_is_a_plain_image() {
-        let d = dom::parser::parse(r#"<img src="a.gif" usemap="#missing">"#);
+        let d = dom::parser::parse(r##"<img src="a.gif" usemap="#missing">"##);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let img = find_replaced(&root).expect("img box present");
@@ -3809,11 +3809,11 @@ mod tests {
     #[test]
     fn malformed_area_is_dropped_from_the_resolved_area_list() {
         let d = dom::parser::parse(
-            r#"<img src="a.gif" usemap="#m">
+            r##"<img src="a.gif" usemap="#m">
                <map name="m">
                  <area shape="rect" coords="0,0,10,10" href="/ok">
                  <area shape="rect" coords="1,2,3" href="/bad">
-               </map>"#,
+               </map>"##,
         );
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
@@ -3829,7 +3829,7 @@ mod tests {
 
     #[test]
     fn image_map_natural_size_prefers_the_decoded_image_over_attrs() {
-        let d = dom::parser::parse(r#"<img id="pic" src="a.gif" width="48" height="16" usemap="#m"><map name="m"></map>"#);
+        let d = dom::parser::parse(r##"<img id="pic" src="a.gif" width="48" height="16" usemap="#m"><map name="m"></map>"##);
         let styles = cascade::cascade(&d, &[]);
         let img_id = find_all(&d, "img")[0];
         let decoded = Rc::new(RgbaImage { width: 16, height: 16, pixels: vec![0u8; 16 * 16 * 4] });
@@ -3847,7 +3847,7 @@ mod tests {
 
     #[test]
     fn image_map_natural_size_falls_back_to_intrinsic_without_a_decode() {
-        let d = dom::parser::parse(r#"<img src="a.gif" width="48" height="16" usemap="#m"><map name="m"></map>"#);
+        let d = dom::parser::parse(r##"<img src="a.gif" width="48" height="16" usemap="#m"><map name="m"></map>"##);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let img = find_replaced(&root).expect("img box present");
@@ -3859,7 +3859,7 @@ mod tests {
 
     #[test]
     fn map_name_matching_is_case_sensitive() {
-        let d = dom::parser::parse(r#"<img src="a.gif" usemap="#Nav"><map name="nav"><area coords="0,0,1,1" href="/x"></map>"#);
+        let d = dom::parser::parse(r##"<img src="a.gif" usemap="#Nav"><map name="nav"><area coords="0,0,1,1" href="/x"></map>"##);
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
         let img = find_replaced(&root).expect("img box present");
@@ -3869,7 +3869,7 @@ mod tests {
     #[test]
     fn map_and_area_elements_produce_no_boxes_of_their_own() {
         let d = dom::parser::parse(
-            r#"<div><img src="a.gif" usemap="#m"></div><map name="m"><area coords="0,0,1,1" href="/x">visible text?</map>"#,
+            r##"<div><img src="a.gif" usemap="#m"></div><map name="m"><area coords="0,0,1,1" href="/x">visible text?</map>"##,
         );
         let styles = cascade::cascade(&d, &[]);
         let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
