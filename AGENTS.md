@@ -101,6 +101,49 @@ is involved, pre-assign it to ONE packet so parallel branches don't collide on m
 
 ---
 
+## The workspace is shared — branch per issue, push, and check your diff
+
+Agents here share one checkout of this repo. Runs land in it one after another, it is
+periodically `reset --hard` back to `main`, and Paperclip's git sync can merge a run's
+local commit into **whatever branch the checkout happens to be sitting on**. Two failure
+modes follow from that, and both have already happened:
+
+- **Work disappears.** A commit that exists only locally is not saved work — the next
+  reset takes it, and a reviewer who only has `git fetch` sees nothing.
+- **Work gets bundled.** A branch left over from an earlier, unrelated run accumulates
+  the next run's commits. `dcx-88-shared-workspace-push-rule` shipped a docs change *and*
+  an in-progress `view-source:` feature (DCX-72) in the same branch, because the feature
+  was committed onto the branch that happened to be checked out. Whoever lands "the
+  branch" then ships unreviewed, possibly blocked, work under an unrelated ticket.
+
+So, for **every** change — code, docs, goldens, anything:
+
+- **Start from `origin/main`, on a branch named for your issue.** `git fetch origin` then
+  `git switch -c dcx-<n>-<slug> origin/main`. Never commit onto the branch you inherited
+  from the previous run, and never assume the checked-out branch is yours.
+- **Check what you are about to hand off before you hand it off.**
+  `git diff --stat origin/main...HEAD` must list *only* the files your issue covers. If it
+  lists anything else, you are on a contaminated branch — re-cut from `origin/main` and
+  replay just your change. Say the file count and SHA in your handoff so a reviewer can
+  check the same thing.
+- **Push the branch to `origin` in the same heartbeat that creates the commit.** Pushing
+  is part of finishing, not a release-time step. Name the pushed ref (branch **and**
+  commit SHA) in your handoff — that is what makes the work inspectable.
+- **Reviewers: verify the ref is fetchable from `origin`, and diff it against
+  `origin/main` yourself** before reviewing content. If the ref is missing, or the diff
+  is wider than the ticket, return it to its owner instead of reviewing what's there.
+- **Release: never land "the branch as materialized in the shared workspace."** Land a
+  pushed ref whose `origin/main...HEAD` diff matches the reviewed scope. A diff that grew
+  between review and release is a stop, not a merge.
+- If you need isolation from other runs in the same checkout, use a git worktree
+  (`git worktree add --detach <dir> origin/main`) — the branch and push rules still apply
+  to what comes out of it.
+- **Never put a credential anywhere durable.** Not in `.git/config`, not in a remote URL,
+  not in a commit, comment, or log line. The harness supplies git credentials to the run;
+  reference them through the environment, never by value.
+
+---
+
 ## Where the truth lives (link it, don't duplicate it)
 
 | Question | Source of truth |
