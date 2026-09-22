@@ -1632,3 +1632,46 @@ Append-only running log. Newest at the bottom.
 - **Size:** report the CI-measured `stele-i486` delta here once `m0-acceptance` runs on this packet's push
   (against the ≈24-28 KB design estimate and the 97,124 B / 1,474,560 B floppy ceiling) -- not measured in
   this docs-only commit.
+
+## 2026-09-22 — A5z: first-paint speed gate wired into accept.sh (DCX-68)
+
+- **Landed** the speed-budget check the original build brief always specified (§0: first paint over
+  `fixtures/kitchen-sink.html`, < 50M retired instructions under qemu-i386 or < 150ms host wall-clock) but
+  that `accept.sh` never actually measured -- charter C10 requires this "forever", and it's the only
+  regression fence for K1 (beat Navigator 4 to first paint), so every packet since M6 landed blind on speed
+  until now. New label `A5z` (existing `A5a`-`A5x` are unrelated M6 golden-render checks that reused the "A5"
+  letter first -- not renumbered, see DECISIONS D69). Two independent methods:
+    - **Primary** (near A4 in `accept.sh`, i486/qemu-only, no cargo needed): qemu-i386 retired-instruction
+      count over `$BIN --headless --dump-text fixtures/kitchen-sink.html` via a QEMU TCG plugin
+      (`find_qemu_insn_plugin`, searches common install paths + a `QEMU_INSN_PLUGIN` override). Budget
+      `SPEED_INSN_BUDGET` (default 50,000,000), env-overridable.
+    - **Fallback** (cargo-gated block, next to A5a/A5b): host wall-clock timing of the same
+      `--headless --dump-text` pipeline over `target/release/stele`. Budget `SPEED_WALLCLOCK_BUDGET_MS`
+      (default 150), env-overridable.
+    - The `accept` CI job (`m0-acceptance.yml`) installs only `qemu-user file`, no TCG plugin, so the
+      primary method PENDs there today and the wall-clock fallback (running in the `build` job via
+      `--tty-only`) is the check that actually gates until a plugin is wired into the image -- documented as
+      expected "prefer X, fall back to Y" behavior per DECISIONS D69, not a bug.
+- **Gate-can-fail proof (local, mocked binaries -- this environment has no cargo/qemu, and policy is
+  CI-driven build/test, never build the i486 target locally):** a stand-in `target/release/stele` (sleeps a
+  controllable duration via `STELE_FAKE_MS`, then prints fake tty output) plus a stub `cargo` (no-op build)
+  and stub `qemu-i386`/`file`, run through `accept.sh` / `accept.sh --tty-only`:
+    - `STELE_FAKE_MS=5` (fast), default 150ms budget -> `A5z: first paint ... took 79ms ... PASS`.
+    - `STELE_FAKE_MS=1000` (slow), default 150ms budget -> `A5z: first paint ... took 1061ms ...
+      FAIL (1061ms > 150ms)`.
+    - `STELE_FAKE_MS=5` (fast), `SPEED_WALLCLOCK_BUDGET_MS=1` (artificially tight) -> `A5z: first paint ...
+      took 45ms ... FAIL (45ms > 1ms)`.
+    - Full run (`./accept.sh`, no `--tty-only`) with a stub `qemu-i386` present but no plugin: primary
+      correctly `PEND`s (`no qemu TCG instruction-count plugin found`) and falls through to the wall-clock
+      check, which still runs and passes. With no `qemu-i386` on PATH at all, primary `PEND`s
+      (`no qemu-i386 found`) the same way.
+  This proves the gate is load-bearing (both budget-exceeded and threshold-tightened failure modes actually
+  fire), not a check that only ever passes.
+- **Real HEAD baseline still needed from CI.** This packet's own sandbox has no cargo/qemu (see above), so
+  the actual instruction count / wall-clock number for HEAD is not measured here -- it needs the real
+  `m0-acceptance` run (build job's `--tty-only` step, real `target/release/stele`) to produce a genuine
+  number. Whoever lands this on a branch that runs CI: paste that run's `A5z: first paint of
+  fixtures/kitchen-sink.html took NNNms` line back into this entry so future packets have a real number to
+  regress against.
+- Decision recorded: D69 (see DECISIONS.md) -- the label choice and the "wall-clock gates today, insn-count
+  takes over once a plugin exists" fork.
