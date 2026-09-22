@@ -34,6 +34,48 @@ fn path_only_no_query() {
 }
 
 #[test]
+fn explicit_default_port_is_kept_distinct_from_absent_port() {
+    // No default-port normalization happens at parse time: an explicit
+    // `:80`/`:443` is recorded (`parts().port == Some(_)`), while an absent
+    // port stays `None`. `port(default)` only collapses the two when a
+    // caller asks for an effective value.
+    let with_80 = Url::new("http://host:80/");
+    let without_80 = Url::new("http://host/");
+    assert_eq!(with_80.parts().port, Some(80));
+    assert_eq!(without_80.parts().port, None);
+    assert_eq!(with_80.port(80), without_80.port(80));
+
+    let with_443 = Url::new("https://host:443/");
+    let without_443 = Url::new("https://host/");
+    assert_eq!(with_443.parts().port, Some(443));
+    assert_eq!(without_443.parts().port, None);
+    assert_eq!(with_443.port(443), without_443.port(443));
+}
+
+#[test]
+fn scheme_case_normalization_does_not_touch_host() {
+    // The scheme is lowercased, but the host is kept exactly as written
+    // (no case normalization for host/authority).
+    let upper = Url::new("HTTP://Host/");
+    let lower = Url::new("http://Host/");
+    assert_eq!(upper.scheme(), "http");
+    assert_eq!(lower.scheme(), "http");
+    assert_eq!(upper.host(), "Host");
+    assert_eq!(lower.host(), "Host");
+    assert_eq!(upper.parts(), lower.parts());
+}
+
+#[test]
+fn empty_path_is_the_empty_string_not_a_slash() {
+    // `http://host` has no trailing `/`, so the authority consumes the
+    // entire remainder and `path()` is empty (callers are documented to
+    // treat an empty path as `/`, but the parser itself does not insert one).
+    let u = Url::new("http://host");
+    assert_eq!(u.host(), "host");
+    assert_eq!(u.path(), "");
+}
+
+#[test]
 fn malformed_url_never_panics_and_degrades_gracefully() {
     for raw in ["", "not a url at all", "http://", ":::", "http:///no-host-path"] {
         let u = Url::new(raw);
