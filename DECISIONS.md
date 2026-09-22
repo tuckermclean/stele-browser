@@ -3,6 +3,26 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Acceptance — A2 size gate vs. the 1.44 MB floppy line
+
+### D70 — the floppy ceiling is a loud soft warning in A2; the 2.0 MB line stays the hard fail
+`accept.sh`'s A2 gate measured the stripped binary against a single `SIZE_BUDGET_BYTES=2,000,000` threshold,
+so the 1,474,560-byte floppy ceiling that AGENTS.md non-negotiable #2 calls a non-negotiable appeared nowhere
+in CI: any binary up to 2 MB printed a clean PASS with no hint of how close to a floppy it was. Options were
+(a) lower the hard fail to 1,474,560 so overage blocks the packet, (b) leave A2 alone and track size by hand,
+or (c) split the two numbers by kind. Chose (c), matching the operator's scope call on DCX-76: **crossing the
+floppy line is a soft warning, not a refusal.** A2 now keeps `SIZE_BUDGET_BYTES=2,000,000` as an absolute
+hard-fail backstop for pathological bloat (an accidental heavy dependency, an unstripped debug build) and adds
+`FLOPPY_CEILING_BYTES=1474560`; a binary in `(1474560 .. 2000000]` prints a greppable `A2 WARN: binary exceeds
+1.44MB floppy by N bytes` line via a new `warn()` helper and the gate still PASSES. A2 also now prints the
+measurement on *every* run as bytes, percent-of-floppy (one decimal, integer math), and remaining headroom —
+headroom goes negative once over the line, and that sign is the signal. Rationale for not choosing (a): what
+to cut to get back under a floppy is a human scope call about features, and CI refusing the packet forces that
+call at the worst possible moment rather than surfacing it. Current HEAD measures 1,377,436 bytes = 93.4% of
+the floppy with 97,124 B headroom, so today's CI passes with no warning. REVISIT TRIGGER: if the warn line
+starts firing on most packets it has stopped being a signal — that is the moment to make the floppy budget
+load-bearing (hard fail) or to formally retire the floppy target, not to raise the number quietly.
+
 ## Acceptance — A5z speed gate (first paint over kitchen-sink.html)
 
 ### D69 — new label A5z for the speed gate; wall-clock is the live gate today, qemu insn-count PENDs until a plugin is wired in

@@ -58,7 +58,8 @@ set -uo pipefail
 TARGET_STEM="i486-monolith-linux-musl"
 BIN="target/${TARGET_STEM}/release/stele"
 GOLDEN_HELLO="goldens/m0-hello.txt"
-SIZE_BUDGET_BYTES=$(( 2 * 1000 * 1000 ))   # A2: 2.0 MB stripped
+FLOPPY_CEILING_BYTES=1474560               # A2: 1.44 MB floppy (soft warn)
+SIZE_BUDGET_BYTES=$(( 2 * 1000 * 1000 ))   # A2: 2.0 MB stripped (hard fail)
 SPEED_INSN_BUDGET="${SPEED_INSN_BUDGET:-50000000}"             # A5z: < 50M retired instrs (qemu-i386)
 SPEED_WALLCLOCK_BUDGET_MS="${SPEED_WALLCLOCK_BUDGET_MS:-150}"  # A5z: < 150ms host wall-clock fallback
 
@@ -76,6 +77,7 @@ note()  { printf '  %s\n' "$*"; }
 pass()  { printf '\033[32mPASS\033[0m %s\n' "$*"; }
 bad()   { printf '\033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 pend()  { printf '\033[33m····\033[0m %s\n' "$*"; }
+warn()  { printf '\033[33mWARN\033[0m %s\n' "$*"; }
 
 # Resolve a user-mode qemu for i386.
 find_qemu() {
@@ -138,26 +140,40 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# A2 — size budget (≤ 2.0 MB stripped). HARD GATE as of M6 (release
-# hardening — this is the milestone the header comment/build brief always
-# named as when A2 stops being informational and starts failing the build).
-# The i486 binary has stayed comfortably under budget since M4 (~542KB at
-# the time this gate flipped on, well under a third of the 2.0MB ceiling),
-# so this is expected to pass with room to spare — flipping it to a hard
-# `bad` (rather than `pend`) on overage is what actually makes A2 load-
-# bearing: a future packet that quietly bloats the binary (an accidental
-# heavy dependency, an unstripped debug build, ...) now fails acceptance
-# instead of sailing through with an ignored warning.
+# A2 — size budget. Two thresholds, deliberately different in kind:
+#
+#   FLOPPY_CEILING_BYTES = 1,474,560  — the 1.44 MB floppy line from
+#     AGENTS.md non-negotiable #2. This is a SOFT WARNING: crossing it
+#     prints a loud, greppable `A2 WARN:` line but the gate still PASSES.
+#     Deciding what to cut to get back under a floppy is a human scope
+#     call, not something CI should make by refusing the packet (DECISIONS
+#     D70, operator scope call on DCX-76).
+#
+#   SIZE_BUDGET_BYTES = 2,000,000 — absolute hard-fail backstop. Above
+#     this a packet is pathologically bloated (an accidental heavy
+#     dependency, an unstripped debug build, ...) and acceptance fails.
+#
+# A2 always prints the measurement as bytes, percent-of-floppy, and
+# remaining headroom, so every packet's size delta is legible in CI output
+# even when nothing is wrong. Headroom goes negative once the binary is
+# over the floppy line — that sign is the signal.
 # ---------------------------------------------------------------------------
 if [ "$TTY_ONLY" = 1 ]; then
   :
 elif [ -f "$BIN" ]; then
   bytes=$(wc -c < "$BIN")
-  note "size: ${bytes} bytes (budget ${SIZE_BUDGET_BYTES})"
-  if [ "$bytes" -le "$SIZE_BUDGET_BYTES" ]; then
-    pass "A2: within size budget (${bytes} <= ${SIZE_BUDGET_BYTES} bytes)"
+  # Percent of the floppy ceiling to one decimal place, integer math only.
+  pct_tenths=$(( bytes * 1000 / FLOPPY_CEILING_BYTES ))
+  pct="$(( pct_tenths / 10 )).$(( pct_tenths % 10 ))"
+  headroom=$(( FLOPPY_CEILING_BYTES - bytes ))
+  note "size: ${bytes} bytes = ${pct}% of the ${FLOPPY_CEILING_BYTES}-byte floppy; headroom ${headroom} bytes"
+  if [ "$bytes" -gt "$SIZE_BUDGET_BYTES" ]; then
+    bad "A2: OVER hard size budget (${bytes} > ${SIZE_BUDGET_BYTES} bytes; ${pct}% of floppy)"
+  elif [ "$bytes" -gt "$FLOPPY_CEILING_BYTES" ]; then
+    warn "A2 WARN: binary exceeds 1.44MB floppy by $(( bytes - FLOPPY_CEILING_BYTES )) bytes (${bytes} > ${FLOPPY_CEILING_BYTES}; ${pct}% of floppy)"
+    pass "A2: within hard size budget (${bytes} <= ${SIZE_BUDGET_BYTES} bytes) — see A2 WARN above"
   else
-    bad "A2: OVER size budget (${bytes} > ${SIZE_BUDGET_BYTES} bytes)"
+    pass "A2: within size budget (${bytes} bytes, ${pct}% of floppy, ${headroom} B headroom)"
   fi
 fi
 
