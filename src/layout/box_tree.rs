@@ -413,6 +413,14 @@ fn is_form(el: &Element) -> bool {
 /// recursion can't itself blow the stack on any input `build_node` could
 /// have produced.
 fn tag_interactive(node: &mut LayoutNode, interactive: &Interactive) {
+    // An `<img usemap>` nested inside an `<a href>` (a common fallback/authoring
+    // pattern) keeps its own `Interactive::ImageMap` — real browsers give the
+    // usemap priority over an enclosing anchor, so a subtree that already
+    // carries an image map is left alone rather than clobbered with the
+    // anchor's `Link`.
+    if matches!(node.interactive, Some(Interactive::ImageMap { .. })) {
+        return;
+    }
     node.interactive = Some(interactive.clone());
     for child in &mut node.children {
         tag_interactive(child, interactive);
@@ -3755,6 +3763,28 @@ mod tests {
                 assert_eq!(areas[0].href.as_deref(), Some("/left"));
             }
             other => panic!("expected Interactive::ImageMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn img_usemap_inside_a_href_keeps_image_map_not_the_anchor_link() {
+        // <a href><img usemap></a> is a common fallback/authoring pattern.
+        // Real browsers give the usemap priority over the enclosing anchor --
+        // the anchor's `tag_interactive` propagation must not clobber the
+        // img's own `Interactive::ImageMap`.
+        let d = dom::parser::parse(
+            r#"<a href="/fallback"><img src="a.gif" usemap="#m"></a>
+               <map name="m"><area shape="rect" coords="0,0,10,10" href="/left"></map>"#,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::ImageMap { areas, .. }) => {
+                assert_eq!(areas.len(), 1);
+                assert_eq!(areas[0].href.as_deref(), Some("/left"));
+            }
+            other => panic!("expected Interactive::ImageMap (usemap beats enclosing <a>), got {other:?}"),
         }
     }
 

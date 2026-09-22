@@ -1769,7 +1769,7 @@ Append-only running log. Newest at the bottom.
   (1) An `<img usemap>` nested in an `<a href>` lost its image map because `tag_interactive` unconditionally
   overwrote it with the anchor's `Link`. Fixed: `tag_interactive` now returns early (skipping recursion) when
   it reaches a node that already carries `Interactive::ImageMap`, so the image map survives the anchor's
-  propagation. Usemap beats enclosing anchor, matching real browsers.
+  propagation. Usemap beats enclosing anchor, matching real browsers. (See DECISIONS D72 for the design note.)
   (2) The fixture coords were authored in rendered-space (0-16, 16-32, 32-48) instead of natural image-space
   (0-6, 6-11, 11-16 for a 16px natural width), so only the first area was reachable. Fixed: coords rewritten
   to natural space, all three regions now reachable end to end.
@@ -1781,4 +1781,4 @@ Append-only running log. Newest at the bottom.
   Test `default_shape_ignores_missing_or_malformed_coords` failed. Fixed: `parse_area` now checks shape immediately
   after resolving it and returns early with an empty-coords `Area` if shape is `Default`, bypassing coords parsing.
   `Rect`/`Circle`/`Poly` validation is unchanged.
-- Decision recorded: D71 (see DECISIONS.md).
+- Decisions recorded: D71 (malformed coords fork) and D72 (anchor/usemap priority fork) — see DECISIONS.md.

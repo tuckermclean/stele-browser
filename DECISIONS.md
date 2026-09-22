@@ -60,6 +60,21 @@ Two forks while implementing `<img usemap>`/`<map>`/`<area>` (HTML 4.01
    giving `Focusable` an optional `area_index` alongside its existing
    `interactive`/`control_node` fields.
 
+### D72 — `<a href><img usemap></a>` keeps `Interactive::ImageMap`, not the anchor's `Link`
+Code review caught a real defect: `box_tree::build_node_inner`'s `is_link`
+branch calls `tag_interactive` to propagate `Interactive::Link` onto an
+`<a>`'s entire subtree. Before the fix, this was unconditional, so `<a
+href="/fallback"><img usemap="#m"></a>` (a common pre-image-map fallback /
+dual-purpose authoring pattern) silently overwrote the img's
+`Interactive::ImageMap` with the anchor's `Link`, discarding every `<area>`'s
+shape and href. **Choice:** `tag_interactive` now returns early (without
+recursing further) on any subtree node that already carries
+`Interactive::ImageMap`, leaving it untouched. This matches real browsers,
+which give an inner `usemap` priority over an enclosing anchor.
+Revisit-trigger: none expected — if a future packet adds another carrier
+that similarly wants "innermost wins" semantics against an enclosing `<a>`,
+extend the same guard rather than special-casing `ImageMap` further.
+
 ## Acceptance — A5z speed gate (first paint over kitchen-sink.html)
 
 ### D69 — new label A5z for the speed gate; wall-clock is the live gate today, qemu insn-count PENDs until a plugin is wired in
