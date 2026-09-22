@@ -3,6 +3,51 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Acceptance — A5z speed gate (first paint over kitchen-sink.html)
+
+### D69 — new label A5z for the speed gate; wall-clock is the live gate today, qemu insn-count PENDs until a plugin is wired in
+Build brief §0 defines "A5" as a first-paint SPEED budget over
+`fixtures/kitchen-sink.html` (< 50M retired instructions under qemu-i386, or
+< 150ms host wall-clock) — charter C10's "speed budget in CI forever", and
+the only regression fence for K1 (beat Navigator 4 to first paint), the
+project's kill condition. `accept.sh` never measured either number; every
+packet since M6 (the whole Acid2 program, the X11 work) landed blind on
+speed. Two forks:
+1. **Label.** `A5a`-`A5x` already exist in `accept.sh` as an unrelated M6
+   packet's golden-render checks over the same fixture (they reused the "A5"
+   letter before this speed gate existed). Options: (a) renumber those
+   checks to free up "A5" for the speed gate; (b) pick an unused sub-label.
+   **Choice: (b), `A5z`.** Renumbering churns golden-check history (diff
+   noise across every CI run/PR that references those labels) for zero
+   behavioral benefit — the labels are just log-line prefixes, not identity.
+   `A5y` and `A5z` were both free; `z` was picked as the more conventional
+   "last resort" suffix. Revisit-trigger: none expected — labels are
+   append-only from here.
+2. **Measurement method / where the check actually gates.** The brief
+   prefers qemu-i386 retired-instruction count (deterministic across CI
+   hardware) but that needs a QEMU TCG plugin reporting an instruction
+   count; user-mode `qemu-i386` (the `qemu-user` apt package the `accept`
+   CI job installs — see `m0-acceptance.yml`) does not ship one, and
+   linux-user mode has no `-icount` (that's a system-emulation-only qemu
+   flag). Options: (a) block the gate entirely until a plugin is packaged
+   into the CI image; (b) implement the instruction-count method as PEND
+   (not FAIL) when no plugin is found, and let the brief's own documented
+   fallback — host wall-clock, budget 150ms — be the check that actually
+   gates until a plugin exists. **Choice: (b).** A gate that can never run
+   until unrelated image work lands is worse than a live-but-less-precise
+   one today. The wall-clock fallback runs in the `build` CI job (which has
+   `cargo`, via `--tty-only`) against `target/release/stele` — host target,
+   not under qemu, since timing an emulated CPU measures qemu overhead, not
+   render cost. Both budgets are env-overridable (`SPEED_INSN_BUDGET`,
+   `SPEED_WALLCLOCK_BUDGET_MS`) so the gate's failure path can be
+   demonstrated without editing the script (see JOURNAL's A5z entry).
+   Revisit-trigger: a QEMU TCG instruction-count plugin (e.g. contrib's
+   `libinsn.so`, built or packaged) becomes available in the `accept` job's
+   image/apt sources — wire it in via `QEMU_INSN_PLUGIN` or one of the
+   searched paths in `find_qemu_insn_plugin()`, and the instruction-count
+   method takes over as the live gate automatically (no code change needed,
+   just infra).
+
 ## Chrome — editable address bar + reload
 
 ### D68 — editable address bar + reload button in the `--x11` chrome
