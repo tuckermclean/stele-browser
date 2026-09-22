@@ -73,6 +73,14 @@ pub fn parse_area(shape: Option<&str>, coords: Option<&str>, href: Option<&str>)
         _ => Shape::Rect,
     };
 
+    if shape_kind == Shape::Default {
+        return Some(Area {
+            shape: shape_kind,
+            coords: Vec::new(),
+            href: href.map(|h| h.into()),
+        });
+    }
+
     let coords_vals = match parse_coords(coords) {
         Ok(vals) => vals,
         Err(()) => return None,
