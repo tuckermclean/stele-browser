@@ -1703,3 +1703,82 @@ Append-only running log. Newest at the bottom.
     - 2,000,000 B (exactly at the hard budget) → WARN + PASS.
     - 2,000,001 B (one byte over the hard budget) → `FAIL A2: OVER hard size budget`.
 - Decision recorded: D70 (see DECISIONS.md).
+
+## 2026-09-22 -- Client-side image maps (charter K2, packet/image-maps, DCX-136)
+
+- Fourth attempt at this packet -- the first three (all authored the same design, see the 2026-09-22 handoff
+  comment on DCX-69) were lost to an infra defect (no persistent `/workspace`, no push rights -- see DCX-134's
+  diagnosis), not a design problem. This run rebuilds from that same design and hands off via a
+  `format-patch` attachment on DCX-136 instead of an unpushed local branch.
+- New pure `src/layout/image_map.rs`: `Shape`/`Area`, `parse_area` (HTML 4.01 §13.6.1 shape/coords parsing --
+  case-insensitive shape name, `rect` default/fallback, malformed/wrong-count `coords` dropped rather than
+  widened to `Shape::Default` -- see DECISIONS D71), `hit_test` (first-match-wins) / `hit_test_scaled`
+  (natural-image-space areas vs rendered-fragment-space clicks, guarded against zero/negative rendered size).
+  27 unit tests: boundary-inclusive rect, circle edge, polygon in/out, overlap precedence, empty-areas,
+  natural-vs-rendered scaling + fragment-origin offset, zero-rendered-size and zero-natural-size no-panic.
+- `layout::Interactive` gains `ImageMap { areas: Rc<[Area]>, natural: Size }` (same carrier pattern as
+  `Link`/`FormControl`).
+- `layout::box_tree`: `<img usemap="#name">` resolves against a `<map name>` found ANYWHERE in the document
+  (`find_map_by_usemap` -- a flat arena scan over `0..dom.len()`, not an ancestor/sibling walk), parses its
+  `<area>` children via `image_map::parse_area`, and tags the img's own `Replaced` leaf box
+  (`image_map_interactive`). `natural` prefers the DECODED image's real pixel size over the `width`/`height`
+  attrs when a decode succeeded (coords are authored against natural pixels, never the attrs-scaled box),
+  falling back to the attrs-or-0x0 intrinsic size when no decode is available. 9 new box_tree tests incl.
+  map-after-img document order, dangling usemap (no matching map -> plain image, no panic), malformed-area
+  dropping, natural-size precedence (decoded vs attrs-fallback), case-sensitive `name` matching, and that
+  `<map>`/`<area>` themselves produce no boxes/text.
+- `style/ua.rs`: `map, area { display: none; }` -- neither element has its own presentation; box_tree's DOM
+  scan runs independent of `display` so this has no effect on resolution, only on painting.
+- `backend::x11::hit_test_pixel` resolves `ImageMap` hits via `image_map::hit_test_scaled` alongside the
+  existing `Link` rect check, keeping the same "topmost fragment in paint order wins" semantics; a matched
+  but `nohref` area contributes nothing (doesn't clobber an earlier match). 4 new tests: natural-to-rendered
+  scaling + origin offset, nohref-area-does-not-navigate, image-map-over-link topmost-wins, zero-size no-panic.
+- `browser.rs`: `enter_command`'s exhaustive `Interactive` match gets an `ImageMap` arm (keyboard/tty
+  fallback: activate the first `href`-bearing area in document order -- see DECISIONS D71 fork 2 for why this
+  packet doesn't do per-area keyboard Tab stops); `resolve_control_nodes`'s `same_kind` match gains an
+  `(ImageMap, ImageMap)` arm; `walk_dom_interactive` gains a matching branch (`usemap_target_exists`, mirroring
+  `box_tree::image_map_interactive`'s existence check without re-parsing every area, since this list's
+  `Interactive` values are only ever inspected for their VARIANT) -- this was the one real correctness trap
+  flagged going in: an unmatched interactive element between the fragment-derived and DOM-derived lists
+  desyncs `resolve_control_nodes` and silently breaks `control_node` resolution for every `FormControl`
+  *after* it in the document. `mouse_click`'s tty path reuses `enter_command` unchanged, so no separate tty
+  wiring was needed there.
+- Fixture: `fixtures/image-map-navbar.html` -- a `<map>`/`<area>` 3-region navbar image, reusing the existing
+  16x16 `fixtures/images-anim.gif` (copied to `fixtures/image-map-navbar.gif`) rendered at 48x16 via
+  width/height attrs, so it exercises the natural-16x16-vs-rendered-48x16 scaling path end to end. Charter's
+  C2 ADOPTED AMENDMENTS record updated (K2 client-side image maps) per rule 6.
+- **No golden/accept.sh wiring for the fixture, and no cargo/qemu run in this sandbox** -- same posture as
+  every other packet built here (AGENTS.md: CI-driven build/test loop, don't build the i486 target locally).
+  Unlike the lost third attempt, this run deliberately does NOT wire an `accept.sh` golden check for the new
+  fixture with no golden checked in -- blessing an unverified render is forbidden (brief §10), and an
+  unblessed check would just fail red on the very first CI run for no benefit. Whoever picks this up with
+  build access: run `./accept.sh --bless` (or pull the CI `renders/` artifact), verify the
+  `image-map-navbar` render is correct (three distinct nav regions, image scaled 3x horizontally), commit
+  `goldens/image-map-navbar.tty.txt`, then wire the `accept.sh` check. The CI-measured binary size delta
+  against the 97,124 B (at last measurement) floppy headroom also needs a real build -- both are one CI
+  round-trip away, not additional design work.
+- Verification done in this sandbox: no cargo toolchain available (expected, not a gap) -- hand-traced every
+  new function against existing conventions (`AttrMap::get` case-insensitive lookup, `NodeId`-as-arena-index,
+  `Rc<[T]>` shared-ownership posture matching `BoxContent::Replaced`'s `Rc<RgbaImage>`), cross-checked every
+  new match arm against the full `Interactive::` grep across the tree (`browser.rs`, `backend/x11.rs`,
+  `layout/box_tree.rs`, `layout/mod.rs` -- no other exhaustive match sites missed), and wrote/hand-walked
+  unit tests alongside every new pure function (40 new tests total: 27 in `image_map.rs`, 9 in `box_tree.rs`,
+  4 in `x11.rs`). Real `cargo test`/`./accept.sh` verification is the `m0-acceptance` CI run once this branch
+  reaches a PR.
+- **Review round 1 fixes (v2 patch):** The v1 implementation had two bugs caught by code review:
+  (1) An `<img usemap>` nested in an `<a href>` lost its image map because `tag_interactive` unconditionally
+  overwrote it with the anchor's `Link`. Fixed: `tag_interactive` now returns early (skipping recursion) when
+  it reaches a node that already carries `Interactive::ImageMap`, so the image map survives the anchor's
+  propagation. Usemap beats enclosing anchor, matching real browsers.
+  (2) The fixture coords were authored in rendered-space (0-16, 16-32, 32-48) instead of natural image-space
+  (0-6, 6-11, 11-16 for a 16px natural width), so only the first area was reachable. Fixed: coords rewritten
+  to natural space, all three regions now reachable end to end.
+- **Review round 2 fixes (v3 patch):** Raw string delimiters in test code. Eight tests in `box_tree.rs` embedded
+  `usemap="#name"` in `r#\"...\"#` raw literals; the `\"#` sequence itself is a raw-string terminator, closing
+  the string early and causing 51 Rust syntax errors in CI. Fixed: widened all eight to `r##\"...\"##`.
+- **Review round 3 fixes (v4 patch):** `parse_area` logic bug. The function called `parse_coords()` unconditionally
+  and returned `None` on parse error *before* checking if the shape was `Shape::Default` (which needs no coords).
+  Test `default_shape_ignores_missing_or_malformed_coords` failed. Fixed: `parse_area` now checks shape immediately
+  after resolving it and returns early with an empty-coords `Area` if shape is `Default`, bypassing coords parsing.
+  `Rect`/`Circle`/`Poly` validation is unchanged.
+- Decision recorded: D71 (see DECISIONS.md).

@@ -827,31 +827,49 @@ pub fn coalesce(intents: Vec<XIntent>) -> Vec<XIntent> {
 // Pixel hit-test
 // =========================================================================
 
-/// Find the `href` of the topmost `Interactive::Link` fragment whose pixel
-/// rect contains document-space point `(x, y)` (document space: unscrolled
-/// — the caller adds the current scroll offset to the window-space click
-/// before calling this, exactly like `backend::fb`'s callers add nothing
-/// because fb has no scroll). "Topmost" = LAST matching fragment in paint
-/// order (later-painted fragments sit visually on top of earlier ones,
-/// same convention `raster::paint` already paints in) — for the common
-/// case of non-overlapping links this is just "the" match either way.
+/// Find the `href` of the topmost interactive fragment (an `Interactive::
+/// Link`, whole-fragment-rect match, or an `Interactive::ImageMap` whose
+/// `image_map::hit_test_scaled` resolves an `<area href>` under the point)
+/// whose region contains document-space point `(x, y)` (document space:
+/// unscrolled — the caller adds the current scroll offset to the
+/// window-space click before calling this, exactly like `backend::fb`'s
+/// callers add nothing because fb has no scroll). "Topmost" = LAST matching
+/// fragment in paint order (later-painted fragments sit visually on top of
+/// earlier ones, same convention `raster::paint` already paints in) — for
+/// the common case of non-overlapping interactive regions this is just
+/// "the" match either way.
 ///
-/// `None` when no link fragment's rect contains the point (including when
-/// `fragments` is empty, or nothing under the point is interactive at
-/// all).
+/// An `Interactive::ImageMap` fragment whose `hit_test_scaled` DOES resolve
+/// an area, but that area is `nohref` (`Area::href` is `None` — a
+/// documented dead zone, see `image_map::Area`'s doc comment), does NOT
+/// overwrite an earlier match: it simply contributes nothing, same as a
+/// fragment the point misses entirely.
+///
+/// `None` when nothing under the point is interactive at all (including
+/// when `fragments` is empty).
 pub fn hit_test_pixel(fragments: &[Fragment], x: f32, y: f32) -> Option<String> {
-    let mut found: Option<&str> = None;
+    let mut found: Option<String> = None;
     for f in fragments {
-        if let Some(Interactive::Link { href }) = &f.interactive {
-            let r = f.rect;
-            let within_x = x >= r.origin.x && x < r.origin.x + r.size.w;
-            let within_y = y >= r.origin.y && y < r.origin.y + r.size.h;
-            if within_x && within_y {
-                found = Some(href.as_ref());
+        match &f.interactive {
+            Some(Interactive::Link { href }) => {
+                let r = f.rect;
+                let within_x = x >= r.origin.x && x < r.origin.x + r.size.w;
+                let within_y = y >= r.origin.y && y < r.origin.y + r.size.h;
+                if within_x && within_y {
+                    found = Some(href.to_string());
+                }
             }
+            Some(Interactive::ImageMap { areas, natural }) => {
+                if let Some(area) = crate::layout::image_map::hit_test_scaled(areas, *natural, f.rect, x, y) {
+                    if let Some(href) = &area.href {
+                        found = Some(href.to_string());
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    found.map(|s| s.to_string())
+    found
 }
 
 // =========================================================================
@@ -1974,5 +1992,60 @@ mod tests {
     #[test]
     fn hit_test_pixel_empty_fragments_returns_none() {
         assert_eq!(hit_test_pixel(&[], 0.0, 0.0), None);
+    }
+
+    // --------------------------------------------------- image-map hit_test_pixel
+
+    fn image_map_fragment(x: f32, y: f32, w: f32, h: f32, natural: crate::layout::Size, areas: Vec<crate::layout::image_map::Area>) -> Fragment {
+        Fragment {
+            rect: Rect { origin: Point { x, y }, size: Size { w, h } },
+            kind: crate::layout::FragmentKind::Box { style: crate::style::ComputedStyle::default() },
+            interactive: Some(Interactive::ImageMap { areas: areas.into(), natural }),
+            clip: None,
+            id: None,
+            is_fixed: false,
+        }
+    }
+
+    fn rect_area(coords: [f32; 4], href: &str) -> crate::layout::image_map::Area {
+        crate::layout::image_map::parse_area(Some("rect"), Some(&format!("{},{},{},{}", coords[0], coords[1], coords[2], coords[3])), Some(href)).unwrap()
+    }
+
+    #[test]
+    fn hit_test_pixel_resolves_image_map_area_with_natural_to_rendered_scaling() {
+        // 16x16 natural image, rendered at 48x16 (3x horizontal scale),
+        // origin offset at (100, 200) -- exercises both the scale AND the
+        // fragment-origin offset in one shot.
+        let natural = crate::layout::Size { w: 16.0, h: 16.0 };
+        let areas = vec![rect_area([0.0, 0.0, 8.0, 16.0], "/left")];
+        let fragments = vec![image_map_fragment(100.0, 200.0, 48.0, 16.0, natural, areas)];
+        // Rendered-space (120, 208): local (20, 8) -> natural (20/48*16, 8) ≈ (6.67, 8) -> inside [0,8]x[0,16].
+        assert_eq!(hit_test_pixel(&fragments, 120.0, 208.0), Some("/left".to_string()));
+        // Rendered-space (140, 208): local (40, 8) -> natural ≈ (13.3, 8) -> outside [0,8].
+        assert_eq!(hit_test_pixel(&fragments, 140.0, 208.0), None);
+    }
+
+    #[test]
+    fn hit_test_pixel_image_map_nohref_area_does_not_navigate() {
+        let natural = crate::layout::Size { w: 10.0, h: 10.0 };
+        let area = crate::layout::image_map::parse_area(Some("rect"), Some("0,0,10,10"), None).unwrap();
+        let fragments = vec![image_map_fragment(0.0, 0.0, 10.0, 10.0, natural, vec![area])];
+        assert_eq!(hit_test_pixel(&fragments, 5.0, 5.0), None);
+    }
+
+    #[test]
+    fn hit_test_pixel_image_map_over_a_link_the_topmost_fragment_wins() {
+        let natural = crate::layout::Size { w: 10.0, h: 10.0 };
+        let areas = vec![rect_area([0.0, 0.0, 10.0, 10.0], "/on-top")];
+        let fragments = vec![link_fragment(0.0, 0.0, 10.0, 10.0, "/behind"), image_map_fragment(0.0, 0.0, 10.0, 10.0, natural, areas)];
+        assert_eq!(hit_test_pixel(&fragments, 5.0, 5.0), Some("/on-top".to_string()));
+    }
+
+    #[test]
+    fn hit_test_pixel_image_map_zero_size_fragment_does_not_panic() {
+        let natural = crate::layout::Size { w: 10.0, h: 10.0 };
+        let areas = vec![rect_area([0.0, 0.0, 10.0, 10.0], "/x")];
+        let fragments = vec![image_map_fragment(0.0, 0.0, 0.0, 0.0, natural, areas)];
+        assert_eq!(hit_test_pixel(&fragments, 0.0, 0.0), None);
     }
 }
