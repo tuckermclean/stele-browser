@@ -2166,25 +2166,31 @@ fn run_x11(source: &str) -> bool {
         let dt_ms = u32::try_from(now.duration_since(last_anim_tick).as_millis()).unwrap_or(u32::MAX);
         last_anim_tick = now;
 
+        // DCX-70 review fix: tick GIF clocks unconditionally every loop
+        // iteration, not only on the timeout/no-event path. A real X event
+        // (e.g. a scroll-wheel `ButtonPress` batch) must not starve the
+        // animation -- `dt_ms` was already computed above from wall-clock
+        // time, so it's valid regardless of what woke this iteration.
+        if advance_gif_clocks(&mut anim_clocks, &session.anim_frames, dt_ms) {
+            let images = current_anim_images(&session, &anim_clocks);
+            match reflow_from_dom_with_images(&session.dom, &session.final_url, width, &images) {
+                Ok(s) => {
+                    state = s;
+                    conn.begin_frame();
+                    x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                    let _ = conn.end_frame();
+                    stats.frames += 1;
+                    stats.put_image_bytes += width as u64 * height as u64 * 4;
+                }
+                Err(e) => eprintln!("stele: --x11: reflow for GIF frame advance failed: {e}"),
+            }
+        }
+
         if batch.is_empty() {
             // A timeout wakeup, not a real event batch (`drain_events`
             // itself always returns at least one event; only
-            // `drain_events_timeout` can return empty). Tick every GIF
-            // clock; only relayout+repaint if a frame actually changed.
-            if advance_gif_clocks(&mut anim_clocks, &session.anim_frames, dt_ms) {
-                let images = current_anim_images(&session, &anim_clocks);
-                match reflow_from_dom_with_images(&session.dom, &session.final_url, width, &images) {
-                    Ok(s) => {
-                        state = s;
-                        conn.begin_frame();
-                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
-                        let _ = conn.end_frame();
-                        stats.frames += 1;
-                        stats.put_image_bytes += width as u64 * height as u64 * 4;
-                    }
-                    Err(e) => eprintln!("stele: --x11: reflow for GIF frame advance failed: {e}"),
-                }
-            }
+            // `drain_events_timeout` can return empty) -- nothing else to
+            // do this iteration.
             continue;
         }
 
@@ -3467,7 +3473,7 @@ mod tests {
         let anim_frames = anim_frames_map(id, &[50, 70, 90]); // total loop = 210ms
         let mut clocks = init_anim_clocks(&anim_frames);
 
-        assert!(advance_gif_clocks(&mut clocks, &anim_frames, 130)); // 50 + 70 exactly -> frame 2
+        assert!(advance_gif_clocks(&mut clocks, &anim_frames, 120)); // 50 + 70 exactly -> frame 2
         assert_eq!(clocks[&id].frame, 2);
         assert_eq!(clocks[&id].elapsed_ms, 0);
     }
