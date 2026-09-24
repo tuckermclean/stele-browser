@@ -1782,3 +1782,24 @@ Append-only running log. Newest at the bottom.
   after resolving it and returns early with an empty-coords `Area` if shape is `Default`, bypassing coords parsing.
   `Rect`/`Circle`/`Poly` validation is unchanged.
 - Decisions recorded: D71 (malformed coords fork) and D72 (anchor/usemap priority fork) — see DECISIONS.md.
+
+## A6/C8 attestation ceremony scoped and wired (DCX-73)
+
+Build brief A6 / charter C8 (mislabeled "A7" in the DCX-73 title -- A7 is unrelated
+JOURNAL/DECISIONS/REPORT hygiene) needed a reproducible attestation ceremony: vendored
+deps, cargo-auditable provenance, cargo-audit-clean. Full writeup in DECISIONS D70.
+
+- `tools/gen-dependency-manifest.py` projects Cargo.lock's own per-dependency sha256
+  checksums into a diff-stable, committed `attestation/dependency-manifest.txt` (32
+  registry deps; the local `stele` workspace member has no checksum and is excluded).
+  Pure text transform, no cargo/network needed -- runs in this sandbox. `accept.sh` A6b
+  wires it live: regenerates to a tmp file, diffs against the committed copy.
+- `tools/vendor.sh` scripts the cargo+network half (`cargo vendor` + manifest regen + an
+  opportunistic `cargo-auditable` smoke build) for whoever next has both -- not run here
+  (no cargo/rustc on PATH, confirmed). `accept.sh` A6c pends on a non-empty `vendor/`.
+- `cargo-auditable`/`cargo-audit` are absent from the pinned `monolith-builder` image
+  (confirmed live by `build-substrate.yml`'s own report) -- a pinned-image change is an
+  operator action, escalated as DCX-108 (Paperclip issue, child of DCX-73) naming exact
+  package versions. `accept.sh` A6d/A6e pend with that reason.
+- All four checks (A6b live-pass, A6c/A6d/A6e pend-with-reason) verified locally against
+  the current tree before push.

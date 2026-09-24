@@ -1601,6 +1601,49 @@ if [ -f src/dom/ast.rs ]; then
 else
   pend "A6: cargo-audit clean + cargo-auditable + covenant grep — M1 (ast.rs) / M6 (audit)"
 fi
+
+# ---------------------------------------------------------------------
+# A6b-e -- attestation ceremony (charter C8 / DECISIONS.md D70). A6b is
+# live (pure text, no cargo/network needed); A6c-e pend on tooling this
+# sandbox and the pinned monolith-builder image genuinely lack today
+# (DCX-108 tracks the image change) -- see D70 for the full split.
+# ---------------------------------------------------------------------
+if [ ! -f tools/gen-dependency-manifest.py ]; then
+  pend "A6b: dependency manifest generator not present yet"
+elif python3 tools/gen-dependency-manifest.py --check >/tmp/stele_manifest_check 2>&1; then
+  pass "A6b: attestation/dependency-manifest.txt matches Cargo.lock"
+else
+  bad "A6b: attestation/dependency-manifest.txt is stale relative to Cargo.lock"
+  sed 's/^/    /' /tmp/stele_manifest_check
+fi
+
+if [ -d vendor ] && [ -n "$(ls -A vendor 2>/dev/null)" ]; then
+  pass "A6c: vendor/ is populated"
+else
+  pend "A6c: vendor/ absent or empty — run tools/vendor.sh (needs cargo+network, absent here; D70)"
+fi
+
+if command -v cargo-auditable >/dev/null 2>&1; then
+  if [ -f "$BIN" ] && command -v objcopy >/dev/null 2>&1 && objcopy --dump-section .dep-v0=/dev/stdout "$BIN" >/dev/null 2>&1; then
+    pass "A6d: cargo-auditable provenance (.dep-v0 section) present in $BIN"
+  else
+    bad "A6d: cargo-auditable is on PATH but $BIN has no .dep-v0 section — rebuild with 'cargo auditable build'"
+  fi
+else
+  pend "A6d: cargo-auditable not on the pinned image PATH — escalated as DCX-108 (D70)"
+fi
+
+if command -v cargo-audit >/dev/null 2>&1; then
+  if cargo audit >/tmp/stele_audit 2>&1; then
+    pass "A6e: cargo audit clean"
+  else
+    bad "A6e: cargo audit reported findings"
+    sed 's/^/    /' /tmp/stele_audit
+  fi
+else
+  pend "A6e: cargo-audit not on the pinned image PATH — escalated as DCX-108 (D70)"
+fi
+
 pend "A7: JOURNAL/DECISIONS/REPORT current for the operator — M6"
 
 echo "===================================="

@@ -3,6 +3,46 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## A6/C8 attestation ceremony
+
+### D70 — A6/C8 attestation: lockfile-projected manifest now, vendor/cargo-auditable when tooling exists
+Build brief A6 / charter C8 ask for three things: a vendored dependency tree, a
+`cargo-auditable`-embedded provenance section in the shipped binary, and an
+audit-clean (`cargo audit`) dependency set. (DCX-73's title said "A7" — that's
+a mislabel; A7 is unrelated JOURNAL/DECISIONS/REPORT hygiene, see the brief.)
+This sandbox has no `cargo`/`rustc` on PATH (confirmed), and the pinned
+`monolith-builder` image lacks `cargo-auditable`/`cargo-audit` (confirmed live
+by `.github/workflows/build-substrate.yml`'s "Build tooling (audit /
+provenance)" step, which reports both absent on every CI run) — so none of
+the three pieces can be executed here.
+
+**Choice — split into what needs cargo+network and what doesn't:**
+- **Landed now, no cargo/network needed:** `tools/gen-dependency-manifest.py`
+  projects Cargo.lock's own per-dependency sha256 checksums (Cargo already
+  computed and pinned these; nothing new to compute) into a diff-stable,
+  reviewable `attestation/dependency-manifest.txt` — same attestation value
+  (a hash-pinned dependency roster) as `cargo vendor`'s per-crate
+  `.cargo-checksum.json` files, without requiring the vendor step. `accept.sh`
+  A6b regenerates and diffs it live: if `Cargo.lock` changes without
+  regenerating the manifest, A6b fails.
+- **Scripted, not run:** `tools/vendor.sh` wraps `cargo vendor vendor` +
+  manifest regen + an opportunistic `cargo-auditable` smoke build, for
+  whoever next has both cargo and network (the monolith-builder image, once
+  DCX-108 lands, or an operator machine). `accept.sh` A6c checks for a
+  non-empty `vendor/` and `pend`s with "run tools/vendor.sh" until it exists.
+- **Escalated, not scripted (needs the image itself to change):**
+  `cargo-auditable`/`cargo-audit` genuinely cannot be installed into a pinned
+  builder image from inside a CI job or this sandbox — charter C11 pins the
+  image by digest, and neither tool exists there today. Filed as
+  [DCX-108](/DCX/issues/DCX-108) (child of DCX-73) naming the exact package
+  versions to add. `accept.sh` A6d (cargo-auditable: binary contains a
+  `.dep-v0` ELF section) and A6e (cargo-audit: `cargo audit` clean) `pend`
+  with the image-absence reason until DCX-108 lands.
+
+Revisit-trigger: DCX-108 lands (cargo-auditable/cargo-audit on the image) —
+flip A6d/A6e from `pend` to live checks; `cargo`+network become available
+here or in CI — run `tools/vendor.sh`, commit `vendor/`, flip A6c to live.
+
 ## Acceptance — A2 size gate vs. the 1.44 MB floppy line
 
 ### D70 — the floppy ceiling is a loud soft warning in A2; the 2.0 MB line stays the hard fail
