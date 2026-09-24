@@ -5,9 +5,8 @@ name: build-substrate
 # on a GitHub-hosted runner and carries the toolchain M0 needs. This is the
 # M0 vow expressed as CI — prove the environment before the program.
 #
-# Image: ghcr.io/tuckermclean/monolith-builder (tag 20260811-b25ecd2b24a5)
-# The digest pin lives in ci/monolith-builder.image and is resolved by the
-# resolve-image job below, so re-pinning never touches .github/workflows/.
+# Image: ghcr.io/tuckermclean/monolith-builder:20260811-b25ecd2b24a5
+# Digest: sha256:c8978fe3b56cf6ec1714b1b878997c7082cbf9786caa2b8cbcdbd986169c0daf
 # (public package — no registry credentials required)
 #
 # Steps use only `run:` (no JS actions, no checkout), so nothing needs Node
@@ -24,29 +23,10 @@ permissions:
   contents: read
 
 jobs:
-  resolve-image:
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.pin.outputs.image }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: pin
-        name: Resolve pinned monolith-builder digest
-        run: |
-          set -euo pipefail
-          image="$(grep -v '^[[:space:]]*#' ci/monolith-builder.image | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]')"
-          case "$image" in
-            ghcr.io/tuckermclean/monolith-builder@sha256:*) ;;
-            *) echo "ci/monolith-builder.image must pin the image by digest, got: $image" >&2; exit 1 ;;
-          esac
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "Resolved pinned image: $image"
-
   toolchain:
-    needs: resolve-image
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.resolve-image.outputs.image }}
+      image: ghcr.io/tuckermclean/monolith-builder@sha256:c8978fe3b56cf6ec1714b1b878997c7082cbf9786caa2b8cbcdbd986169c0daf
     steps:
       - name: Image identity
         run: |
