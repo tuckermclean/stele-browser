@@ -242,6 +242,142 @@ fn fetch_response(url: &Url) -> Result<Response, String> {
     crate::fetch::fetch(&Request::get(url.clone())).map_err(crate::fetch::err_to_string)
 }
 
+/// Aggregate ceiling, in bytes, on decoded EXTRA frame data (every frame
+/// past frame 0) this call will RETAIN for `--x11`'s animation clock — see
+/// [`collect_images_with_anim`]. Frame 0 of every image already counts
+/// against [`MAX_TOTAL_IMAGE_BYTES`] exactly as it does for
+/// [`collect_images`]; this is a SEPARATE, smaller budget purely for the
+/// frames an animated GIF needs kept around to tick through (DCX-70's
+/// RAM-discipline requirement: don't hold every frame of a large/many-frame
+/// GIF unboundedly). A GIF whose extra frames would exceed this budget
+/// still shows its first frame — exactly like [`collect_images`] already
+/// renders it — it just never animates, rather than one hostile many-frame
+/// GIF forcing an unbounded retained allocation.
+pub const MAX_ANIM_EXTRA_BYTES: usize = 32 * 1024 * 1024;
+
+/// [`collect_images`]'s `--x11`-only sibling: the SAME fetch+decode+dedup+
+/// budget walk (see that function's docs) — the first return value is
+/// identical in shape/contract, frame 0 of every decoded image keyed by
+/// `NodeId` — but this ALSO returns a second map holding the FULL frame
+/// list (delay + composited pixels, every frame) for every DISTINCT
+/// animated (more than one frame) image discovered.
+/// `main.rs::run_x11`'s per-node animation clock ticks through these frames
+/// on a timer. Static/headless callers (`--dump-png`, `--dump-text`,
+/// `--render-fb`) have no use for this and keep calling the plain
+/// [`collect_images`] — this is purely additive, called only from the
+/// interactive load path ([`crate` consumer] `main.rs::load_x11_page`).
+///
+/// No extra decode cost versus [`collect_images`]: [`img::decode_bytes`]
+/// already decodes every frame of an animated GIF internally regardless —
+/// `collect_images` simply drops every frame past 0 right after. This
+/// function keeps them (bounded by [`MAX_ANIM_EXTRA_BYTES`] — see that
+/// constant's doc comment for the graceful degrade-to-static-frame-0
+/// fallback when a GIF's full frame set doesn't fit).
+pub fn collect_images_with_anim(
+    dom: &Dom,
+    base: &Url,
+) -> (HashMap<NodeId, Rc<RgbaImage>>, HashMap<NodeId, Rc<Vec<img::Frame>>>) {
+    let mut out = HashMap::new();
+    let mut anim_out = HashMap::new();
+    if dom.is_empty() {
+        return (out, anim_out);
+    }
+    let mut cache: HashMap<String, Option<(Rc<RgbaImage>, Option<Rc<Vec<img::Frame>>>)>> = HashMap::new();
+    let mut budget = Budget { attempts: 0, total_bytes: 0, max_images: MAX_IMAGES, max_total_bytes: MAX_TOTAL_IMAGE_BYTES, exhausted: false };
+    let mut anim_extra_bytes: usize = 0;
+    walk_anim(dom, dom.root(), base, &mut out, &mut anim_out, &mut cache, &mut budget, &mut anim_extra_bytes, 0);
+    (out, anim_out)
+}
+
+/// [`walk`]'s `--x11` sibling — see [`collect_images_with_anim`]. Threads an
+/// extra `anim_out`/`anim_extra_bytes` pair alongside the same
+/// dedup `cache` and resource `budget` [`walk`] already uses (the cache now
+/// additionally holds each URL's animated frame list, so a `src` repeated
+/// many times shares ONE decode here exactly as it does in [`walk`]).
+#[allow(clippy::too_many_arguments)]
+fn walk_anim(
+    dom: &Dom,
+    id: NodeId,
+    base: &Url,
+    out: &mut HashMap<NodeId, Rc<RgbaImage>>,
+    anim_out: &mut HashMap<NodeId, Rc<Vec<img::Frame>>>,
+    cache: &mut HashMap<String, Option<(Rc<RgbaImage>, Option<Rc<Vec<img::Frame>>>)>>,
+    budget: &mut Budget,
+    anim_extra_bytes: &mut usize,
+    depth: usize,
+) {
+    if depth >= DEPTH_CAP {
+        return;
+    }
+    let Node::Element(el) = dom.node(id) else { return };
+
+    let src_attr = match el.name.as_str() {
+        "img" => el.attrs.get("src"),
+        "object" => el.attrs.get("data"),
+        _ => None,
+    };
+
+    if let Some(src) = src_attr {
+        let url = base.resolve(src);
+        let key = url.as_str().to_string();
+
+        let resolved = match cache.get(&key) {
+            Some(cached) => cached.clone(),
+            None if !budget.exhausted && budget.attempts < budget.max_images => {
+                budget.attempts += 1;
+                let result = match fetch_and_decode_all(&url) {
+                    Some(frames) if !frames.is_empty() => {
+                        let first_size = frames[0].image.pixels.len();
+                        if budget.total_bytes.saturating_add(first_size) <= budget.max_total_bytes {
+                            budget.total_bytes += first_size;
+                            let first = Rc::new(frames[0].image.clone());
+                            let anim = if frames.len() > 1 {
+                                let extra: usize = frames[1..].iter().map(|f| f.image.pixels.len()).sum();
+                                if anim_extra_bytes.saturating_add(extra) <= MAX_ANIM_EXTRA_BYTES {
+                                    *anim_extra_bytes += extra;
+                                    Some(Rc::new(frames))
+                                } else {
+                                    None // extra frames too big to retain: still shows frame 0, just never animates
+                                }
+                            } else {
+                                None // a still image: nothing to animate
+                            };
+                            Some((first, anim))
+                        } else {
+                            budget.exhausted = true;
+                            None
+                        }
+                    }
+                    _ => None, // fetch/decode failure, unrelated to budget
+                };
+                cache.insert(key, result.clone());
+                result
+            }
+            None => None, // budget exhausted: skip without attempting
+        };
+
+        if let Some((first, anim)) = resolved {
+            out.insert(id, first);
+            if let Some(a) = anim {
+                anim_out.insert(id, a);
+            }
+        }
+    }
+
+    for &child in &el.children {
+        walk_anim(dom, child, base, out, anim_out, cache, budget, anim_extra_bytes, depth + 1);
+    }
+}
+
+/// Fetch `url` and decode EVERY frame (unlike [`fetch_and_decode`], which
+/// keeps only frame 0) — see [`collect_images_with_anim`]. `None` on any
+/// failure along the way, same as [`fetch_and_decode`].
+fn fetch_and_decode_all(url: &Url) -> Option<Vec<img::Frame>> {
+    let response = fetch_response(url).ok()?;
+    let content_type = response.header("content-type").map(|s| s.to_string());
+    img::decode_bytes(&response.body, content_type.as_deref()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +609,74 @@ mod tests {
         // depth-cap contract) -- an empty map is the correct, total result.
         let images = collect_images(&d, &base);
         assert!(images.is_empty());
+    }
+
+    // ------------------------------------------------------- collect_images_with_anim
+    //
+    // DCX-70 (animated GIF frame advance in `--x11`): `collect_images_with_anim`
+    // is `collect_images`'s sibling that ALSO returns every animated image's
+    // full frame list. These tests pin: (1) an animated GIF's frame-0 map
+    // entry matches what `collect_images` alone would produce, AND its full
+    // frame list (with real delays) is returned; (2) a still (single-frame)
+    // image gets a frame-0 entry but NO animated-frames entry.
+
+    /// Write a tiny 2-frame animated GIF (`w`x`h`, solid `color_a` then
+    /// solid `color_b`, `delay_a`/`delay_b` centiseconds) to a fresh temp
+    /// file and return its `file://` `Url`. Mirrors `tests/img_gif.rs`'s
+    /// own in-test `gif` crate encoding approach (exact indexed pixels, no
+    /// NeuQuant lossiness).
+    fn write_temp_anim_gif(name: &str, w: u16, h: u16, color_a: [u8; 3], delay_a: u16, color_b: [u8; 3], delay_b: u16) -> Url {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut bytes, w, h, &[0, 0, 0]).expect("create GIF encoder");
+            encoder.set_repeat(gif::Repeat::Infinite).expect("set repeat");
+
+            let n = (w as usize) * (h as usize);
+            let mut frame_a = gif::Frame::from_palette_pixels(w, h, vec![0u8; n], color_a.to_vec(), None);
+            frame_a.delay = delay_a;
+            encoder.write_frame(&frame_a).expect("write frame A");
+
+            let mut frame_b = gif::Frame::from_palette_pixels(w, h, vec![0u8; n], color_b.to_vec(), None);
+            frame_b.delay = delay_b;
+            encoder.write_frame(&frame_b).expect("write frame B");
+        }
+        let path = std::env::temp_dir().join(format!("stele-images-test-anim-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("write temp anim gif");
+        Url::new(format!("file://{}", path.display()))
+    }
+
+    #[test]
+    fn animated_gif_yields_frame_0_map_entry_and_a_full_anim_frame_list() {
+        let gif_url = write_temp_anim_gif("basic", 2, 2, [220, 20, 20], 5, [20, 220, 20], 7);
+        let html = format!(r#"<img src="{}">"#, gif_url.as_str());
+        let d = dom::parser::parse(&html);
+        let img_id = find_img_id(&d);
+        let base = Url::new("file:///");
+
+        let (images, anim) = collect_images_with_anim(&d, &base);
+
+        let frame0 = images.get(&img_id).expect("frame-0 entry should be present, same as collect_images");
+        assert_eq!(&frame0.pixels[0..4], &[220, 20, 20, 255], "frame-0 map entry must be the FIRST frame");
+
+        let frames = anim.get(&img_id).expect("an animated (2-frame) GIF must get an anim_frames entry");
+        assert_eq!(frames.len(), 2, "every decoded frame must be retained");
+        assert_eq!(frames[0].delay_ms, 50);
+        assert_eq!(frames[1].delay_ms, 70);
+        assert_eq!(&frames[0].image.pixels[0..4], &[220, 20, 20, 255]);
+        assert_eq!(&frames[1].image.pixels[0..4], &[20, 220, 20, 255]);
+    }
+
+    #[test]
+    fn still_image_gets_no_anim_frames_entry() {
+        let png_url = write_temp_png("still-for-anim", 2, 2, Color::rgb(9, 9, 9));
+        let html = format!(r#"<img src="{}">"#, png_url.as_str());
+        let d = dom::parser::parse(&html);
+        let img_id = find_img_id(&d);
+        let base = Url::new("file:///");
+
+        let (images, anim) = collect_images_with_anim(&d, &base);
+
+        assert!(images.get(&img_id).is_some(), "a still image still gets a frame-0 entry");
+        assert!(anim.get(&img_id).is_none(), "a single-frame decode must never produce an anim_frames entry");
     }
 }
