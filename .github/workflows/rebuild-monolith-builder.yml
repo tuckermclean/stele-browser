@@ -1,0 +1,83 @@
+name: rebuild-monolith-builder
+
+# Rebuilds the pinned monolith-builder image with the A6/C8 attestation tools
+# (cargo-auditable, cargo-audit) layered on top of the currently-pinned digest,
+# and pushes it to GHCR. Manual only — the pinned toolchain must never move
+# without someone deciding that it should (charter C11).
+#
+# After a successful run, copy the digest this job prints into
+# ci/monolith-builder.image. That file is the single pin both CI workflows
+# resolve, so re-pinning is an ordinary repo edit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cargo_auditable_version:
+        description: "cargo-auditable version to install"
+        required: false
+        default: "0.7.6"
+      cargo_audit_version:
+        description: "cargo-audit version to install"
+        required: false
+        default: "0.22.2"
+      tag:
+        description: "Tag to publish alongside the digest"
+        required: false
+        default: "audit"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pin
+        name: Resolve current pinned base image
+        run: |
+          set -euo pipefail
+          image="$(grep -v '^[[:space:]]*#' ci/monolith-builder.image | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]')"
+          case "$image" in
+            ghcr.io/tuckermclean/monolith-builder@sha256:*) ;;
+            *) echo "ci/monolith-builder.image must pin the image by digest, got: $image" >&2; exit 1 ;;
+          esac
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Layering A6/C8 tools on: $image"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/monolith-builder-audit.Dockerfile
+          push: true
+          provenance: false
+          tags: ghcr.io/tuckermclean/monolith-builder:${{ inputs.tag }}
+          build-args: |
+            BASE_IMAGE=${{ steps.pin.outputs.image }}
+            CARGO_AUDITABLE_VERSION=${{ inputs.cargo_auditable_version }}
+            CARGO_AUDIT_VERSION=${{ inputs.cargo_audit_version }}
+
+      - name: New pin
+        run: |
+          set -eu
+          echo "digest: ${{ steps.build.outputs.digest }}"
+          echo "Put this line in ci/monolith-builder.image:"
+          echo "ghcr.io/tuckermclean/monolith-builder@${{ steps.build.outputs.digest }}"
+          {
+            echo "### New monolith-builder pin"
+            echo ""
+            echo '```'
+            echo "ghcr.io/tuckermclean/monolith-builder@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
