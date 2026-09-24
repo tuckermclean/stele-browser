@@ -3,6 +3,32 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## CI — the monolith-builder image pin
+
+### D72 — the image pin lives in `ci/monolith-builder.image`, not in the workflows
+A6/C8 needs `cargo-auditable` + `cargo-audit`, which are absent from the pinned
+`monolith-builder` image (D6, and build-substrate's own tooling-check step
+reports both missing on every run). Getting them in means publishing a new
+image and re-pinning its digest — and the digest was hard-coded in two
+`.github/workflows/*.yml` files. Pushing a `.github/workflows` change needs a
+`workflow`-scoped GitHub credential, which no agent can mint; that is the only
+reason this work has stalled (see DCX-108/DCX-137).
+**Choice:** indirect the pin through `ci/monolith-builder.image` (one line, a
+digest reference). `build-substrate.yml` and `m0-acceptance.yml` gain a tiny
+`resolve-image` job that reads the file, asserts it is `@sha256:`-pinned, and
+feeds `container.image` via `needs.resolve-image.outputs.image`. C9/C11 are
+unchanged — still exactly one toolchain, still pinned by digest, and the
+assertion makes a tag-only pin a hard CI failure. The payoff is that this is
+the **last** `.github/workflows` edit the pin ever needs: every future re-pin
+is an ordinary repo edit that a `repo`-scoped token can push.
+The new image itself is built by `tools/monolith-builder-audit.Dockerfile`,
+which layers `cargo install cargo-auditable cargo-audit` *on top of* the
+current pinned digest rather than rebuilding from scratch — the D2 nightly, D3
+float target and D7 libunwind shim are preserved by construction, so the
+published image still descends from the trusted base.
+Revisit-trigger: the base image starts shipping these tools itself — then drop
+the layer and re-pin straight to upstream.
+
 ## Acceptance — A2 size gate vs. the 1.44 MB floppy line
 
 ### D69 — the floppy ceiling is a loud soft warning in A2; the 2.0 MB line stays the hard fail
