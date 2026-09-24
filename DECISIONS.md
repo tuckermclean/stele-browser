@@ -1510,3 +1510,57 @@ Both are absent from the image (substrate run). They serve A6/C11 (attested
 provenance, audit-clean deps), which the brief scopes to M6, not M0.
 **Choice:** defer; M0 gates only on A1 + A4. Revisit-trigger: M6 hardening —
 install/vendor them then, or bake them into the image.
+
+### D74 — the audit tooling has a floor as well as a fast path
+D73 proposes the image-pin indirection and `tools/monolith-builder-audit.Dockerfile`,
+which layer `cargo-auditable` + `cargo-audit` on top of the pinned digest. That
+is the right shape, but it has one dependency we do not control: publishing the
+new image needs `.github/workflows/rebuild-monolith-builder.yml` on origin, and
+pushing anything under `.github/workflows` needs a `workflow`-scoped credential
+no agent can mint (DCX-137). A6 therefore could not go live at M6 on our own.
+**Choice:** keep the image layer as the fast path, and add
+`ci/ensure-audit-tools.sh` as the floor. It is a no-op when the tools are on
+PATH and otherwise `cargo install`s them at the same two version pins the
+Dockerfile uses. `accept.sh`'s A6 block calls it and reports the result as
+PENDING either way — the script exits 3, not 1, when the tools are absent and
+uninstallable, so an offline `accept.sh` run does not turn red over tooling it
+was never going to use until M6. Nothing under `.github/` changes, so this is an
+ordinary repo edit a `repo`-scoped token can land.
+The two version pins now exist in two places (this script and the Dockerfile);
+the script's header says so, and either copy moving without the other is a
+review catch, not a silent drift — an acceptable cost for removing the
+credential dependency from the critical path.
+Revisit-trigger: the rebuilt image is published and re-pinned. The bootstrap
+then becomes a permanent no-op and can stay as insurance, or be dropped.
+
+### D75 — the A6/C8 critical path is the bootstrap floor, not a new image
+The board offered two routes to get `cargo-auditable` + `cargo-audit` into the
+pinned `monolith-builder`: **Path A**, layer them in-repo via
+`tools/monolith-builder-audit.Dockerfile` driven by a new
+`.github/workflows/rebuild-monolith-builder.yml`; **Path B**, bake them into the
+upstream image in `tuckermclean/linux-live-iso-factory` and re-pin
+`ci/monolith-builder.image` to the new digest. Path B was put forward as a way
+around the fact that no agent holds a `workflow`-scoped credential (DCX-151).
+**It is not.** On `origin/main` the digest is still hard-coded inline at
+`.github/workflows/build-substrate.yml:29` and in `m0-acceptance.yml`;
+`ci/monolith-builder.image` does not exist on `main` at all, and nothing reads
+it. The D73 indirection that would make a re-pin an ordinary file edit lives
+only on unmerged branches, and *landing that indirection is itself the
+`.github/workflows` push DCX-151 blocks*. So Path B's "the only in-repo change
+is one line in `ci/monolith-builder.image`" is true only after a workflow push
+that we cannot make — it removes one workflow file from the ask (three down to
+two), not the credential dependency. It also buys a cross-repo obligation: the
+upstream `build.yml` keys its rebuild off the Dockerfile hash, so adding a
+`cargo install` there forces a full multi-GB crossdev/Gentoo base-tools rebuild
+for a build-time convenience of ours.
+**Choice:** neither is the critical path. **D74's `ci/ensure-audit-tools.sh` is**
+— it is three ordinary repo files (script, `accept.sh` hook, this entry), it is
+invoked by the *unmodified* `m0-acceptance.yml` through the `./accept.sh` steps
+it already runs, and it touches nothing under `.github/`. That genuinely takes
+DCX-151 off the A6/C8 critical path. Path A stays as the fast path, gated on the
+GitHub App push. Path B stays as the eventual cleanup and is exactly D73's own
+revisit-trigger ("the base image starts shipping these tools itself"), to be
+raised upstream as a PR, not waited on.
+Revisit-trigger: a `workflow`-scoped push becomes possible (then land Path A and
+the indirection together), or upstream ships the tools (then Path B, and the
+bootstrap becomes a permanent no-op).
