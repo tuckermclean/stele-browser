@@ -1534,3 +1534,25 @@ float target and D7 libunwind shim are preserved by construction, so the
 published image still descends from the trusted base.
 Revisit-trigger: the base image starts shipping these tools itself — then drop
 the layer and re-pin straight to upstream.
+
+### D74 — the audit tooling has a floor as well as a fast path
+D73 landed the image-pin indirection and `tools/monolith-builder-audit.Dockerfile`,
+which layers `cargo-auditable` + `cargo-audit` on top of the pinned digest. That
+is the right shape, but it has one dependency we do not control: publishing the
+new image needs `.github/workflows/rebuild-monolith-builder.yml` on origin, and
+pushing anything under `.github/workflows` needs a `workflow`-scoped credential
+no agent can mint (DCX-137). A6 therefore could not go live at M6 on our own.
+**Choice:** keep the image layer as the fast path, and add
+`ci/ensure-audit-tools.sh` as the floor. It is a no-op when the tools are on
+PATH and otherwise `cargo install`s them at the same two version pins the
+Dockerfile uses. `accept.sh`'s A6 block calls it and reports the result as
+PENDING either way — the script exits 3, not 1, when the tools are absent and
+uninstallable, so an offline `accept.sh` run does not turn red over tooling it
+was never going to use until M6. Nothing under `.github/` changes, so this is an
+ordinary repo edit a `repo`-scoped token can land.
+The two version pins now exist in two places (this script and the Dockerfile);
+the script's header says so, and either copy moving without the other is a
+review catch, not a silent drift — an acceptable cost for removing the
+credential dependency from the critical path.
+Revisit-trigger: the rebuilt image is published and re-pinned. The bootstrap
+then becomes a permanent no-op and can stay as insurance, or be dropped.

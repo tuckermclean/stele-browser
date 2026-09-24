@@ -1601,6 +1601,28 @@ if [ -f src/dom/ast.rs ]; then
 else
   pend "A6: cargo-audit clean + cargo-auditable + covenant grep — M1 (ast.rs) / M6 (audit)"
 fi
+
+# A6 audit tooling (D74): report whether cargo-auditable/cargo-audit are usable
+# here, bootstrapping them if the pinned image does not carry them. The audit
+# itself is M6 work, so this never gates — absent tooling is PENDING, not FAIL,
+# or an offline accept.sh run would turn red for no good reason.
+if [ -x ci/ensure-audit-tools.sh ]; then
+  audit_tools_log=$(ci/ensure-audit-tools.sh 2>&1) && audit_tools_rc=0 || audit_tools_rc=$?
+  case "$audit_tools_rc" in
+    0)
+      pend "A6 audit tooling: cargo-auditable + cargo-audit ready — the audit itself lands at M6"
+      ;;
+    3)
+      pend "A6 audit tooling: absent and not installable here (offline, or no cargo) — see ci/ensure-audit-tools.sh"
+      ;;
+    *)
+      pend "A6 audit tooling: ci/ensure-audit-tools.sh failed unexpectedly (exit $audit_tools_rc) — see ci/ensure-audit-tools.sh"
+      ;;
+  esac
+  printf '%s\n' "$audit_tools_log" | sed 's/^/    /'
+else
+  pend "A6 audit tooling: ci/ensure-audit-tools.sh missing or not executable"
+fi
 pend "A7: JOURNAL/DECISIONS/REPORT current for the operator — M6"
 
 echo "===================================="
