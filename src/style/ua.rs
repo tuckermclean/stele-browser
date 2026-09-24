@@ -26,6 +26,18 @@ head, style, title, script, meta, link, base {
   display: none;
 }
 
+/* Client-side image maps (charter K2, packet/image-maps): `<map>`/`<area>`
+   carry no visual presentation of their own -- their content (an `<area>`'s
+   `alt`-less nature, and any stray text a `<map>` might contain) must never
+   render, and `<area>`'s own would-be inline box must never occupy layout
+   space. `layout::box_tree::image_map_interactive` resolves `<img usemap>`
+   against a `<map name>` directly off the DOM (a flat arena scan, run
+   independent of `display`), so hiding these here has no effect on that
+   resolution -- only on whether they'd otherwise paint. */
+map, area {
+  display: none;
+}
+
 /* CSS table display values (freeze amendment, packet P8 follow-up): these
    are the marker the layout engine keys off to run the bespoke table column
    solver (`layout::table::solve_table`). `table` above still gets the

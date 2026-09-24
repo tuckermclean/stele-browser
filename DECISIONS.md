@@ -23,6 +23,58 @@ the floppy with 97,124 B headroom, so today's CI passes with no warning. REVISIT
 starts firing on most packets it has stopped being a signal — that is the moment to make the floppy budget
 load-bearing (hard fail) or to formally retire the floppy target, not to raise the number quietly.
 
+## Client-side image maps (charter K2, packet/image-maps, DCX-136)
+
+### D71 — malformed `<area coords>` drops the area; pixel-only hit-testing this packet, no keyboard Tab-per-area
+Two forks while implementing `<img usemap>`/`<map>`/`<area>` (HTML 4.01
+§13.6.1):
+
+1. **A malformed/wrong-count `coords` on an `<area>`.** Options: (a) drop
+   the whole `<area>` from the resolved list (it contributes no hit-test
+   region at all); (b) widen it to `Shape::Default` (a whole-image
+   catch-all), on the theory that "some region beats none". **Choice: (a).**
+   Widening a parse failure into a whole-image catch-all is exactly the kind
+   of silent-and-surprising fallback this codebase's totality style avoids
+   elsewhere (e.g. `image_map::parse_area`'s sibling functions all fail
+   closed, never open) — a typo'd `coords` value should make that ONE region
+   inert, not accidentally swallow every click anywhere on the image
+   (especially dangerous given first-match-wins: a widened area earlier in
+   document order would shadow every real area after it). Revisit-trigger:
+   none expected — this matches how real browsers already treat an
+   unparseable `<area>` (ignored, not defaulted).
+2. **Keyboard/Tab granularity for image maps.** The interactive shell
+   (`browser.rs`) has one `Focusable`/Tab-stop per `Interactive`-carrying
+   element; an `<img usemap>` is ONE such element (its own `Replaced` box),
+   not one per `<area>`. Options: (a) this packet's scope — the whole image
+   is one Tab stop, and `Enter`/mouse-click activates it via
+   `image_map::hit_test_scaled` (mouse, pixel-accurate) or the first
+   `href`-bearing area in document order (keyboard, since there's no pixel
+   to hit-test against); (b) synthesize a separate `Focusable` per `<area>`
+   so Tab can cycle through individual regions (real per-area keyboard
+   accessibility). **Choice: (a)**, per the ticket's own scope call — real
+   1996 Navigator-era image maps were mouse-only too, and (b) would need a
+   new `Interactive` shape (or a `Focusable` that doesn't map 1:1 to a
+   `layout::Fragment`) that's a separable, larger packet, not a corollary of
+   the hit-testing/carrier work here. Revisit-trigger: an accessibility
+   packet that wants real per-area keyboard navigation — then (b), likely by
+   giving `Focusable` an optional `area_index` alongside its existing
+   `interactive`/`control_node` fields.
+
+### D72 — `<a href><img usemap></a>` keeps `Interactive::ImageMap`, not the anchor's `Link`
+Code review caught a real defect: `box_tree::build_node_inner`'s `is_link`
+branch calls `tag_interactive` to propagate `Interactive::Link` onto an
+`<a>`'s entire subtree. Before the fix, this was unconditional, so `<a
+href="/fallback"><img usemap="#m"></a>` (a common pre-image-map fallback /
+dual-purpose authoring pattern) silently overwrote the img's
+`Interactive::ImageMap` with the anchor's `Link`, discarding every `<area>`'s
+shape and href. **Choice:** `tag_interactive` now returns early (without
+recursing further) on any subtree node that already carries
+`Interactive::ImageMap`, leaving it untouched. This matches real browsers,
+which give an inner `usemap` priority over an enclosing anchor.
+Revisit-trigger: none expected — if a future packet adds another carrier
+that similarly wants "innermost wins" semantics against an enclosing `<a>`,
+extend the same guard rather than special-casing `ImageMap` further.
+
 ## Acceptance — A5z speed gate (first paint over kitchen-sink.html)
 
 ### D69 — new label A5z for the speed gate; wall-clock is the live gate today, qemu insn-count PENDs until a plugin is wired in

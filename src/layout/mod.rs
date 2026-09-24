@@ -11,6 +11,7 @@ use crate::style::ComputedStyle;
 
 pub mod block;
 pub mod box_tree;
+pub mod image_map;
 pub mod inline;
 pub mod table;
 pub mod table_layout;
@@ -93,6 +94,19 @@ pub enum Interactive {
     /// attribute, when the control sits inside one (unresolved — same
     /// resolve-at-submit-time deferral as `Link::href`).
     FormControl { kind: Box<str>, name: Option<Box<str>>, form_action: Option<Box<str>> },
+    /// A client-side image map (`<img usemap>` + `<map>`/`<area>`, charter
+    /// K2). `areas` is the resolved `<map name>`'s already-parsed `<area>`
+    /// children (`image_map::parse_area` — malformed areas already dropped)
+    /// in document order; `image_map::hit_test`/`hit_test_scaled` walk it
+    /// first-match-wins. `natural` is the image's natural (decoded,
+    /// pre-scaling) pixel size that `coords` are authored against — NOT the
+    /// box's rendered/laid-out size, which `hit_test_scaled`'s caller
+    /// (`backend::x11::hit_test_pixel`) scales the click point against
+    /// separately. `Rc<[Area]>`, same shared-ownership posture as
+    /// `BoxContent::Replaced`'s `Rc<RgbaImage>` — cloning a `LayoutNode`/
+    /// `Fragment` under a mapped image never copies the area list (an
+    /// `<img>` has no descendants to propagate this onto, unlike `Link`).
+    ImageMap { areas: std::rc::Rc<[image_map::Area]>, natural: Size },
 }
 
 /// What a box holds.

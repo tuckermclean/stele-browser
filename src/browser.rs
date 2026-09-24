@@ -37,13 +37,14 @@
 //! form/control.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::backend::tty::{self, Cell, TextGrid};
 use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
 use crate::fetch::{Request, Url};
 use crate::form;
-use crate::layout::{Fragment, Interactive};
+use crate::layout::{Fragment, Interactive, Size};
 use crate::style::computed::Display;
 use crate::style::ComputedStyle;
 use crate::surface::Color;
@@ -237,6 +238,25 @@ fn is_form_control_el(el: &Element) -> bool {
     matches!(el.name.as_str(), "input" | "button" | "textarea" | "select")
 }
 
+/// `<img usemap>` -- mirrors `box_tree::image_map_interactive`'s own
+/// existence check (not its full area-parsing: this walk only needs to know
+/// WHETHER `layout::box_tree` would have tagged this `<img>` with
+/// `Interactive::ImageMap`, to keep this list's positions aligned with the
+/// fragment-derived one -- see [`walk_dom_interactive`]'s call site). A
+/// dangling `usemap` naming no real `<map>` produces no entry here, exactly
+/// as `box_tree` produces no `Interactive::ImageMap` for it.
+fn usemap_target_exists(dom: &Dom, el: &Element) -> bool {
+    if el.name.as_str() != "img" {
+        return false;
+    }
+    let Some(usemap) = el.attrs.get("usemap") else { return false };
+    let name = usemap.trim().trim_start_matches('#');
+    if name.is_empty() {
+        return false;
+    }
+    (0..dom.len()).any(|id| matches!(dom.node(id), Node::Element(map_el) if map_el.name.as_str() == "map" && map_el.attrs.get("name").map(|n| n.trim()) == Some(name)))
+}
+
 /// Mirrors `box_tree::input_label`'s `"hidden" => return None` branch: a
 /// hidden input gets no box at all, so it must never appear as a
 /// `DomInteractive` entry either (keeping this walk's output count aligned
@@ -311,6 +331,15 @@ fn walk_dom_interactive(dom: &Dom, styles: &[ComputedStyle], id: NodeId, depth: 
         // already merge into this one focusable (see `extract_focusables`).
         return;
     }
+    if usemap_target_exists(dom, el) {
+        // Only the VARIANT is ever inspected on this list's entries (see
+        // this module's own doc comment) -- an empty area list / zero
+        // `natural` size here is never compared against the real
+        // `Interactive::ImageMap` the fragment-derived list carries, so a
+        // cheap placeholder is exactly as correct as re-parsing every area.
+        out.push(DomInteractive { node_id: id, form_id, interactive: Interactive::ImageMap { areas: Rc::from([]), natural: Size::default() } });
+        return; // `<img>` is a void element -- no children to recurse into.
+    }
     for &child in &el.children {
         walk_dom_interactive(dom, styles, child, depth + 1, form_id, out);
     }
@@ -332,7 +361,9 @@ fn resolve_control_nodes(dom: &Dom, styles: &[ComputedStyle], focusables: &mut [
     while fi < focusables.len() && di < dom_list.len() {
         let same_kind = matches!(
             (&focusables[fi].interactive, &dom_list[di].interactive),
-            (Interactive::Link { .. }, Interactive::Link { .. }) | (Interactive::FormControl { .. }, Interactive::FormControl { .. })
+            (Interactive::Link { .. }, Interactive::Link { .. })
+                | (Interactive::FormControl { .. }, Interactive::FormControl { .. })
+                | (Interactive::ImageMap { .. }, Interactive::ImageMap { .. })
         );
         if !same_kind {
             break;
@@ -1204,6 +1235,17 @@ fn enter_command(view: &ViewState, page: &Page) -> Command {
                 _ => Command::None,
             }
         }
+        // Keyboard/tty activation has no pixel to hit-test against (unlike
+        // `backend::x11::hit_test_pixel`, which resolves the actual clicked
+        // area) -- v0 falls back to the first `href`-bearing area in
+        // document order (documented limitation: real image maps were
+        // mouse-only in the Navigator era too, so this is a reasonable
+        // "something happens on Enter" default, not a spec requirement).
+        // No areas, or every area is `nohref`: degrades to a no-op.
+        Interactive::ImageMap { areas, .. } => match areas.iter().find_map(|a| a.href.as_deref()) {
+            Some(href) => Command::Navigate(page.url.resolve(href)),
+            None => Command::None,
+        },
     }
 }
 
