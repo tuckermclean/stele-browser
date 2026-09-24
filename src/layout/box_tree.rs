@@ -35,6 +35,7 @@ use std::rc::Rc;
 use crate::dom::{Dom, Element, Node, NodeId};
 use crate::dom_util;
 use crate::img::RgbaImage;
+use crate::layout::image_map;
 use crate::layout::inline::LINE_BREAK_SENTINEL;
 use crate::layout::{BoxContent, Interactive, LayoutNode, Size};
 use crate::style::cascade::PseudoStyles;
@@ -167,11 +168,13 @@ fn build_node_inner<'a>(
                 let mut style = style;
                 apply_align_float_hint(el, &mut style);
                 let decoded = images.get(&id).cloned();
+                let intrinsic = replaced_intrinsic(el, decoded.as_deref());
+                let interactive = image_map_interactive(dom, el, decoded.as_deref(), intrinsic);
                 return Some(LayoutNode {
                     style,
-                    content: BoxContent::Replaced { intrinsic: replaced_intrinsic(el, decoded.as_deref()), image: decoded },
+                    content: BoxContent::Replaced { intrinsic, image: decoded },
                     children: Vec::new(),
-                    interactive: None, id: None,
+                    interactive, id: None,
                 });
             }
             if el.name.as_str() == "object" {
@@ -410,6 +413,14 @@ fn is_form(el: &Element) -> bool {
 /// recursion can't itself blow the stack on any input `build_node` could
 /// have produced.
 fn tag_interactive(node: &mut LayoutNode, interactive: &Interactive) {
+    // An `<img usemap>` nested inside an `<a href>` (a common fallback/authoring
+    // pattern) keeps its own `Interactive::ImageMap` — real browsers give the
+    // usemap priority over an enclosing anchor, so a subtree that already
+    // carries an image map is left alone rather than clobbered with the
+    // anchor's `Link`.
+    if matches!(node.interactive, Some(Interactive::ImageMap { .. })) {
+        return;
+    }
     node.interactive = Some(interactive.clone());
     for child in &mut node.children {
         tag_interactive(child, interactive);
@@ -420,6 +431,67 @@ fn tag_interactive(node: &mut LayoutNode, interactive: &Interactive) {
 /// forced-line-break synthesis this gates.
 fn is_br(el: &Element) -> bool {
     el.name.as_str() == "br"
+}
+
+// ---------------------------------------------------------------------------
+// Client-side image maps (charter K2, packet/image-maps): `<img usemap>` +
+// `<map>`/`<area>`.
+
+/// Resolve `<img usemap="#name">` against a `<map name="name">` found
+/// ANYWHERE in the document — a flat arena scan (`find_map_by_usemap`), not
+/// an ancestor/sibling walk: HTML places no structural constraint on where a
+/// `<map>` lives relative to the `<img>`s that reference it (real pages
+/// commonly gather every `<map>` at the end of `<body>`). Returns `None`
+/// (no `Interactive::ImageMap`, the `<img>` is an ordinary replaced element)
+/// when `el` has no `usemap` attribute, or the attribute names no `<map>`
+/// this document actually has — a dangling `usemap` is not an error, just a
+/// plain image.
+///
+/// `natural` is the DECODED image's real pixel size when `decoded` is
+/// `Some` — `coords` are always authored against an image's natural pixel
+/// dimensions, never against whatever `width`/`height` attributes or CSS
+/// later scale the rendered box to. When no decode succeeded (fetch
+/// failure, `--dump-text`'s empty `images` map, ...), falls back to
+/// `intrinsic` (the attrs-or-0x0 size `replaced_intrinsic` already computed)
+/// — the best information available, not a guess.
+fn image_map_interactive(dom: &Dom, el: &Element, decoded: Option<&RgbaImage>, intrinsic: Size) -> Option<Interactive> {
+    let usemap = el.attrs.get("usemap")?;
+    let map_el = find_map_by_usemap(dom, usemap)?;
+    let areas: Vec<image_map::Area> = map_el
+        .children
+        .iter()
+        .filter_map(|&child| match dom.node(child) {
+            Node::Element(area_el) if area_el.name.as_str() == "area" => {
+                image_map::parse_area(area_el.attrs.get("shape"), area_el.attrs.get("coords"), area_el.attrs.get("href"))
+            }
+            _ => None,
+        })
+        .collect();
+    let natural = match decoded {
+        Some(image) => Size { w: image.width as f32, h: image.height as f32 },
+        None => intrinsic,
+    };
+    Some(Interactive::ImageMap { areas: areas.into(), natural })
+}
+
+/// Find the `<map name="..">` element `usemap` (an `<img>`'s raw `usemap`
+/// attribute, e.g. `"#nav"`) names, scanning every node in `dom`'s arena —
+/// see [`image_map_interactive`]'s doc comment for why this isn't an
+/// ancestor/sibling-scoped walk. `usemap`'s leading `#` is stripped (HTML
+/// requires it — `usemap` is always a fragment reference); an empty name
+/// (a bare `"#"` or empty attribute) never matches anything. `name`
+/// comparison is trimmed but NOT lowercased — `<map name>` matching is
+/// case-sensitive in this dialect, the same posture `LayoutNode::id`'s own
+/// doc comment already documents for `id` matching.
+fn find_map_by_usemap<'a>(dom: &'a Dom, usemap: &str) -> Option<&'a Element> {
+    let name = usemap.trim().trim_start_matches('#');
+    if name.is_empty() {
+        return None;
+    }
+    (0..dom.len()).find_map(|id| match dom.node(id) {
+        Node::Element(map_el) if map_el.name.as_str() == "map" && map_el.attrs.get("name").map(|n| n.trim()) == Some(name) => Some(map_el),
+        _ => None,
+    })
 }
 
 /// Parse an `<img>`'s intrinsic size off its `width`/`height` attributes.
@@ -3661,5 +3733,148 @@ mod tests {
         let styles = vec![ComputedStyle::default(); d.len()];
         let root = build_box_tree(&d, &styles, &HashMap::new());
         assert!(root.is_some(), "must not panic/abort on a pathologically deep form ancestor chain");
+    }
+
+    // -----------------------------------------------------------------
+    // Client-side image maps (charter K2, packet/image-maps)
+    // -----------------------------------------------------------------
+
+    fn find_replaced(node: &LayoutNode) -> Option<&LayoutNode> {
+        if matches!(node.content, BoxContent::Replaced { .. }) {
+            return Some(node);
+        }
+        node.children.iter().find_map(find_replaced)
+    }
+
+    #[test]
+    fn img_usemap_resolves_map_anywhere_in_the_document_not_just_an_ancestor() {
+        // The <map> lives AFTER the <img> and is not its ancestor/sibling in
+        // any structural sense that matters -- a flat scan must still find it.
+        let d = dom::parser::parse(
+            r##"<div><img src="a.gif" usemap="#nav"></div>
+               <map name="nav"><area shape="rect" coords="0,0,10,10" href="/left"></map>"##,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::ImageMap { areas, .. }) => {
+                assert_eq!(areas.len(), 1);
+                assert_eq!(areas[0].href.as_deref(), Some("/left"));
+            }
+            other => panic!("expected Interactive::ImageMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn img_usemap_inside_a_href_keeps_image_map_not_the_anchor_link() {
+        // <a href><img usemap></a> is a common fallback/authoring pattern.
+        // Real browsers give the usemap priority over the enclosing anchor --
+        // the anchor's `tag_interactive` propagation must not clobber the
+        // img's own `Interactive::ImageMap`.
+        let d = dom::parser::parse(
+            r##"<a href="/fallback"><img src="a.gif" usemap="#m"></a>
+               <map name="m"><area shape="rect" coords="0,0,10,10" href="/left"></map>"##,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::ImageMap { areas, .. }) => {
+                assert_eq!(areas.len(), 1);
+                assert_eq!(areas[0].href.as_deref(), Some("/left"));
+            }
+            other => panic!("expected Interactive::ImageMap (usemap beats enclosing <a>), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn img_without_usemap_has_no_image_map_interactive() {
+        let d = dom::parser::parse(r#"<img src="a.gif">"#);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        assert!(img.interactive.is_none());
+    }
+
+    #[test]
+    fn dangling_usemap_with_no_matching_map_is_a_plain_image() {
+        let d = dom::parser::parse(r##"<img src="a.gif" usemap="#missing">"##);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        assert!(img.interactive.is_none(), "a usemap naming no real <map> must not panic or fabricate an ImageMap");
+    }
+
+    #[test]
+    fn malformed_area_is_dropped_from_the_resolved_area_list() {
+        let d = dom::parser::parse(
+            r##"<img src="a.gif" usemap="#m">
+               <map name="m">
+                 <area shape="rect" coords="0,0,10,10" href="/ok">
+                 <area shape="rect" coords="1,2,3" href="/bad">
+               </map>"##,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::ImageMap { areas, .. }) => {
+                assert_eq!(areas.len(), 1, "the malformed-coords area must be dropped, not widened to a default catch-all");
+                assert_eq!(areas[0].href.as_deref(), Some("/ok"));
+            }
+            other => panic!("expected Interactive::ImageMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_map_natural_size_prefers_the_decoded_image_over_attrs() {
+        let d = dom::parser::parse(r##"<img id="pic" src="a.gif" width="48" height="16" usemap="#m"><map name="m"></map>"##);
+        let styles = cascade::cascade(&d, &[]);
+        let img_id = find_all(&d, "img")[0];
+        let decoded = Rc::new(RgbaImage { width: 16, height: 16, pixels: vec![0u8; 16 * 16 * 4] });
+        let mut images = HashMap::new();
+        images.insert(img_id, decoded);
+        let root = build_box_tree(&d, &styles, &images).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::ImageMap { natural, .. }) => {
+                assert_eq!(*natural, Size { w: 16.0, h: 16.0 }, "natural size must come from the decoded image, never the width/height attrs");
+            }
+            other => panic!("expected Interactive::ImageMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_map_natural_size_falls_back_to_intrinsic_without_a_decode() {
+        let d = dom::parser::parse(r##"<img src="a.gif" width="48" height="16" usemap="#m"><map name="m"></map>"##);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        match &img.interactive {
+            Some(Interactive::ImageMap { natural, .. }) => assert_eq!(*natural, Size { w: 48.0, h: 16.0 }),
+            other => panic!("expected Interactive::ImageMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_name_matching_is_case_sensitive() {
+        let d = dom::parser::parse(r##"<img src="a.gif" usemap="#Nav"><map name="nav"><area coords="0,0,1,1" href="/x"></map>"##);
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        let img = find_replaced(&root).expect("img box present");
+        assert!(img.interactive.is_none(), "\"Nav\" must not match \"nav\" -- map name matching is case-sensitive");
+    }
+
+    #[test]
+    fn map_and_area_elements_produce_no_boxes_of_their_own() {
+        let d = dom::parser::parse(
+            r##"<div><img src="a.gif" usemap="#m"></div><map name="m"><area coords="0,0,1,1" href="/x">visible text?</map>"##,
+        );
+        let styles = cascade::cascade(&d, &[]);
+        let root = build_box_tree(&d, &styles, &HashMap::new()).expect("root present");
+        // `map, area { display: none }` in the UA sheet must suppress any
+        // box for the <map>/<area> themselves (and their text content).
+        assert!(find_text(&root, "visible text?").is_none());
     }
 }

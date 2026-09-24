@@ -5,7 +5,7 @@ revisit-trigger. Newest first.
 
 ## Acceptance — A2 size gate vs. the 1.44 MB floppy line
 
-### D69 — the floppy ceiling is a loud soft warning in A2; the 2.0 MB line stays the hard fail
+### D70 — the floppy ceiling is a loud soft warning in A2; the 2.0 MB line stays the hard fail
 `accept.sh`'s A2 gate measured the stripped binary against a single `SIZE_BUDGET_BYTES=2,000,000` threshold,
 so the 1,474,560-byte floppy ceiling that AGENTS.md non-negotiable #2 calls a non-negotiable appeared nowhere
 in CI: any binary up to 2 MB printed a clean PASS with no hint of how close to a floppy it was. Options were
@@ -22,6 +22,103 @@ call at the worst possible moment rather than surfacing it. Current HEAD measure
 the floppy with 97,124 B headroom, so today's CI passes with no warning. REVISIT TRIGGER: if the warn line
 starts firing on most packets it has stopped being a signal — that is the moment to make the floppy budget
 load-bearing (hard fail) or to formally retire the floppy target, not to raise the number quietly.
+
+## Client-side image maps (charter K2, packet/image-maps, DCX-136)
+
+### D71 — malformed `<area coords>` drops the area; pixel-only hit-testing this packet, no keyboard Tab-per-area
+Two forks while implementing `<img usemap>`/`<map>`/`<area>` (HTML 4.01
+§13.6.1):
+
+1. **A malformed/wrong-count `coords` on an `<area>`.** Options: (a) drop
+   the whole `<area>` from the resolved list (it contributes no hit-test
+   region at all); (b) widen it to `Shape::Default` (a whole-image
+   catch-all), on the theory that "some region beats none". **Choice: (a).**
+   Widening a parse failure into a whole-image catch-all is exactly the kind
+   of silent-and-surprising fallback this codebase's totality style avoids
+   elsewhere (e.g. `image_map::parse_area`'s sibling functions all fail
+   closed, never open) — a typo'd `coords` value should make that ONE region
+   inert, not accidentally swallow every click anywhere on the image
+   (especially dangerous given first-match-wins: a widened area earlier in
+   document order would shadow every real area after it). Revisit-trigger:
+   none expected — this matches how real browsers already treat an
+   unparseable `<area>` (ignored, not defaulted).
+2. **Keyboard/Tab granularity for image maps.** The interactive shell
+   (`browser.rs`) has one `Focusable`/Tab-stop per `Interactive`-carrying
+   element; an `<img usemap>` is ONE such element (its own `Replaced` box),
+   not one per `<area>`. Options: (a) this packet's scope — the whole image
+   is one Tab stop, and `Enter`/mouse-click activates it via
+   `image_map::hit_test_scaled` (mouse, pixel-accurate) or the first
+   `href`-bearing area in document order (keyboard, since there's no pixel
+   to hit-test against); (b) synthesize a separate `Focusable` per `<area>`
+   so Tab can cycle through individual regions (real per-area keyboard
+   accessibility). **Choice: (a)**, per the ticket's own scope call — real
+   1996 Navigator-era image maps were mouse-only too, and (b) would need a
+   new `Interactive` shape (or a `Focusable` that doesn't map 1:1 to a
+   `layout::Fragment`) that's a separable, larger packet, not a corollary of
+   the hit-testing/carrier work here. Revisit-trigger: an accessibility
+   packet that wants real per-area keyboard navigation — then (b), likely by
+   giving `Focusable` an optional `area_index` alongside its existing
+   `interactive`/`control_node` fields.
+
+### D72 — `<a href><img usemap></a>` keeps `Interactive::ImageMap`, not the anchor's `Link`
+Code review caught a real defect: `box_tree::build_node_inner`'s `is_link`
+branch calls `tag_interactive` to propagate `Interactive::Link` onto an
+`<a>`'s entire subtree. Before the fix, this was unconditional, so `<a
+href="/fallback"><img usemap="#m"></a>` (a common pre-image-map fallback /
+dual-purpose authoring pattern) silently overwrote the img's
+`Interactive::ImageMap` with the anchor's `Link`, discarding every `<area>`'s
+shape and href. **Choice:** `tag_interactive` now returns early (without
+recursing further) on any subtree node that already carries
+`Interactive::ImageMap`, leaving it untouched. This matches real browsers,
+which give an inner `usemap` priority over an enclosing anchor.
+Revisit-trigger: none expected — if a future packet adds another carrier
+that similarly wants "innermost wins" semantics against an enclosing `<a>`,
+extend the same guard rather than special-casing `ImageMap` further.
+
+## Acceptance — A5z speed gate (first paint over kitchen-sink.html)
+
+### D69 — new label A5z for the speed gate; wall-clock is the live gate today, qemu insn-count PENDs until a plugin is wired in
+Build brief §0 defines "A5" as a first-paint SPEED budget over
+`fixtures/kitchen-sink.html` (< 50M retired instructions under qemu-i386, or
+< 150ms host wall-clock) — charter C10's "speed budget in CI forever", and
+the only regression fence for K1 (beat Navigator 4 to first paint), the
+project's kill condition. `accept.sh` never measured either number; every
+packet since M6 (the whole Acid2 program, the X11 work) landed blind on
+speed. Two forks:
+1. **Label.** `A5a`-`A5x` already exist in `accept.sh` as an unrelated M6
+   packet's golden-render checks over the same fixture (they reused the "A5"
+   letter before this speed gate existed). Options: (a) renumber those
+   checks to free up "A5" for the speed gate; (b) pick an unused sub-label.
+   **Choice: (b), `A5z`.** Renumbering churns golden-check history (diff
+   noise across every CI run/PR that references those labels) for zero
+   behavioral benefit — the labels are just log-line prefixes, not identity.
+   `A5y` and `A5z` were both free; `z` was picked as the more conventional
+   "last resort" suffix. Revisit-trigger: none expected — labels are
+   append-only from here.
+2. **Measurement method / where the check actually gates.** The brief
+   prefers qemu-i386 retired-instruction count (deterministic across CI
+   hardware) but that needs a QEMU TCG plugin reporting an instruction
+   count; user-mode `qemu-i386` (the `qemu-user` apt package the `accept`
+   CI job installs — see `m0-acceptance.yml`) does not ship one, and
+   linux-user mode has no `-icount` (that's a system-emulation-only qemu
+   flag). Options: (a) block the gate entirely until a plugin is packaged
+   into the CI image; (b) implement the instruction-count method as PEND
+   (not FAIL) when no plugin is found, and let the brief's own documented
+   fallback — host wall-clock, budget 150ms — be the check that actually
+   gates until a plugin exists. **Choice: (b).** A gate that can never run
+   until unrelated image work lands is worse than a live-but-less-precise
+   one today. The wall-clock fallback runs in the `build` CI job (which has
+   `cargo`, via `--tty-only`) against `target/release/stele` — host target,
+   not under qemu, since timing an emulated CPU measures qemu overhead, not
+   render cost. Both budgets are env-overridable (`SPEED_INSN_BUDGET`,
+   `SPEED_WALLCLOCK_BUDGET_MS`) so the gate's failure path can be
+   demonstrated without editing the script (see JOURNAL's A5z entry).
+   Revisit-trigger: a QEMU TCG instruction-count plugin (e.g. contrib's
+   `libinsn.so`, built or packaged) becomes available in the `accept` job's
+   image/apt sources — wire it in via `QEMU_INSN_PLUGIN` or one of the
+   searched paths in `find_qemu_insn_plugin()`, and the instruction-count
+   method takes over as the live gate automatically (no code change needed,
+   just infra).
 
 ## Chrome — editable address bar + reload
 
@@ -1414,7 +1511,7 @@ provenance, audit-clean deps), which the brief scopes to M6, not M0.
 **Choice:** defer; M0 gates only on A1 + A4. Revisit-trigger: M6 hardening —
 install/vendor them then, or bake them into the image.
 
-### D71 — the image pin lives in `ci/monolith-builder.image`, not in the workflows
+### D73 — the image pin lives in `ci/monolith-builder.image`, not in the workflows
 A6/C8 needs `cargo-auditable` + `cargo-audit`, which are absent from the pinned
 `monolith-builder` image (D6, and build-substrate's own tooling-check step
 reports both missing on every run). Getting them in means publishing a new

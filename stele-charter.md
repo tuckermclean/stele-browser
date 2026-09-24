@@ -87,6 +87,12 @@ converge, not grow.
       them; composing the compact reference smiley is a browser-level concern
       (a fixed-viewport render clamp so html{overflow:hidden} clips the
       positioned face into a window), not a dialect gap -- see DECISIONS D61.
+      Client-side image maps -- <img usemap> resolved against a <map name>
+      found anywhere in the document, <area shape=rect|circle|poly|default>
+      hit-testing (HTML 4.01 13.6.1), pixel activation (x11) and keyboard/tty
+      Enter-activates-first-href-area fallback (packet/image-maps, DCX-136;
+      size delta pending the next CI build -- no local cargo/qemu access in
+      this sandbox, per AGENTS.md's CI-driven build/test loop).
       Still candidates: <details>/
       <summary> interactive toggle (rendered as blocks today), MathML,
       static SVG. The dialect ships as a versioned one-page document:
