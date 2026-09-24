@@ -1150,6 +1150,42 @@ impl XConnection {
         }
         Ok(batch)
     }
+
+    /// [`drain_events`]'s timeout-bounded sibling (DCX-70, animated GIF
+    /// frame advance in `--x11`): waits up to `timeout_ms` for the first
+    /// event instead of blocking forever, returning an EMPTY batch (never
+    /// an `Err`) when nothing arrives in time -- the caller (`run_x11`'s
+    /// event loop) treats an empty `Ok(vec![])` as "timeout, no input this
+    /// tick, check the GIF animation clocks" rather than as a zero-event
+    /// input batch to paint. Any already-queued events (`self.pending`, or
+    /// anything sitting on the socket right now) skip the wait entirely and
+    /// fall straight through to the same batching [`drain_events`] does.
+    pub fn drain_events_timeout(&mut self, timeout_ms: i32) -> Result<Vec<XEvent>, String> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
+        if !self.pending.is_empty() {
+            return self.drain_events();
+        }
+        // `Timespec`'s field width (`tv_sec`/`tv_nsec`) varies by target
+        // (e.g. 32-bit `c_long` on the i486 build vs 64-bit on a host dev
+        // build) -- go through `i64` then `try_into` (inferred against
+        // whatever `Timespec` actually declares) rather than a bare `as`
+        // cast, so this compiles correctly on either width. `timeout_ms` is
+        // always a small, caller-supplied constant (see `MIN_GIF_FRAME_MS`
+        // in `main.rs`), so the `unwrap_or(0)` fallback (0 = "don't block
+        // at all this poll") is unreachable in practice, not a real clamp.
+        let timeout_ms = i64::from(timeout_ms.max(0));
+        let ts = Timespec {
+            tv_sec: (timeout_ms / 1000).try_into().unwrap_or(0),
+            tv_nsec: (timeout_ms % 1000 * 1_000_000).try_into().unwrap_or(0),
+        };
+        let mut fds = [PollFd::new(&self.stream, PollFlags::IN)];
+        let n = poll(&mut fds, Some(&ts)).map_err(|e| format!("poll X socket: {e}"))?;
+        if n == 0 || !fds[0].revents().contains(PollFlags::IN) {
+            return Ok(Vec::new());
+        }
+        self.drain_events()
+    }
 }
 
 /// Best-effort `MIT-MAGIC-COOKIE-1` lookup: `$XAUTHORITY` if set, else

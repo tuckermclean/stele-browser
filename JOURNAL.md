@@ -1782,3 +1782,44 @@ Append-only running log. Newest at the bottom.
   after resolving it and returns early with an empty-coords `Area` if shape is `Default`, bypassing coords parsing.
   `Rect`/`Circle`/`Poly` validation is unchanged.
 - Decisions recorded: D71 (malformed coords fork) and D72 (anchor/usemap priority fork) — see DECISIONS.md.
+
+## 2026-09-24 — animated GIF frame advance in `--x11` (DCX-70)
+
+- `img/gif.rs` already decodes+composites every frame of an animated GIF (disposal methods
+  included); nothing advanced the frame in `--x11`, so animated GIFs showed frame 0 forever.
+  Closed that gap for the interactive backend only.
+- `images.rs`: new `collect_images_with_anim` (+ `walk_anim`/`fetch_and_decode_all`), a
+  `--x11`-only sibling of `collect_images` that returns BOTH the same frame-0 map AND a second
+  `NodeId -> Rc<Vec<Frame>>` map holding every animated (>1 frame) image's full frame list. No
+  extra decode cost versus `collect_images` (the GIF decoder already produces every frame
+  internally; the old path just dropped all but frame 0). Retention is bounded by a new
+  `MAX_ANIM_EXTRA_BYTES` (32 MiB) budget — a GIF whose extra frames don't fit still shows frame
+  0, it just never animates. `collect_images` itself is completely untouched — headless
+  (`--dump-png`/`--dump-text`/`--render-fb`) behavior and goldens are byte-identical.
+- `main.rs`: `X11Session` now also carries `images`/`anim_frames` from the same fetch. A new
+  `GifClock` (current frame + elapsed-ms) per animated node, reset to frame 0 on every
+  navigation (`init_anim_clocks`) and preserved across a resize. `advance_gif_clocks` steps due
+  clocks forward by wall-clock `dt_ms` (a `while` loop, so a slow tick lands on the right frame
+  rather than perpetually lagging by one), floored at `MIN_GIF_FRAME_MS` (20ms) per frame against
+  a malicious/careless zero-delay GIF. `reflow_from_dom` split into a thin wrapper plus
+  `reflow_from_dom_with_images`, which takes the images map as a parameter instead of always
+  calling `collect_images` — a tick calls it with `current_anim_images`'s per-frame-overridden
+  map (built from cached `Rc`s, no re-fetch). The event loop only switches from the normal
+  blocking `drain_events` to the new timeout-bounded `XConnection::drain_events_timeout` while at
+  least one GIF is animating; a page with none pays zero cost (identical to pre-packet behavior).
+- `--dump-png`/`--dump-text` untouched by construction: they never call `collect_images_with_anim`
+  or any of the new `--x11` code paths, only the unmodified `collect_images` — the frame-0 golden
+  contract is unchanged.
+- Unit tests: `images.rs` (`animated_gif_yields_frame_0_map_entry_and_a_full_anim_frame_list`,
+  `still_image_gets_no_anim_frames_entry`) and `main.rs` (`advance_gif_clocks_*`,
+  `init_anim_clocks_starts_every_animated_node_at_frame_zero`) — clock hold-before-delay,
+  advance-and-wrap, large-`dt` multi-frame catch-up, zero-delay floor, and "a still image never
+  animates".
+- `fb` (framebuffer) backend: explicitly out of scope — its own module doc comment already
+  records it as a deliberate one-shot, non-interactive renderer (M4 decision) with no event loop.
+- **Not run locally**: this sandbox has no `cargo`/local Rust toolchain (`AGENTS.md` #3) — needs
+  the real `m0-acceptance` CI run for `cargo test`, `accept.sh`, and the CI-measured binary size
+  delta / floppy headroom (DCX-53's ask). Manual `--x11` confirmation also needs a real X server,
+  which this sandbox doesn't have — flagged for QA.
+- Decision recorded: D71 (see DECISIONS.md) — the fragment-mutation-vs-relayout-per-tick fork and
+  why relayout-per-tick was chosen given no local compiler to verify the more invasive option.

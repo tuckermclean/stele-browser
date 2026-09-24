@@ -3,6 +3,39 @@
 Forks taken while the operator was away. Each: options, choice, why,
 revisit-trigger. Newest first.
 
+## Images — animated GIF frame advance in `--x11` (DCX-70)
+
+### D71 — advance frames by re-running layout from a per-node current-frame override, not by patching painted fragments in place
+`img/gif.rs` already decodes+composites every frame of an animated GIF (disposal methods included) into a
+ready-to-blit canvas per frame; `images::collect_images`'s own doc comment explicitly deferred ticking through
+them as "a later/interactive concern". Closing that gap needs some way to swap WHICH frame's pixels a given
+`<img>` shows, on a timer, in `--x11` only. Two shapes were available: (a) thread the DOM `NodeId` all the way
+through `layout::LayoutNode` -> `Built::Replaced`/`InlineContent::Replaced` -> `Fragment` (mirroring how
+`Fragment::id`, the HTML `id` attribute, is already threaded), so a tick could look up and directly overwrite
+just the affected `FragmentKind::Image` fragments' pixels without relaying out; or (b) keep an `Rc<RgbaImage>`
+override map keyed by `NodeId` (frame 0 for every image, current frame for animated ones) and re-run
+cascade+box-tree+layout from it on every tick, exactly like a resize already does. Chose (b). Reason: (a)
+touches the FROZEN box-tree/layout/fragment plumbing (`LayoutNode`, `Built`, `InlineContent`, `Fragment`) in
+~6 files with ~30 existing `LayoutNode { .. }` struct-literal sites in `box_tree.rs` alone (per that module's
+own doc comment) that would all need a new field added, and this packet's sandbox has no local Rust toolchain
+to compile-check that surgery against (`AGENTS.md` non-negotiable #3: CI-driven, no local `cargo build`) --  a
+mistake there is not caught until a full CI round-trip. (b) touches only `images.rs` (one new sibling function,
+`collect_images_with_anim`, additive, zero risk to the frozen `collect_images`/headless paths) and `main.rs`
+(the `--x11`-only event loop and its already-established resize-reflow pattern), and reuses the EXACT layout
+call `reflow_from_dom`/`ConfigureNotify` already makes — a well-trodden, already-correct path — for pixel
+content instead of writing new fragment-mutation logic from scratch. Cost: a GIF tick does a full cascade +
+box-tree + layout pass (not just a pixel patch), which is real but bounded CPU work, gated behind a
+poll-with-timeout (`XConnection::drain_events_timeout`) that only fires while `!anim_clocks.is_empty()` — a
+page with no animated image pays nothing (the loop still blocks on the X socket exactly as before). RAM is
+explicitly bounded too: `collect_images_with_anim` retains every extra (non-frame-0) frame only up to
+`MAX_ANIM_EXTRA_BYTES` (32 MiB) — a GIF whose full frame set doesn't fit still shows frame 0, it just never
+animates, rather than one hostile many-frame GIF forcing an unbounded allocation. The `fb` (framebuffer)
+backend is explicitly OUT OF SCOPE: its own module doc comment already records it as a deliberate one-shot,
+non-interactive renderer (M4 decision) with no event loop to tick against. REVISIT TRIGGER: if per-tick
+relayout cost is ever measured as a real problem on the target 486 hardware (not just theoretically), that is
+the moment to do the (a) `NodeId`-threading surgery properly, in a sandbox/session with a working local
+toolchain to compile-check it incrementally rather than blind.
+
 ## Acceptance — A2 size gate vs. the 1.44 MB floppy line
 
 ### D70 — the floppy ceiling is a loud soft warning in A2; the 2.0 MB line stays the hard fail

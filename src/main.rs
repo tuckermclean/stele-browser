@@ -1379,9 +1379,101 @@ fn render_fb_opts(source: &str, no_bg_images: bool) -> Result<(), String> {
 /// was fetched from. A resize (`ConfigureNotify`) reflows from this cache
 /// via [`reflow_from_dom`] instead of re-fetching -- see that function's doc
 /// comment for the zero-network guarantee this exists to make structural.
+///
+/// `images`/`anim_frames` (DCX-70, animated GIF frame advance) are the
+/// `stele::images::collect_images_with_anim` result from the same fetch
+/// this session was built from: `images` is the frame-0 map every reflow
+/// (including a resize) builds its box tree from by default, and
+/// `anim_frames` holds the FULL frame list for every animated GIF on the
+/// page, keyed by `NodeId` -- `run_x11`'s per-node `GifClock`s index into
+/// it. Both are rebuilt only on navigation (a fresh `load_x11_page` call),
+/// never on a resize, matching `reflow_from_dom`'s own zero-network
+/// resize guarantee: same URLs, same decoded frames, just a new layout
+/// width.
 struct X11Session {
     dom: dom::ast::Dom,
     final_url: Url,
+    images: std::collections::HashMap<dom::NodeId, std::rc::Rc<stele::img::RgbaImage>>,
+    anim_frames: std::collections::HashMap<dom::NodeId, std::rc::Rc<Vec<stele::img::Frame>>>,
+}
+
+/// One animated GIF's playback position (DCX-70): which decoded frame
+/// (index into the matching `X11Session::anim_frames` entry) is showing
+/// right now, and how many milliseconds it's been showing -- see
+/// [`advance_gif_clocks`]. Reset to frame 0 on every navigation
+/// ([`init_anim_clocks`]); persists across a resize (same as
+/// `anim_frames` itself).
+#[derive(Clone, Copy, Debug, Default)]
+struct GifClock {
+    frame: usize,
+    elapsed_ms: u32,
+}
+
+/// A fresh, frame-0 clock for every animated image in `anim_frames` --
+/// called once per navigation (every `load_x11_page` call site in
+/// `run_x11`), so a freshly loaded/reloaded page's GIFs always start at
+/// their first frame.
+fn init_anim_clocks(
+    anim_frames: &std::collections::HashMap<dom::NodeId, std::rc::Rc<Vec<stele::img::Frame>>>,
+) -> std::collections::HashMap<dom::NodeId, GifClock> {
+    anim_frames.keys().map(|id| (*id, GifClock::default())).collect()
+}
+
+/// Advance every entry in `clocks` by `dt_ms` of elapsed wall-clock time,
+/// per its `anim_frames` entry's per-frame `delay_ms` (floored to
+/// [`MIN_GIF_FRAME_MS`] -- a real-GIF-viewer convention against a
+/// malicious/careless zero-delay-encoded GIF spinning the CPU), wrapping
+/// back to frame 0 after the last frame. A `while` loop (not a single
+/// `if`) so a slow paint that eats more than one frame's delay still lands
+/// on the CORRECT frame next tick, rather than perpetually lagging by one.
+/// Returns `true` iff at least one clock's `frame` actually changed -- the
+/// caller only needs to relayout+repaint when that happens, not on every
+/// sub-frame-delay tick.
+fn advance_gif_clocks(
+    clocks: &mut std::collections::HashMap<dom::NodeId, GifClock>,
+    anim_frames: &std::collections::HashMap<dom::NodeId, std::rc::Rc<Vec<stele::img::Frame>>>,
+    dt_ms: u32,
+) -> bool {
+    let mut changed = false;
+    for (node_id, clock) in clocks.iter_mut() {
+        let Some(frames) = anim_frames.get(node_id) else { continue };
+        if frames.len() < 2 {
+            continue;
+        }
+        clock.elapsed_ms = clock.elapsed_ms.saturating_add(dt_ms);
+        while clock.elapsed_ms >= (frames[clock.frame].delay_ms as u32).max(MIN_GIF_FRAME_MS) {
+            clock.elapsed_ms -= (frames[clock.frame].delay_ms as u32).max(MIN_GIF_FRAME_MS);
+            clock.frame = (clock.frame + 1) % frames.len();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Floor on a GIF frame's honored on-screen delay, milliseconds -- matches
+/// real browsers/viewers working around the common "0 or near-0 delay"
+/// authoring mistake/abuse (a literal 0 would otherwise spin the event
+/// loop as fast as it can decode+relayout).
+const MIN_GIF_FRAME_MS: u32 = 20;
+
+/// Merge `session.images` (frame 0 of every image) with whatever frame each
+/// entry in `clocks` is CURRENTLY on, for every animated node — the images
+/// map [`reflow_from_dom_with_images`] should build the box tree from for
+/// "right now". A page with no animation (`clocks` empty) returns
+/// `session.images` unchanged (cheap: `Rc` clones, no new fetch/decode).
+fn current_anim_images(
+    session: &X11Session,
+    clocks: &std::collections::HashMap<dom::NodeId, GifClock>,
+) -> std::collections::HashMap<dom::NodeId, std::rc::Rc<stele::img::RgbaImage>> {
+    let mut images = session.images.clone();
+    for (node_id, clock) in clocks {
+        if let Some(frames) = session.anim_frames.get(node_id) {
+            if let Some(f) = frames.get(clock.frame) {
+                images.insert(*node_id, std::rc::Rc::new(f.image.clone()));
+            }
+        }
+    }
+    images
 }
 
 /// The retained, O(1)-in-viewport render state for `--x11`: the fragment list
@@ -1409,6 +1501,25 @@ struct RenderState {
 /// layout failure is a clean `Err`, never a panic -- `run_x11` degrades to
 /// a blank page rather than propagating a panic into the event loop.
 fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Result<RenderState, String> {
+    let images = stele::images::collect_images(dom_tree, final_url);
+    reflow_from_dom_with_images(dom_tree, final_url, width, &images)
+}
+
+/// [`reflow_from_dom`]'s guts, parameterized over the `images` map instead
+/// of calling `stele::images::collect_images` itself (DCX-70, animated GIF
+/// frame advance) -- `reflow_from_dom` is the thin, back-compat wrapper
+/// every EXISTING caller (initial load, resize, the `reflow_from_dom_*`
+/// tests below) keeps using unchanged; `run_x11`'s animation tick calls
+/// this directly with [`current_anim_images`]'s per-frame-overridden map
+/// instead, so a tick never re-fetches a single byte -- every image (static
+/// AND the currently-showing frame of every animated GIF) already sits in
+/// `X11Session`/the clock state before this is ever called.
+fn reflow_from_dom_with_images(
+    dom_tree: &dom::ast::Dom,
+    final_url: &Url,
+    width: u32,
+    images: &std::collections::HashMap<dom::NodeId, std::rc::Rc<stele::img::RgbaImage>>,
+) -> Result<RenderState, String> {
     if frames::find_frameset(dom_tree).is_some() {
         return Err("frameset documents are not supported by --x11".to_string());
     }
@@ -1420,8 +1531,7 @@ fn reflow_from_dom(dom_tree: &dom::ast::Dom, final_url: &Url, width: u32) -> Res
     let author_sheets = stele::stylesheets::collect_all_author_sheets(dom_tree, final_url, width as f32, style::ColorScheme::Light);
     let styles = cascade::cascade(dom_tree, &author_sheets);
     let pseudo = cascade::cascade_pseudo(dom_tree, &author_sheets, &styles);
-    let images = stele::images::collect_images(dom_tree, final_url);
-    let Some(root) = build_box_tree_with_pseudo(dom_tree, &styles, &images, &pseudo) else {
+    let Some(root) = build_box_tree_with_pseudo(dom_tree, &styles, images, &pseudo) else {
         return Err("empty document (nothing to render)".to_string());
     };
 
@@ -1476,9 +1586,15 @@ fn load_x11_page(url: &Url, width: u32) -> Result<(X11Session, RenderState), Str
     let response = fetch_response(url)?;
     let html = String::from_utf8_lossy(&response.body);
     let dom_tree = dom::parser::parse(&html);
+    let final_url = response.final_url;
 
-    let session = X11Session { dom: dom_tree, final_url: response.final_url };
-    let state = reflow_from_dom(&session.dom, &session.final_url, width)?;
+    // DCX-70: one walk decodes both the frame-0 map (identical shape to
+    // plain `collect_images`) AND every animated GIF's full frame list —
+    // see `collect_images_with_anim`'s doc comment for why this costs no
+    // extra decode work over the old frame-0-only path.
+    let (images, anim_frames) = stele::images::collect_images_with_anim(&dom_tree, &final_url);
+    let state = reflow_from_dom_with_images(&dom_tree, &final_url, width, &images)?;
+    let session = X11Session { dom: dom_tree, final_url, images, anim_frames };
     Ok((session, state))
 }
 
@@ -1986,11 +2102,17 @@ fn run_x11(source: &str) -> bool {
             eprintln!("stele: --x11: initial page load failed: {e}");
             status = format!("Failed to load: {e}");
             (
-                X11Session { dom: dom::parser::parse(""), final_url: history.current().clone() },
+                X11Session {
+                    dom: dom::parser::parse(""),
+                    final_url: history.current().clone(),
+                    images: std::collections::HashMap::new(),
+                    anim_frames: std::collections::HashMap::new(),
+                },
                 RenderState { fragments: Vec::new(), bg_images: std::collections::HashMap::new(), doc_height: 1 },
             )
         }
     };
+    let mut anim_clocks = init_anim_clocks(&session.anim_frames);
 
     // The server-side back buffer: window-depth, window-sized. Every paint
     // lands here first; the window only ever receives a CopyArea from it
@@ -2011,8 +2133,25 @@ fn run_x11(source: &str) -> bool {
     stats.frames += 1;
     stats.put_image_bytes += width as u64 * height as u64 * 4;
 
+    // DCX-70: wall-clock reference for `advance_gif_clocks`'s `dt_ms` --
+    // only ever read/written inside the loop below, right after each
+    // `drain_events`/`drain_events_timeout` call returns, so `dt_ms` always
+    // measures exactly "time since the previous loop iteration", whether
+    // that iteration ended on a real X event or an animation-timer wakeup.
+    let mut last_anim_tick = std::time::Instant::now();
+
     loop {
-        let batch = match conn.drain_events() {
+        // While at least one GIF is animating, poll with a short timeout
+        // instead of blocking on the X socket forever, so the loop wakes up
+        // on its own to tick frames -- a page with no animated image never
+        // calls `drain_events_timeout` at all and blocks exactly as before
+        // this packet (zero cost, zero behavior change).
+        let poll_result = if anim_clocks.is_empty() {
+            conn.drain_events()
+        } else {
+            conn.drain_events_timeout(MIN_GIF_FRAME_MS as i32)
+        };
+        let batch = match poll_result {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("stele: --x11: connection closed: {e}");
@@ -2022,6 +2161,33 @@ fn run_x11(source: &str) -> bool {
                 break;
             }
         };
+
+        let now = std::time::Instant::now();
+        let dt_ms = u32::try_from(now.duration_since(last_anim_tick).as_millis()).unwrap_or(u32::MAX);
+        last_anim_tick = now;
+
+        if batch.is_empty() {
+            // A timeout wakeup, not a real event batch (`drain_events`
+            // itself always returns at least one event; only
+            // `drain_events_timeout` can return empty). Tick every GIF
+            // clock; only relayout+repaint if a frame actually changed.
+            if advance_gif_clocks(&mut anim_clocks, &session.anim_frames, dt_ms) {
+                let images = current_anim_images(&session, &anim_clocks);
+                match reflow_from_dom_with_images(&session.dom, &session.final_url, width, &images) {
+                    Ok(s) => {
+                        state = s;
+                        conn.begin_frame();
+                        x11_full_redraw(&mut conn, &state, pixmap, window, gc, depth, bpp, scanline_pad, width, height, scroll_y, &x11_chrome_state(&history, &status, loading, throbber_frame, x11_edit_arg(&address_edit)));
+                        let _ = conn.end_frame();
+                        stats.frames += 1;
+                        stats.put_image_bytes += width as u64 * height as u64 * 4;
+                    }
+                    Err(e) => eprintln!("stele: --x11: reflow for GIF frame advance failed: {e}"),
+                }
+            }
+            continue;
+        }
+
         stats.batches += 1;
         stats.events += batch.len() as u64;
 
@@ -2108,6 +2274,7 @@ fn run_x11(source: &str) -> bool {
                                 Ok((sess, s)) => {
                                     session = sess;
                                     state = s;
+                                    anim_clocks = init_anim_clocks(&session.anim_frames);
                                     scroll_y = 0;
                                     status = String::from("Done");
                                 }
@@ -2143,6 +2310,7 @@ fn run_x11(source: &str) -> bool {
                                 Ok((sess, s)) => {
                                     session = sess;
                                     state = s;
+                                    anim_clocks = init_anim_clocks(&session.anim_frames);
                                     scroll_y = 0;
                                     status = String::from("Done");
                                 }
@@ -2179,6 +2347,7 @@ fn run_x11(source: &str) -> bool {
                             Ok((sess, s)) => {
                                 session = sess;
                                 state = s;
+                                anim_clocks = init_anim_clocks(&session.anim_frames);
                                 scroll_y = 0;
                                 status = String::from("Done");
                             }
@@ -2232,6 +2401,7 @@ fn run_x11(source: &str) -> bool {
                             Ok((sess, s)) => {
                                 session = sess;
                                 state = s;
+                                anim_clocks = init_anim_clocks(&session.anim_frames);
                                 scroll_y = 0;
                                 status = String::from("Done");
                             }
@@ -2271,6 +2441,7 @@ fn run_x11(source: &str) -> bool {
                                 Ok((sess, s)) => {
                                     session = sess;
                                     state = s;
+                                    anim_clocks = init_anim_clocks(&session.anim_frames);
                                     scroll_y = 0;
                                     status = String::from("Done");
                                 }
@@ -2312,6 +2483,7 @@ fn run_x11(source: &str) -> bool {
                         Ok((sess, s)) => {
                             session = sess;
                             state = s;
+                            anim_clocks = init_anim_clocks(&session.anim_frames);
                             scroll_y = 0;
                             status = String::from("Done");
                         }
@@ -2373,6 +2545,7 @@ fn run_x11(source: &str) -> bool {
                                     Ok((sess, s)) => {
                                         session = sess;
                                         state = s;
+                                        anim_clocks = init_anim_clocks(&session.anim_frames);
                                         scroll_y = 0;
                                         status = String::from("Done");
                                     }
@@ -2425,7 +2598,11 @@ fn run_x11(source: &str) -> bool {
                         }
                         Err(e) => eprintln!("stele: --x11: recreate pixmap failed, keeping old buffer: {e}"),
                     }
-                    match reflow_from_dom(&session.dom, &session.final_url, width) {
+                    // DCX-70: reflow from whatever frame each GIF is
+                    // CURRENTLY showing, not frame 0 -- a resize must not
+                    // restart every animation on the page.
+                    let images = current_anim_images(&session, &anim_clocks);
+                    match reflow_from_dom_with_images(&session.dom, &session.final_url, width, &images) {
                         Ok(s) => {
                             state = s;
                         }
@@ -3211,6 +3388,113 @@ mod tests {
         let state = reflow_from_dom(&dom, &Url::new("file:///x.html"), 800).expect("reflow");
         assert!(!state.fragments.is_empty());
         assert!(state.doc_height >= 1);
+    }
+
+    // ------------------------------------------------------- DCX-70: GIF frame advance
+
+    fn anim_frames_map(id: dom::NodeId, delays_ms: &[u16]) -> std::collections::HashMap<dom::NodeId, std::rc::Rc<Vec<stele::img::Frame>>> {
+        let frames = delays_ms
+            .iter()
+            .map(|&delay_ms| stele::img::Frame { image: stele::img::RgbaImage::new(1, 1), delay_ms })
+            .collect();
+        [(id, std::rc::Rc::new(frames))].into_iter().collect()
+    }
+
+    fn test_node_id() -> dom::NodeId {
+        let d = stele::dom::parser::parse("<img>");
+        find_all_img_node_ids(&d)[0]
+    }
+
+    fn find_all_img_node_ids(d: &dom::Dom) -> Vec<dom::NodeId> {
+        fn walk(d: &dom::Dom, id: dom::NodeId, out: &mut Vec<dom::NodeId>) {
+            if let dom::Node::Element(el) = d.node(id) {
+                if el.name.as_str() == "img" {
+                    out.push(id);
+                }
+                for &c in &el.children {
+                    walk(d, c, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(d, d.root(), &mut out);
+        out
+    }
+
+    #[test]
+    fn init_anim_clocks_starts_every_animated_node_at_frame_zero() {
+        let id = test_node_id();
+        let anim_frames = anim_frames_map(id, &[50, 70]);
+        let clocks = init_anim_clocks(&anim_frames);
+        assert_eq!(clocks.len(), 1);
+        assert_eq!(clocks[&id].frame, 0);
+        assert_eq!(clocks[&id].elapsed_ms, 0);
+    }
+
+    #[test]
+    fn advance_gif_clocks_holds_before_its_delay_elapses() {
+        let id = test_node_id();
+        let anim_frames = anim_frames_map(id, &[50, 70]);
+        let mut clocks = init_anim_clocks(&anim_frames);
+
+        let changed = advance_gif_clocks(&mut clocks, &anim_frames, 30);
+        assert!(!changed, "30ms of a 50ms delay must not advance the frame");
+        assert_eq!(clocks[&id].frame, 0);
+        assert_eq!(clocks[&id].elapsed_ms, 30);
+    }
+
+    #[test]
+    fn advance_gif_clocks_advances_and_wraps_after_the_last_frame() {
+        let id = test_node_id();
+        let anim_frames = anim_frames_map(id, &[50, 70]);
+        let mut clocks = init_anim_clocks(&anim_frames);
+
+        assert!(advance_gif_clocks(&mut clocks, &anim_frames, 50), "50ms must land exactly on frame 1");
+        assert_eq!(clocks[&id].frame, 1);
+        assert_eq!(clocks[&id].elapsed_ms, 0);
+
+        assert!(advance_gif_clocks(&mut clocks, &anim_frames, 70), "another 70ms must wrap back to frame 0");
+        assert_eq!(clocks[&id].frame, 0);
+    }
+
+    #[test]
+    fn advance_gif_clocks_a_large_dt_steps_through_multiple_frames_not_just_one() {
+        // A slow paint (or a page that was backgrounded) can eat more than
+        // one frame's delay in a single tick -- the clock must land on the
+        // CORRECT frame for how much time actually passed, not just advance
+        // by one and perpetually lag.
+        let id = test_node_id();
+        let anim_frames = anim_frames_map(id, &[50, 70, 90]); // total loop = 210ms
+        let mut clocks = init_anim_clocks(&anim_frames);
+
+        assert!(advance_gif_clocks(&mut clocks, &anim_frames, 130)); // 50 + 70 exactly -> frame 2
+        assert_eq!(clocks[&id].frame, 2);
+        assert_eq!(clocks[&id].elapsed_ms, 0);
+    }
+
+    #[test]
+    fn advance_gif_clocks_floors_a_near_zero_delay_to_the_min_frame_ms() {
+        // A malicious/careless 0-delay-encoded GIF must not spin: every
+        // frame's honored delay is floored to MIN_GIF_FRAME_MS.
+        let id = test_node_id();
+        let anim_frames = anim_frames_map(id, &[0, 0]);
+        let mut clocks = init_anim_clocks(&anim_frames);
+
+        let changed = advance_gif_clocks(&mut clocks, &anim_frames, MIN_GIF_FRAME_MS - 1);
+        assert!(!changed, "under the floored minimum delay, the frame must not advance yet");
+
+        let changed = advance_gif_clocks(&mut clocks, &anim_frames, 1);
+        assert!(changed, "reaching the floored minimum delay must advance the frame");
+    }
+
+    #[test]
+    fn advance_gif_clocks_never_advances_a_still_single_frame_image() {
+        let id = test_node_id();
+        let anim_frames = anim_frames_map(id, &[50]); // only one frame: not animated
+        let mut clocks = init_anim_clocks(&anim_frames);
+        let changed = advance_gif_clocks(&mut clocks, &anim_frames, 10_000);
+        assert!(!changed, "a single-frame entry must never be treated as animated, however much time passes");
+        assert_eq!(clocks[&id].frame, 0);
     }
 
     #[test]
