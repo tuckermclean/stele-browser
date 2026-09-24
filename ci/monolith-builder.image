@@ -1,0 +1,6 @@
+# Pinned monolith-builder image (charter C9/C11: one pinned toolchain, by digest).
+# Single source of truth — both .github/workflows/build-substrate.yml and
+# .github/workflows/m0-acceptance.yml resolve the reference from this file, so a
+# digest re-pin is an ordinary repo edit and never a .github/workflows change.
+# Tag for humans: 20260811-b25ecd2b24a5
+ghcr.io/tuckermclean/monolith-builder@sha256:c8978fe3b56cf6ec1714b1b878997c7082cbf9786caa2b8cbcdbd986169c0daf
