@@ -185,7 +185,8 @@ This file rots the moment it lies. Rules to keep it honest:
 ## Building a node
 
 The graph regime: `SPEC.md`, `docs/graph.yaml` and the node specs in `nodes/` plan the work; a node is
-built test-first by role agents. The non-negotiables above hold for every node. Where this section and
+built test-first by role agents. The non-negotiables above hold for every node (rule 6 as `SPEC.md`
+principle 6 words it: the amendment lands in the spec PR that plans the node). Where this section and
 the packet sections above differ, this section governs node work; the packet sections govern work
 outside the graph.
 
@@ -204,7 +205,7 @@ outside the graph.
 - **Gate command.** The whole suite, as CI's `build` job runs it, and it runs in CI on the PR
   (`.github/workflows/m0-acceptance.yml`):
   `./accept.sh --tty-only; a=$?; cargo test --workspace --locked; t=$?; [ $a -eq 0 ] && [ $t -eq 0 ]`.
-  Its failure lines are `FAIL A<n>: ...` (accept.sh) and `test <path> ... FAILED` (libtest), which the
+  Its failure lines are `FAIL A<n>...` (accept.sh) and `test <path> ... FAILED` (libtest), which the
   graph's `gate.fail_pattern` matches. A summary line such as `test result: FAILED. ...` names no test
   and is not matched.
 - **CI's output.** accept.sh colours its `PASS`/`FAIL`/`WARN` words with ANSI escape codes, and every
@@ -215,25 +216,24 @@ outside the graph.
   and on what the change touches: `cargo test --locked --jobs 2 --test <stem> ... -- --test-threads=2`
   for each touched `tests/<stem>.rs`; `cargo test --locked --jobs 2 --lib <module::path> --
   --test-threads=2` for a touched module under `src/` (`--bin stele <filter>` for `src/main.rs`); and
-  `./accept.sh --tty-only` when a render path, a fixture or a golden is touched. A `--lib` filter
-  that matches no test runs nothing (`src/fetch/url.rs`, say, is tested in `tests/fetch_url.rs`), so
-  check the `test result` line counts what you meant. It prints the same
-  `test <path> ... FAILED` and `FAIL A<n>:` lines. The quick gate builds for the host only; the i486
+  `CARGO_BUILD_JOBS=2 ./accept.sh --tty-only` when a render path, a fixture or a golden is touched.
+  A `--lib` filter that matches no test runs nothing (`src/fetch/url.rs`, say, is tested in
+  `tests/fetch_url.rs`), so check the `test result` line counts what you meant. It prints the same
+  `test <path> ... FAILED` and `FAIL A<n>...` lines. The quick gate builds for the host only; the i486
   build stays in CI (non-negotiable 3).
 - **Bounded workers.** `cargo test` takes `--jobs 2` (build jobs) and `-- --test-threads=2` (test
-  threads); keep both on a local run.
+  threads); keep both on a local run. accept.sh's own `cargo build --release` takes
+  `CARGO_BUILD_JOBS=2` in the environment.
 - **Known red.** The graph's `gate.known_red` lists the tests that fail today, by the name their
   failure line prints. A failing test that is not listed is a failure of the change. A listed failure
-  stays until a node fixes it, and that node removes it from the list. A5u (the `--chrome` screenshot
-  golden) is listed because it fails at any checkout path other than CI's: the address bar shows the
-  fixture's absolute `file://` URL, and the golden holds CI's container path. It passes in CI, where
-  the `build` job's result is the evidence for it.
+  stays until a node fixes it, and that node removes it from the list. Why each entry is listed is in
+  the graph's comments and `SPEC.md`'s open decisions.
 - **Owns.** A node changes only the files it owns (its `owns` globs) and its direct deps' files, and
   places every file it adds where the graph's globs cover it. A node that adds a test or fixture under
   `tests/`, `fixtures/` or `goldens/` depends on the node that owns them.
 - **Red target.** A command that exits non-zero before the node's change and 0 after, normally
-  `cargo test --locked --test <stem>` for the node's own test file, or `./accept.sh --tty-only` for a
-  new or changed golden.
+  `cargo test --locked --jobs 2 --test <stem> -- --test-threads=2` for the node's own test file, or
+  `CARGO_BUILD_JOBS=2 ./accept.sh --tty-only` for a new or changed golden.
 - **Tests and fixtures.** New tests go in `tests/<topic>.rs` against the library's public API (every
   module but `dom_util` is `pub`), or through the binary (`CARGO_BIN_EXE_stele`, as
   `tests/stats_cli.rs` does); shared helpers are in `tests/support/`. Fixtures are in `fixtures/`

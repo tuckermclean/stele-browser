@@ -4,12 +4,15 @@ gate:
   # The i486 build and the `accept` job (A1, A2, A4, A5z, A6a) are CI evidence on each PR.
   command: "./accept.sh --tty-only; a=$?; cargo test --workspace --locked; t=$?; [ $a -eq 0 ] && [ $t -eq 0 ]"
   # Matched after stripping ANSI colour codes (\x1b\[[0-9;]*m) and a fetched CI log's
-  # timestamp prefix (^\S+Z ). accept.sh prints `FAIL <check>: ...`; libtest `test <path> ... FAILED`.
-  fail_pattern: '^(FAIL A[0-9][0-9a-z]*: .*|test \S+ \.\.\. FAILED)$'
+  # timestamp prefix (^\S+Z ). accept.sh prints `FAIL A<n>...`; libtest `test <path> ... FAILED`.
+  fail_pattern: '^(FAIL A[0-9].*|test \S+ \.\.\. FAILED)$'
   # A5u fails at any checkout path but CI's: --chrome shows the fixture's file://<cwd>/... URL in the
   # address bar, and goldens/chrome-basic.png holds CI's container path. It passes in CI (SPEC.md D4).
   known_red:
     - "A5u: chrome screenshot of fixtures/basic.html differs from goldens/chrome-basic.png"
+    # A1 fails in CI's `accept` job since ubuntu-latest became Ubuntu 26.04: its `file` prints
+    # "Intel i386" and accept.sh greps "Intel 80386" (issue #117; SPEC.md D5). The node for #117 removes it.
+    - "A1: expected 32-bit Intel 80386, statically linked"
 out_of_scope:
   - {glob: "docs/superpowers/", reason: "design and plan docs of merged packets, kept as history; cited by doc-comments, never changed by a node"}
   - {glob: "JOURNAL.md", reason: "frozen append-only log; from now on the merged node PRs and the graph are the log"}

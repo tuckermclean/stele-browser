@@ -46,16 +46,18 @@ and is behind on these.
 
 **Planned**, in this order (each becomes a node once an issue asks for it):
 
-0. **Look at migrating the UI toolkit to Protolith**, before the work below gets far. Protolith is a
+1. **The A1 fix for issue #117**: a small CI repair. A1 checks nothing while its CI failure is listed
+   in `gate.known_red`, so it comes first. See decision D5.
+2. **Look at migrating the UI toolkit to Protolith**, before the work below gets far. Protolith is a
    pixel, window and input library over the X11 wire protocol and the Linux framebuffer, `std` only
    and without `unsafe`; Stele's own X11 and framebuffer backends (`src/backend/`) do that work today.
    See decision D1.
-1. **A7 attestation ceremony** (`cargo vendor` + `cargo-auditable` + `cargo-audit`), building on the
+3. **A7 attestation ceremony** (`cargo vendor` + `cargo-auditable` + `cargo-audit`), building on the
    audit-tool bootstrap.
-2. **Cookie-jar file persistence** (charter C6): the jar exists and is wired into HTTP; it is not
+4. **Cookie-jar file persistence** (charter C6): the jar exists and is wired into HTTP; it is not
    saved across invocations.
-3. **Rendering fidelity nits**: `&nbsp;` as a non-collapsing space; CMYK and 16-bit JPEG; APNG.
-4. **Charter M6, Transcript + Provenance** (charter C7).
+5. **Rendering fidelity nits**: `&nbsp;` as a non-collapsing space; CMYK and 16-bit JPEG; APNG.
+6. **Charter M6, Transcript + Provenance** (charter C7).
 
 **Later, not planned**: the Lua chair (C5), the Transcript pane, the no-libc spike, the K1 iron run on
 real 486 hardware.
@@ -128,6 +130,13 @@ headings:
   and CI's `build` job stays the evidence that it passes; a node that makes the chrome screenshot
   independent of the checkout path removes it from the list. Alternative: plan that node first.
 
+- **D5. A1 on Ubuntu 26.04 runners (issue #117).** A1 fails in CI's `accept` job since
+  `ubuntu-latest` became Ubuntu 26.04: its `file` prints "Intel i386" for the binary, and `accept.sh`
+  greps for "Intel 80386". The binary is fine: A4 passes under `qemu-i386 -cpu 486` in the same job.
+  A1's line is listed in `gate.known_red` until the node for issue #117 fixes A1 and removes the
+  entry. While it is listed, A1 checks nothing (a dynamically linked binary prints the same line),
+  which is why that node comes first.
+
 ## 7. Conventions
 
 - Branches: `node/<ID>-<name>` for a node, `spec/<topic>` for a spec change. Work outside the graph
@@ -136,5 +145,5 @@ headings:
   charter's C2 record, and a decision for `DECISIONS.md`, land in the spec PR that plans the node.
 - Sizes: S under a day, M two or three days, L more.
 - A node is done when its Gate's criteria pass, the gate passes in CI on its PR together with the
-  i486 build and the `accept` job, its PR reports the `stele-i486` size and delta, and the spec
-  checkers print `PROBLEMS 0`.
+  i486 build and the `accept` job (a failure line listed in `gate.known_red` aside), its PR reports
+  the `stele-i486` size and delta, and the spec checkers print `PROBLEMS 0`.
