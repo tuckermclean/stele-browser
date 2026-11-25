@@ -41,8 +41,8 @@ Every node keeps these. They are AGENTS.md's non-negotiables, with the charter's
 **Done** (everything on the default branch). REPORT.md's status: M0–M5, the hardening core, the X11
 backend, Acid2 "composes" (not byte-exact). Since REPORT.md was written: the A5z speed gate, the A2
 floppy warning (A2 warns over the floppy and fails over 2,000,000 bytes), client-side image maps
-(charter K2) and the bootstrap of the A7 audit tools from `ci/`. REPORT.md is a dated release summary
-and is behind on these.
+(charter K2) and the bootstrap of the A6 audit tools from `ci/`. REPORT.md is a dated release summary
+and is behind on these (it also calls the A6 ceremony A7).
 
 **Planned**, in this order (each becomes a node once an issue asks for it):
 
@@ -52,7 +52,7 @@ and is behind on these.
    pixel, window and input library over the X11 wire protocol and the Linux framebuffer, `std` only
    and without `unsafe`; Stele's own X11 and framebuffer backends (`src/backend/`) do that work today.
    See decision D1.
-3. **A7 attestation ceremony** (`cargo vendor` + `cargo-auditable` + `cargo-audit`), building on the
+3. **A6 attestation ceremony** (`cargo vendor` + `cargo-auditable` + `cargo-audit`), building on the
    audit-tool bootstrap.
 4. **Cookie-jar file persistence** (charter C6): the jar exists and is wired into HTTP; it is not
    saved across invocations.
