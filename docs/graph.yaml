@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: build, globs: [".cargo/", ".github/", "ci/", "targets/", "accept.sh", "rust-toolchain.toml", "Cargo.toml", "Cargo.lock", ".gitignore", "tools/render-gallery.sh"]}
     - {name: dom, globs: ["src/dom/", "src/dom_util.rs"]}
     - {name: style, globs: ["src/style/", "src/stylesheets.rs"]}
     - {name: text, globs: ["src/text/", "third_party/", "tools/gen-terminus-glyphs.py"]}
@@ -29,4 +28,25 @@ adoption:
     - {name: render, globs: ["src/backend/", "src/surface/"]}
     - {name: shell, globs: ["src/main.rs", "src/lib.rs", "src/browser.rs", "src/form.rs", "src/frames.rs"]}
     - {name: goldens, globs: ["tests/", "fixtures/", "goldens/"]}
-nodes: []
+nodes:
+  - id: B01
+    name: crate-and-toolchain
+    deps: []
+    track: done
+    status: imported
+    owns: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/", "targets/", ".gitignore"]
+    summary: "The crate manifest (library and binary stele, five priced dependencies, size-first release profile), its lockfile, the pinned nightly, the cargo config (i486 linker, 16 MiB test-thread stack), the custom i486 musl target and the ignore list."
+  - id: B02
+    name: acceptance-script
+    deps: [B01]
+    track: done
+    status: imported
+    owns: ["accept.sh", "ci/"]
+    summary: "accept.sh, the definition of done: A1, A2, A4, A5z and A6a on the i486 binary, the host golden, contrast and speed checks (--tty-only), the A6 covenant grep, --bless, and the audit-tool bootstrap ci/ensure-audit-tools.sh."
+  - id: B03
+    name: ci-workflows
+    deps: [B01, B02]
+    track: done
+    status: imported
+    owns: [".github/", "tools/render-gallery.sh"]
+    summary: "The build-substrate and m0-acceptance workflows (host checks and unit tests, the i486 build, accept.sh under qemu, the non-gating X11 smoke) and the best-effort render gallery."
