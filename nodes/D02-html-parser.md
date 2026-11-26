@@ -17,8 +17,9 @@ file refuses to build.
   node is attached to its parent when it is created, so closing an element only pops the stack.
 - **The root.** The tree starts with D01's `html` root. A literal `<html ...>` start tag, while nothing else
   is open, gives its attributes to that root instead of nesting a second `html` element.
-- **Start tags.** Tag names are runs of ASCII letters, digits, `-`, `_` and `:`, compared in lowercase. `<`
-  followed by anything but a letter, `/` or `!` is literal text.
+- **Start tags.** Tag names are runs of ASCII letters, digits, `-`, `_` and `:`, folded to lowercase in start
+  and end tags alike, so every rule below applies whatever case the page writes. `<` followed by anything but a
+  letter, `/` or `!` is literal text.
 - **Implied close.** A new `p` closes an open `p`, `li` an `li`, `dt`/`dd` a `dt`/`dd`, `tr` a `tr`, `td`/`th`
   a `td`/`th`, `option` an `option`, scanning up the stack and stopping at a scope element: for `p`, `div`,
   `table`, `td`, `th`, `body`, `html`, `ul`, `ol`, `dl`, `blockquote` or `form`; for `li`, `ul` or `ol`; for
@@ -29,11 +30,13 @@ file refuses to build.
   which tolerates `<b><i>x</b>y</i>` without losing text. An end tag with no open match is ignored, and the
   root is never popped. At end of input everything still open stays where it is, and pending text is kept.
 - **Void elements.** `br`, `hr`, `img`, `meta`, `link`, `input`, `area`, `base`, `col`, `wbr`, `embed` and
-  `frame` are leaves. A trailing `/>` on any other element is ignored: the element opens as usual.
-- **Raw text.** `script` is discarded with its contents: no node is built, but its raw text is consumed so
-  markup-looking characters inside cannot confuse what follows (charter C3). `style` keeps one `Text` child
-  of raw CSS, not entity-decoded, which the style layer reads. `textarea` and `title` keep one `Text` child,
-  entity-decoded (RCDATA). Raw text runs to the matching end tag, case-insensitively, or to end of input.
+  `frame` are leaves. A trailing `/>` on any other element is ignored and the element opens as usual, except on
+  `script`: `<script .../>` is discarded with nothing consumed after it.
+- **Raw text.** `script` is discarded with its contents: no node is built, but its raw text is consumed,
+  unless its start tag ends in `/>`, so markup-looking characters inside cannot confuse what follows (charter
+  C3). `style` keeps its raw CSS, not entity-decoded, as one `Text` child, which the style layer reads.
+  `textarea` and `title` keep theirs as one `Text` child, entity-decoded (RCDATA). An empty one of the three
+  gets no child at all. Raw text runs to the matching end tag, case-insensitively, or to end of input.
   `noscript` is an ordinary element whose content is parsed and rendered (the JS treaty).
 - **Comments and doctype.** `<!-- ... -->` and any other `<! ... >` are dropped; an unterminated one runs to
   end of input.
@@ -61,18 +64,18 @@ none: imported
 
 - **D02-AC-1** — Start and end tags nest elements as written: `<html><body><div><p>hello <b>world</b></p></div></body></html>` builds `body > div > p > b`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::well_formed_nesting -- --test-threads=2` exits 0.
 - **D02-AC-2** — An end tag closes the nearest open element of its name (in `fixtures/basic.html`, `</h1>` closes the `h1`, so the `h2` is its sibling). *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::fixture_basic_html_structure -- --test-threads=2` exits 0.
-- **D02-AC-3** — A mis-nested end tag (`<p><b>bold <i>both</b> only-i</i> tail</p>`) closes its element and those above it, and no more: all of the text stays inside the `p`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::b_i_misnesting_keeps_all_text -- --test-threads=2` exits 0.
+- **D02-AC-3** — A mis-nested end tag (`<p><b>bold <i>both</b> only-i</i> tail</p>`) closes nothing below its match: all of the text stays inside the `p`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::b_i_misnesting_keeps_all_text -- --test-threads=2` exits 0.
 - **D02-AC-4** — Elements still open at end of input stay in the tree, and the text pending at end of input is kept. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::unclosed_everything_at_eof -- --test-threads=2` exits 0.
 - **D02-AC-5** — Nesting depth is not capped: 5,000 nested `div`s parse to a tree 5,000 levels deep, and 5,000 unclosed ones do not panic. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::parse_is_total_on_5000 -- --test-threads=2` exits 0.
 - **D02-AC-6** — `parse` returns without panicking on empty, truncated and hostile input (unterminated tags, attributes, comments and references, stray `<` and `&`, NUL bytes, repeated `</html>`). *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::does_not_panic_on_hostile_or_truncated_input -- --test-threads=2` exits 0.
 - **D02-AC-7** — A new `p` closes an open `p`, a new `li` an `li`, a `dt` or `dd` an open `dt`/`dd`, a `tr` a `tr`, a `td` a `td`, and an `option` an `option`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::implied_close -- --test-threads=2` exits 0.
 - **D02-AC-8** — Implied close stops at the list: an `li` of a nested list does not close the outer list's `li`. *Verify:* `cargo test --locked --jobs 2 --test lists_golden -- --test-threads=2` exits 0.
 - **D02-AC-9** — Implied close stops at the table: a `td` of a nested table does not close the outer table's cell. *Verify:* `cargo test --locked --jobs 2 --lib -- --test-threads=2 layout::box_tree::tests::table_border_nested_table_border_zero_does_not_inherit_outer_cells layout::box_tree::tests::table_cellpadding_nested_table_padding_is_independent` exits 0.
-- **D02-AC-10** — Tag names are matched in lowercase, whatever case the page writes them in. *Verify:* `cargo test --locked --jobs 2 --test css1_float_golden -- --test-threads=2` exits 0.
+- **D02-AC-10** — A start tag and its end tag match whatever case each is written in (`<A HREF=...>` … `</A>` in `fixtures/css1-float-5526c.html`). *Verify:* `cargo test --locked --jobs 2 --test css1_float_golden -- --test-threads=2` exits 0.
 - **D02-AC-11** — `br` and `hr` are void: they get no children and the text after them stays in their parent. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::void_elements_have_no_children_and_no_end_tag_needed -- --test-threads=2` exits 0.
 - **D02-AC-12** — `frame` is void: two `<frame>` tags without end tags are siblings under the `frameset`, each keeping its `src`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::frame_is_void_like_real_1996_framesets_write_it -- --test-threads=2` exits 0.
 - **D02-AC-13** — `img` is void: in `fixtures/soup.html` it has no children. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::fixture_soup_html_structure -- --test-threads=2` exits 0.
-- **D02-AC-14** — A trailing `/>` on a non-void element is ignored: `<div/>x</div>` puts `x` inside the `div`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::self_closing_slash_on_non_void_element_opens_normally -- --test-threads=2` exits 0.
+- **D02-AC-14** — A trailing `/>` on a non-void element other than `script` is ignored: `<div/>x</div>` puts `x` inside the `div`. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::self_closing_slash_on_non_void_element_opens_normally -- --test-threads=2` exits 0.
 - **D02-AC-15** — No `script` element is ever built, and the elements after a `script` are parsed as usual. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::script_is_fully_discarded -- --test-threads=2` exits 0.
 - **D02-AC-16** — `style` is kept as an element whose one `Text` child is its raw content: markup inside it is not parsed. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::style_is_kept_with_raw_text -- --test-threads=2` exits 0.
 - **D02-AC-17** — `noscript` is an ordinary element: its children are parsed and kept. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::noscript_is_first_class -- --test-threads=2` exits 0.
@@ -85,19 +88,30 @@ none: imported
 - **D02-AC-24** — A surrogate (`&#xD800;`) or a value past Unicode (`&#99999999;`) decodes to U+FFFD. *Verify:* `cargo test --locked --jobs 2 --lib dom::parser::tests::numeric_entity_surrogate_and_out_of_range_map_to_replacement_char -- --test-threads=2` exits 0.
 - **D02-AC-25** — A reference that is not recognised stays literal, its `&` included. *Verify:* `cargo test --locked --jobs 2 --test entities_golden -- --test-threads=2` exits 0.
 - **D02-AC-26** — A literal `<html>` start tag, while nothing else is open, folds into the root: no second `html` element is built. *Verify:* `CARGO_BUILD_JOBS=2 ./accept.sh --tty-only` prints `PASS A5w` (Acid2 composes at the window top).
-- **D02-AC-27** — A `script`'s content is consumed as raw text up to its `</script>`, so markup inside it builds no node and its text is not kept. *Verify:* unpinned (no test fails when the content is parsed as markup instead).
+- **D02-AC-27** — Unless its start tag ends in `/>`, a `script`'s content is consumed as raw text up to its `</script>`, so markup inside it builds no node and its text is not kept. *Verify:* unpinned (no test fails when the content is parsed as markup instead).
 - **D02-AC-28** — `style` content is not entity-decoded. *Verify:* unpinned.
-- **D02-AC-29** — `textarea` and `title` keep one `Text` child of raw text, entity-decoded: markup inside them is not parsed. *Verify:* unpinned.
+- **D02-AC-29** — `textarea` and `title` keep their raw text, entity-decoded, as one `Text` child (none when they are empty): markup inside them is not parsed. *Verify:* unpinned.
 - **D02-AC-30** — A `<` that is not followed by a letter, `/` or `!` is literal text. *Verify:* unpinned.
 - **D02-AC-31** — Implied close of a `p` stops at `div`, `table`, `td`, `th`, `ul`, `ol`, `dl`, `blockquote` or `form`, and a `th` closes an open `td`/`th` as a `td` does. *Verify:* unpinned.
-- **D02-AC-32** — An end tag with no open element of its name is ignored, and `</html>` never pops the root. *Verify:* unpinned.
-- **D02-AC-33** — The attributes of that `<html ...>` start tag are set on the root element. *Verify:* unpinned.
+- **D02-AC-32** — An end tag with no open element of its name is ignored, and `</html>` never pops the root. *Verify:* `cargo test --locked --jobs 2 --lib -- --test-threads=2 dom::parser::tests::b_i_misnesting_keeps_all_text dom::parser::tests::fixture_basic_html_structure` exits 0.
+- **D02-AC-33** — The attributes of that `<html ...>` start tag are set on the root element. *Verify:* `cargo test --locked --jobs 2 --lib -- --test-threads=2 style::parser::tests::attribute_equals_selector_matches_the_stamped_root_html_element style::cascade::tests::attribute_scoped_custom_property_override_gates_on_the_attribute` exits 0.
+- **D02-AC-34** — The void, raw-text, script-discard and implied-close rules apply whatever case the tag is written in (`<BR>`, `<SCRIPT>`, `<P>`). *Verify:* unpinned.
+- **D02-AC-35** — An end tag also closes every element still open above its match. *Verify:* `CARGO_BUILD_JOBS=2 ./accept.sh --tty-only` prints `PASS A3r`, `PASS A3s` and `PASS A5w`.
+- **D02-AC-36** — `<script .../>` builds no node and consumes no content: the text after it up to `</script>` is kept as ordinary text, and that `</script>` is ignored as a stray end tag. *Verify:* unpinned.
+- **D02-AC-37** — A tag truncated by the end of input keeps the attributes read so far. *Verify:* unpinned.
+- **D02-AC-38** — An unterminated comment or `<!` marker runs to the end of input: nothing after it is parsed. *Verify:* unpinned.
+- **D02-AC-39** — Raw text ends at its end tag whatever case that is written in (`</STYLE>`, `</TITLE>`, `</SCRIPT>`). *Verify:* unpinned.
+- **D02-AC-40** — A character reference without its `;` (`&copy 2026`, `&#169 2026`) is never decoded: it stays literal. *Verify:* unpinned.
+- **D02-AC-41** — `&apos;` decodes to `'`: `apos` is in the named-reference table. *Verify:* unpinned.
 
 ## Risks
 
 - The parse holds the whole input as a `Vec<char>` (4 bytes a character) next to the input string, and an
   attribute value or raw-text run is collected into a new `String`. A large page costs several times its
   size in memory on a 486.
+- A page that writes `<script src=... />` followed by inline code renders that code as text: the `/>` makes the
+  parser consume nothing, and the `</script>` after the code is dropped as a stray end tag. No node is built,
+  so the covenant holds.
 - A `script` with no end tag swallows the rest of the document, which then renders as nothing; the same
   holds for an unterminated `style`, `textarea`, `title` or comment. This is the tolerant reading, not a bug,
   but a page can lose its body to it.
