@@ -1,0 +1,22 @@
+# Role guard paths for this repository (root-relative globs). A key here replaces that
+# key's default, so each list repeats the defaults and adds this repository's own paths.
+tests:
+  - "**/*.test.sh"
+  - "**/*_test.*"
+  - "**/test_*"
+  - "**/tests/**"
+  - "**/testdata/**"
+  - "**/fixtures/**"
+  - "goldens/**"            # byte-compared reference renders: expected output, test data
+  - "src/**/*_tests.rs"     # sibling test files wired into a module (#[path] / mod)
+specs:
+  - "SPEC.md"
+  - "AGENTS.md"
+  - "CLAUDE.md"
+  - "docs/graph.yaml"
+  - "nodes/**"
+  - "stele-charter.md"
+  - "stele-build-brief.md"
+  - "DECISIONS.md"
+  - "README.md"
+  - "REPORT.md"

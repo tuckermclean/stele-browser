@@ -179,3 +179,75 @@ This file rots the moment it lies. Rules to keep it honest:
 - **If you learned something the hard way to be productive here, it belongs in this
   file.** AGENTS.md is the distilled answer to "what do I wish I'd known before touching
   this repo." Grow it deliberately; prune it when it's wrong.
+
+---
+
+## Building a node
+
+The graph regime: `SPEC.md`, `docs/graph.yaml` and the node specs in `nodes/` plan the work; a node is
+built test-first by role agents. The non-negotiables above hold for every node (rule 6 as `SPEC.md`
+principle 6 words it: the amendment lands in the spec PR that plans the node). Where this section and
+the packet sections above differ, this section governs node work; the packet sections govern work
+outside the graph.
+
+- **Building.** Build a node with `/noodlebot:node <ID>`, on a branch `node/<ID>-<name>` off
+  `origin/main`. A spec change goes on `spec/<topic>`.
+- **Authority order.** `SPEC.md`, then `docs/graph.yaml`, then the node spec `nodes/<ID>-<name>.md`,
+  then this file. When two disagree, the earlier one wins and the later one is fixed by a spec PR. The
+  charter (`stele-charter.md`) stays the constitution that `SPEC.md` points to.
+- **Roles.** The plugin's tester writes the failing tests, the implementer makes them pass, the
+  reviewer judges the result. This repository has no role agents of its own. The role guard reads
+  `.noodlebot/roles.yaml`: it adds `goldens/**` and `src/**/*_tests.rs` to the default test paths, and
+  this section's spec files to the spec paths.
+- **Spec checkers.** `python3 -I <plugin dir>/skills/node/check-regime.py` and
+  `python3 -I <plugin dir>/skills/node/check-coverage.py`, from the repository root, must print
+  `PROBLEMS 0` before a spec PR is opened.
+- **Gate command.** The whole suite, as CI's `build` job runs it, and it runs in CI on the PR
+  (`.github/workflows/m0-acceptance.yml`):
+  `./accept.sh --tty-only; a=$?; cargo test --workspace --locked; t=$?; [ $a -eq 0 ] && [ $t -eq 0 ]`.
+  Its failure lines are `FAIL A<n>...` (accept.sh) and `test <path> ... FAILED` (libtest), which the
+  graph's `gate.fail_pattern` matches. A summary line such as `test result: FAILED. ...` names no test
+  and is not matched.
+- **CI's output.** accept.sh colours its `PASS`/`FAIL`/`WARN` words with ANSI escape codes, and every
+  line of a fetched GitHub Actions job log starts with a timestamp. `fail_pattern` matches a line once
+  the colour codes (`\x1b\[[0-9;]*m`) and the timestamp prefix (`^\S+Z `) are stripped. Run the gate
+  locally with `CI=true` and the agent session's variables (for example `CLAUDECODE`, `AI_AGENT`) unset.
+- **Quick gate.** In a session, instead of the whole gate, run the gate's own runner on the red targets
+  and on what the change touches: `cargo test --locked --jobs 2 --test <stem> ... -- --test-threads=2`
+  for each touched `tests/<stem>.rs`; `cargo test --locked --jobs 2 --lib <module::path> --
+  --test-threads=2` for a touched module under `src/` (`--bin stele <filter>` for `src/main.rs`); and
+  `CARGO_BUILD_JOBS=2 ./accept.sh --tty-only` when a render path, a fixture or a golden is touched.
+  A `--lib` filter that matches no test runs nothing (`src/fetch/url.rs`, say, is tested in
+  `tests/fetch_url.rs`), so check the `test result` line counts what you meant. It prints the same
+  `test <path> ... FAILED` and `FAIL A<n>...` lines. The quick gate builds for the host only; the i486
+  build stays in CI (non-negotiable 3).
+- **Bounded workers.** `cargo test` takes `--jobs 2` (build jobs) and `-- --test-threads=2` (test
+  threads); keep both on a local run. accept.sh's own `cargo build --release` takes
+  `CARGO_BUILD_JOBS=2` in the environment.
+- **Known red.** The graph's `gate.known_red` lists the tests that fail today, by the name their
+  failure line prints. A failing test that is not listed is a failure of the change. A listed failure
+  stays until a node fixes it, and that node removes it from the list. Why each entry is listed is in
+  the graph's comments and `SPEC.md`'s open decisions.
+- **Owns.** A node changes only the files it owns (its `owns` globs) and its direct deps' files, and
+  places every file it adds where the graph's globs cover it. A node that adds a test or fixture under
+  `tests/`, `fixtures/` or `goldens/` depends on the node that owns them.
+- **Red target.** A command that exits non-zero before the node's change and 0 after, normally
+  `cargo test --locked --jobs 2 --test <stem> -- --test-threads=2` for the node's own test file, or
+  `CARGO_BUILD_JOBS=2 ./accept.sh --tty-only` for a new or changed golden.
+- **Tests and fixtures.** New tests go in `tests/<topic>.rs` against the library's public API (every
+  module but `dom_util` is `pub`), or through the binary (`CARGO_BIN_EXE_stele`, as
+  `tests/stats_cli.rs` does); shared helpers are in `tests/support/`. Fixtures are in `fixtures/`
+  (HTML and images), goldens in `goldens/` (`.txt` and `.png`, byte-compared). Existing inline
+  `#[cfg(test)]` modules inside `src/` stay where they are: an implementer never edits a
+  `#[cfg(test)]` block, and the reviewer checks that. `src/**/*_tests.rs` files are tests. A golden is
+  blessed only after its render is measured and verified (non-negotiable 4).
+- **Spec files:** `SPEC.md`, `docs/graph.yaml`, `nodes/`, `stele-charter.md`, `stele-build-brief.md`, `DECISIONS.md`, `README.md`, `REPORT.md`, `CLAUDE.md` (a trailing slash marks a folder); a spec PR changes only these.
+- **Dialect and decisions.** A node that makes Stele speak something new needs its C2 amendment (with
+  the size price) in the charter first: it lands in the spec PR that plans the node. A decision for
+  `DECISIONS.md` is recorded in a spec PR too. `JOURNAL.md` is frozen history; the merged node PRs and
+  the graph are the log.
+- **Porting rules.** None.
+- **CI evidence.** In the node's PR, record from the `m0-acceptance` run on the PR's head commit: the
+  gate's result (the `build` job's A3 and unit-test steps), the `accept` job's result (A1, A2, A4,
+  A5z, A6a), the `stele-i486` size from the A2 line and its delta from `main`'s, and the red target's
+  output before and after. A changed golden also records how its render was measured.

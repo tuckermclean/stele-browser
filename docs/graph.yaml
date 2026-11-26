@@ -1,0 +1,32 @@
+template: {headings: [Purpose, Tests, Changes, Gate, Risks]}
+gate:
+  # What CI's `build` job runs: the A3 host tty goldens, then the whole host test suite.
+  # The i486 build and the `accept` job (A1, A2, A4, A5z, A6a) are CI evidence on each PR.
+  command: "./accept.sh --tty-only; a=$?; cargo test --workspace --locked; t=$?; [ $a -eq 0 ] && [ $t -eq 0 ]"
+  # Matched after stripping ANSI colour codes (\x1b\[[0-9;]*m) and a fetched CI log's
+  # timestamp prefix (^\S+Z ). accept.sh prints `FAIL A<n>...`; libtest `test <path> ... FAILED`.
+  fail_pattern: '^(FAIL A[0-9].*|test \S+ \.\.\. FAILED)$'
+  # A5u fails at any checkout path but CI's: --chrome shows the fixture's file://<cwd>/... URL in the
+  # address bar, and goldens/chrome-basic.png holds CI's container path. It passes in CI (SPEC.md D4).
+  known_red:
+    - "A5u: chrome screenshot of fixtures/basic.html differs from goldens/chrome-basic.png"
+    # A1 fails in CI's `accept` job since ubuntu-latest became Ubuntu 26.04: its `file` prints
+    # "Intel i386" and accept.sh greps "Intel 80386" (issue #117; SPEC.md D5). The node for #117 removes it.
+    - "A1: expected 32-bit Intel 80386, statically linked"
+out_of_scope:
+  - {glob: "docs/superpowers/", reason: "design and plan docs of merged packets, kept as history; cited by doc-comments, never changed by a node"}
+  - {glob: "JOURNAL.md", reason: "frozen append-only log; from now on the merged node PRs and the graph are the log"}
+  - {glob: "LICENSE", reason: "the project's license text, not code"}
+adoption:
+  areas:
+    - {name: build, globs: [".cargo/", ".github/", "ci/", "targets/", "accept.sh", "rust-toolchain.toml", "Cargo.toml", "Cargo.lock", ".gitignore", "tools/render-gallery.sh"]}
+    - {name: dom, globs: ["src/dom/", "src/dom_util.rs"]}
+    - {name: style, globs: ["src/style/", "src/stylesheets.rs"]}
+    - {name: text, globs: ["src/text/", "third_party/", "tools/gen-terminus-glyphs.py"]}
+    - {name: images, globs: ["src/img/", "src/images.rs", "src/bg_images.rs"]}
+    - {name: layout, globs: ["src/layout/"]}
+    - {name: fetch, globs: ["src/fetch/", "assets/", "tools/gen-attestations.py"]}
+    - {name: render, globs: ["src/backend/", "src/surface/"]}
+    - {name: shell, globs: ["src/main.rs", "src/lib.rs", "src/browser.rs", "src/form.rs", "src/frames.rs"]}
+    - {name: goldens, globs: ["tests/", "fixtures/", "goldens/"]}
+nodes: []
