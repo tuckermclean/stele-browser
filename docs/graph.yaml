@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: dom, globs: ["src/dom/", "src/dom_util.rs"]}
     - {name: style, globs: ["src/style/", "src/stylesheets.rs"]}
     - {name: text, globs: ["src/text/", "third_party/", "tools/gen-terminus-glyphs.py"]}
     - {name: images, globs: ["src/img/", "src/images.rs", "src/bg_images.rs"]}
@@ -50,3 +49,24 @@ nodes:
     status: imported
     owns: [".github/", "tools/render-gallery.sh"]
     summary: "The build-substrate and m0-acceptance workflows (host checks and unit tests, the i486 build, accept.sh under qemu, the non-gating X11 smoke) and the best-effort render gallery."
+  - id: D01
+    name: dom-tree
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/dom/mod.rs", "src/dom/ast.rs"]
+    summary: "The closed, arena-allocated document tree: Node is only Element or Text (the covenant, grepped by A6), Dom's arena under an html root, ElementName folded to lowercase, AttrMap with first-value-wins set and set_overwrite, Dom::set_attribute, and the dom module's re-exports."
+  - id: D02
+    name: html-parser
+    deps: [D01]
+    track: done
+    status: imported
+    owns: ["src/dom/parser.rs"]
+    summary: "dom::parser::parse, the total, frozen-dialect tag-soup parser: explicit open-element stack, implied close, tolerant end tags, void elements, script discarded with its contents, style/textarea/title raw text, noscript first-class, comments dropped, attributes, and HTML 4.01 character references."
+  - id: D03
+    name: dom-util
+    deps: [D01]
+    track: done
+    status: imported
+    owns: ["src/dom_util.rs"]
+    summary: "The crate-private DOM-walk helpers of forms and form-control rendering: DEPTH_CAP, is_checked, is_disabled, node_checked, collect_options and collect_text."
