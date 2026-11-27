@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: style, globs: ["src/style/", "src/stylesheets.rs"]}
     - {name: text, globs: ["src/text/", "third_party/", "tools/gen-terminus-glyphs.py"]}
     - {name: images, globs: ["src/img/", "src/images.rs", "src/bg_images.rs"]}
     - {name: layout, globs: ["src/layout/"]}
@@ -70,3 +69,59 @@ nodes:
     status: imported
     owns: ["src/dom_util.rs"]
     summary: "The crate-private DOM-walk helpers of forms and form-control rendering: DEPTH_CAP, is_checked, is_disabled, node_checked, collect_options and collect_text."
+  - id: S01
+    name: css-tokenizer
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/style/tokenizer.rs"]
+    summary: "The total CSS tokenizer: identifiers (custom-property names included), functions, at-keywords, hashes, strings, numbers, dimensions whose unit keeps its case, percentages, punctuation and kept whitespace; comments dropped."
+  - id: S02
+    name: computed-style
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/style/computed.rs"]
+    summary: "ComputedStyle, the frozen contract between style and layout: the curated computed properties, their enums and CSS initial values (border spacing 8px by 0 is Stele's own), ZIndex::layer and Content::generates_box."
+  - id: S03
+    name: contrast-repair
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/style/contrast.rs"]
+    summary: "The run-level contrast covenant: WCAG relative luminance and contrast ratio, the 3:1 CONTRAST_MIN floor, and repair_fg, which keeps a readable foreground and otherwise picks black or white."
+  - id: S04
+    name: css-values
+    deps: [D01, S01, S02]
+    track: done
+    status: imported
+    owns: ["src/style/value.rs"]
+    summary: "The curated property and value layer: Declarations and overlay, apply_property for every curated property (colours, lengths, shorthands, borders, backgrounds and data: URLs, gradients as their first stop, fonts, flex, grid), var() substitution with fallbacks and cycle and depth limits, and the vintage HTML presentational hints."
+  - id: S05
+    name: css-parser
+    deps: [D01, S01, S04]
+    track: done
+    status: imported
+    owns: ["src/style/parser.rs", "src/style/selector.rs", "src/style/media.rs"]
+    summary: "The total stylesheet parser with its recovery and counters, inline style, the curated selectors (descendant chains of element, *, id, class, exact attribute, :link, :visited, :root, ::before/::after) and their specificity, and @media queries (width features, prefers-color-scheme, fail-closed) with flatten_media and ColorScheme."
+  - id: S06
+    name: cascade
+    deps: [D01, S02, S04, S05]
+    track: done
+    status: imported
+    owns: ["src/style/cascade.rs", "src/style/ua.rs"]
+    summary: "The cascade: UA sheet, presentational hints, author sheets and inline style folded by tier, specificity, sheet and source order with an explicit stack at any depth; custom-property environments and deferred var(); inheritance and unit resolution into ComputedStyle; ::before/::after styles; and the built-in UA stylesheet."
+  - id: S07
+    name: author-sheets
+    deps: [D01, S01, S02, S03, S04, S05, S06]
+    track: done
+    status: imported
+    owns: ["src/style/mod.rs", "src/style/author.rs"]
+    summary: "The style module root and its re-exports, and the <style> collectors: collect_author_sheets in document order, the viewport-flattened variant, parse_and_flatten and media_attr_matches."
+  - id: S08
+    name: link-stylesheets
+    deps: [D01, S05, S07]
+    track: done
+    status: imported
+    owns: ["src/stylesheets.rs"]
+    summary: "The driver-level pre-pass collecting <style> and fetched <link rel=stylesheet> sheets in document order: rel and media gates, href resolution against the base URL, skip on any fetch failure or non-CSS Content-Type, and the MAX_LINKS cap of 32 fetches."
