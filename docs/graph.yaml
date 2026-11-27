@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: text, globs: ["src/text/", "third_party/", "tools/gen-terminus-glyphs.py"]}
     - {name: images, globs: ["src/img/", "src/images.rs", "src/bg_images.rs"]}
     - {name: layout, globs: ["src/layout/"]}
     - {name: fetch, globs: ["src/fetch/", "assets/", "tools/gen-attestations.py"]}
@@ -125,3 +124,24 @@ nodes:
     status: imported
     owns: ["src/stylesheets.rs"]
     summary: "The driver-level pre-pass collecting <style> and fetched <link rel=stylesheet> sheets in document order: rel and media gates, href resolution against the base URL, skip on any fetch failure or non-CSS Content-Type, and the MAX_LINKS cap of 32 fetches."
+  - id: T01
+    name: terminus-glyphs
+    deps: [S02]
+    track: done
+    status: imported
+    owns: ["src/text/terminus_glyphs.rs", "src/text/terminus_glyphs_tests.rs", "tools/gen-terminus-glyphs.py", "third_party/"]
+    summary: "The embedded font: the generated 191-glyph Terminus 4.49.1 subset (ASCII and Latin-1, 12/16/20/24/32px, normal and bold) with lookup and its hollow-box fallback, the BDF generator, the hand-checked table tests, and the OFL-1.1 license and attribution."
+  - id: T02
+    name: transliteration
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/text/translit.rs"]
+    summary: "resolve, the shared tty/pixel text seam: keep a char the embedded font covers, else its ASCII transliteration (dashes, curly quotes, ellipsis, bullet, arrow, NBSP, multiplication sign), else drop it and count it in the thread-local missing-glyph counter --stats reports."
+  - id: T03
+    name: text-metrics
+    deps: [S02, T01, T02]
+    track: done
+    status: imported
+    owns: ["src/text/mod.rs", "src/text/terminus.rs"]
+    summary: "The text module root, the Metrics trait, TerminusFont's pinned per-bucket ascent, descent, line height and monospace advance, glyph widening with the bucket's ascent, and the nearest-of-five size snap (nearest_terminus_size, text_render_px)."

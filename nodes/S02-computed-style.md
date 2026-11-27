@@ -2,7 +2,7 @@
 
 | Track | Deps | Unlocks | Size |
 |---|---|---|---|
-| done | none | S04, S06, S07 | S |
+| done | none | S04, S06, S07, T01, T03 | S |
 
 **Owns:** `src/style/computed.rs`
 
