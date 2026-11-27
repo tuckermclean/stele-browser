@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: images, globs: ["src/img/", "src/images.rs", "src/bg_images.rs"]}
     - {name: layout, globs: ["src/layout/"]}
     - {name: fetch, globs: ["src/fetch/", "assets/", "tools/gen-attestations.py"]}
     - {name: render, globs: ["src/backend/", "src/surface/"]}
@@ -145,3 +144,24 @@ nodes:
     status: imported
     owns: ["src/text/mod.rs", "src/text/terminus.rs"]
     summary: "The text module root, the Metrics trait, TerminusFont's pinned per-bucket ascent, descent, line height and monospace advance, glyph widening with the bucket's ascent, and the nearest-of-five size snap (nearest_terminus_size, text_render_px)."
+  - id: I01
+    name: image-decoders
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/img/"]
+    summary: "The pure decoding layer: RgbaImage, Frame, the Decode trait and DecodeError, the shared 64M-pixel cap, magic-number sniffing and decode_bytes with its Content-Type hint and sniff fallback, the compositing animated GIF decoder, the baseline and progressive JPEG decoder (CMYK and 16-bit refused) and the normalising PNG decoder (APNG ignored)."
+  - id: I02
+    name: img-prepass
+    deps: [D01, I01]
+    track: done
+    status: imported
+    owns: ["src/images.rs"]
+    summary: "collect_images, the pixel-path pre-pass that resolves, fetches and decodes every <img src> and <object data> to its first frame keyed by NodeId, deduped by resolved URL, bounded by MAX_IMAGES (256), MAX_TOTAL_IMAGE_BYTES (256 MiB) and a walk depth of 100; a failed load is left out."
+  - id: I03
+    name: bg-image-prepass
+    deps: [S02, I01, I02]
+    track: done
+    status: imported
+    owns: ["src/bg_images.rs"]
+    summary: "collect_bg_images, the pixel-path pre-pass that loads every distinct CSS background_image of the cascaded styles to its first frame, keyed by the raw string and deduped by resolved URL, bounded by MAX_BG_IMAGES (32) and I02's byte budget; a failed load is left out."
