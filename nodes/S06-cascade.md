@@ -2,7 +2,7 @@
 
 | Track | Deps | Unlocks | Size |
 |---|---|---|---|
-| done | D01, S02, S04, S05 | S07 | L |
+| done | D01, S02, S04, S05 | L05, S07 | L |
 
 **Owns:** `src/style/cascade.rs`, `src/style/ua.rs`
 

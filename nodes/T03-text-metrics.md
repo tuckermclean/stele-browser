@@ -2,7 +2,7 @@
 
 | Track | Deps | Unlocks | Size |
 |---|---|---|---|
-| done | S02, T01, T02 | none | S |
+| done | S02, T01, T02 | L01, L02, L04 | S |
 
 **Owns:** `src/text/mod.rs`, `src/text/terminus.rs`
 

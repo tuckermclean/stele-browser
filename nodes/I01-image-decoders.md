@@ -2,7 +2,7 @@
 
 | Track | Deps | Unlocks | Size |
 |---|---|---|---|
-| done | none | I02, I03 | M |
+| done | none | I02, I03, L01, L02, L04, L05 | M |
 
 **Owns:** `src/img/`
 
