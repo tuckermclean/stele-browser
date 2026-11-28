@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: layout, globs: ["src/layout/"]}
     - {name: fetch, globs: ["src/fetch/", "assets/", "tools/gen-attestations.py"]}
     - {name: render, globs: ["src/backend/", "src/surface/"]}
     - {name: shell, globs: ["src/main.rs", "src/lib.rs", "src/browser.rs", "src/form.rs", "src/frames.rs"]}
@@ -165,3 +164,38 @@ nodes:
     status: imported
     owns: ["src/bg_images.rs"]
     summary: "collect_bg_images, the pixel-path pre-pass that loads every distinct CSS background_image of the cascaded styles to its first frame, keyed by the raw string and deduped by resolved URL, bounded by MAX_BG_IMAGES (32) and I02's byte budget; a failed load is left out."
+  - id: L01
+    name: layout-model
+    deps: [S02, I01, T03]
+    track: done
+    status: imported
+    owns: ["src/layout/mod.rs", "src/layout/image_map.rs"]
+    summary: "The layout seam's model (Size, Point, Rect, LayoutNode, BoxContent, Interactive, Fragment), the layout and layout_viewport entry points with TerminusFont metrics, find_fragment_top for --scroll-to, and the client-side image maps: parse_area per HTML 4.01 and hit_test / hit_test_scaled."
+  - id: L02
+    name: inline-layout
+    deps: [L01, S02, I01, T03]
+    track: done
+    status: imported
+    owns: ["src/layout/inline.rs"]
+    summary: "layout_runs, the bespoke inline engine: whitespace collapsing and white-space: pre, <br> forced breaks, unsplittable glued clusters, line height and baseline, inline images on the baseline, left and right floats with line exclusions and the 256-float cap, text-align, and clamp_dim totality."
+  - id: L03
+    name: table-solver
+    deps: [L01, S02]
+    track: done
+    status: imported
+    owns: ["src/layout/table.rs", "src/layout/table_layout.rs"]
+    summary: "The pure table halves: place_grid's HTML auto-placement of rows, row groups, colspan and rowspan, and solve_table's two-pass min/max-content column solver with spanning distribution, row heights, border spacing between cells and clamp-or-skip totality."
+  - id: L04
+    name: block-layout
+    deps: [S02, I01, T03, L01, L02, L03]
+    track: done
+    status: imported
+    owns: ["src/layout/block.rs"]
+    summary: "The layout engine over taffy: LayoutNode translation with inline-run folding, the style mapping (box model, box-sizing, position, flex, grid, floats), the sibling margin-collapse pre-pass, table leaves with separated and collapsed borders, and paint-ordered fragment emission with z-index, overflow clips, ids and position: fixed."
+  - id: L05
+    name: box-tree
+    deps: [D01, D03, S02, S06, I01, L01, L02]
+    track: done
+    status: imported
+    owns: ["src/layout/box_tree.rs"]
+    summary: "build_box_tree: the styled DOM to LayoutNode tree, with display: none dropped, ids, ::before/::after, img and object replaced boxes with align floats and image maps, form-control labels and their Interactive carriers, links, br, details, list markers, table cell spans and the border/cellpadding table attributes."
