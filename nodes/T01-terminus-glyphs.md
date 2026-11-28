@@ -2,7 +2,7 @@
 
 | Track | Deps | Unlocks | Size |
 |---|---|---|---|
-| done | S02 | T03 | M |
+| done | S02 | F05, T03 | M |
 
 **Owns:** `src/text/terminus_glyphs.rs`, `src/text/terminus_glyphs_tests.rs`, `tools/gen-terminus-glyphs.py`, `third_party/`
 
