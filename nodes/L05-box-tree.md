@@ -20,11 +20,13 @@ element's `id` attribute, trimmed, goes onto its node. The elements are handled 
 - **`img`** becomes `Replaced`, with the decoded image's `Rc` from `images` when there is one. Its intrinsic
   size is the `width`/`height` attributes (non-negative finite numbers). When neither parses, it is the decoded
   image's pixel size, else 0×0. `align=left|right` (any case) becomes `float` when the author's CSS left it at
-  `none`. Other `align` values are ignored. `usemap` (with or without `#`, trimmed) is matched exactly,
-  case-sensitively, against the `name` of any `<map>` in the document. The map's `<area>` children go through
+  `none`. Other `align` values are ignored. `usemap`, trimmed and with every leading `#` stripped, is compared
+  case-sensitively with the trimmed `name` of each `<map>` in the document, and the first match in the DOM
+  arena's order wins. An empty name matches nothing. The map's `<area>` children go through
   L01's `parse_area`, and the image gets `Interactive::ImageMap { areas, natural }`, where `natural` is the
   decoded size, else the intrinsic size. A `usemap` with no matching map leaves a plain image.
-- **`object`** with a decoded image becomes `Replaced`, like `img`, and its children (the fallback) are
+- **`object`** with a decoded image becomes `Replaced`, like `img` (the same size rules and `align` float)
+  but without an image map, and its children (the fallback) are
   dropped. Without one, it is an ordinary container whose children render.
 - **Form controls** (`input`, `button`, `textarea`, `select`) become a `Container` holding one synthesized
   `Text` label. Their own DOM children are not walked. Both carry `Interactive::FormControl { kind, name,
@@ -45,8 +47,9 @@ element's `id` attribute, trimmed, goes onto its node. The elements are handled 
   and `> ` otherwise. Without one, it shows a synthesized `Details` label. Only when open do its other children
   follow.
 - **`ul` and `ol`** number their `li` children whose computed `display` is `list-item`, from `start` (default
-  1). Each gets a marker text: `* ` for disc, `o ` for circle, `# ` for square, `N. ` for decimal and lower or
-  upper alpha, and none for `list-style-type: none`. A `display: none` child takes no number. A nested list
+  1). Each gets a marker text: `* ` for disc, `o ` for circle, `# ` for square, `N. ` for decimal, and `a. `,
+  `b. ` … `z. `, `aa. ` … (or the same in capitals) for lower-alpha and upper-alpha, and none for
+  `list-style-type: none`. A `display: none` child takes no number. A nested list
   restarts at its own start.
 - **Every other element** is a `Container` of its children, with the `::before` and `::after` boxes put first
   and last when their `content` is a string. A `display: table-cell` element becomes `TableCell` with `colspan`
@@ -127,3 +130,5 @@ none: imported
 - `DEPTH_CAP` repeats L04's and I02's caps by hand, and the walk is recursive.
 - `usemap` scans the whole DOM once per image, which is quadratic on a page with many mapped images.
 - Form-control labels are ASCII art in the dialect's text. Changing one changes the tty and PNG goldens.
+- `box_tree.rs` imports `crate::surface::Color` for the table frame gray (`TABLE_BORDER_GRAY`). `src/surface/`
+  is in the `render` area, not yet mapped, so the graph cannot show this edge yet; S02 has the same one.

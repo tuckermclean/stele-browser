@@ -56,7 +56,8 @@ The image maps, in `src/layout/image_map.rs`:
   edges are inside, the right and bottom edges outside). Otherwise it takes the point relative to the rect's
   origin, scales each axis by natural over rendered, and calls `hit_test`.
 
-L05 builds the `ImageMap` carrier. `backend::x11` and the tty shell `browser` hit-test it.
+L05 builds the `ImageMap` carrier. `backend::x11::hit_test_pixel` hit-tests it on a click. The tty shell
+(`browser`) has no pixel, so on activation it follows the first area with an `href`.
 
 ## Tests
 
