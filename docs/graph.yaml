@@ -19,7 +19,6 @@ out_of_scope:
   - {glob: "LICENSE", reason: "the project's license text, not code"}
 adoption:
   areas:
-    - {name: fetch, globs: ["src/fetch/", "assets/", "tools/gen-attestations.py"]}
     - {name: render, globs: ["src/backend/", "src/surface/"]}
     - {name: shell, globs: ["src/main.rs", "src/lib.rs", "src/browser.rs", "src/form.rs", "src/frames.rs"]}
     - {name: goldens, globs: ["tests/", "fixtures/", "goldens/"]}
@@ -199,3 +198,38 @@ nodes:
     status: imported
     owns: ["src/layout/box_tree.rs"]
     summary: "build_box_tree: the styled DOM to LayoutNode tree, with display: none dropped, ids, ::before/::after, img and object replaced boxes with align floats and image maps, form-control labels and their Interactive carriers, links, br, details, list markers, table cell spans and the border/cellpadding table attributes."
+  - id: F01
+    name: fetch-interface
+    deps: []
+    track: done
+    status: imported
+    owns: ["src/fetch/mod.rs", "src/fetch/url.rs", "src/fetch/transport.rs"]
+    summary: "The fetch module root (Url, Method, Request, Response, FetchError, the Fetch trait, the one scheme table fetch::fetch and err_to_string), the total URL parser and RFC 3986-style resolver, and the ByteStream transport seam."
+  - id: F02
+    name: local-schemes
+    deps: [F01]
+    track: done
+    status: imported
+    owns: ["src/fetch/file.rs", "src/fetch/data.rs"]
+    summary: "file: (FileFetcher, file_path, the content type by extension) and data: (RFC 2397: the media type and payload percent-decoded first, then a tolerant base64), both total."
+  - id: F03
+    name: cookie-jar
+    deps: [F01]
+    track: done
+    status: imported
+    owns: ["src/fetch/cookies.rs"]
+    summary: "The session-only cookie jar of charter C6: Set-Cookie parsing with the Domain= cross-origin and single-label guards, domain, path, Secure and IP-literal matching, and the Netscape text format both ways."
+  - id: F04
+    name: http-client
+    deps: [F01, F03]
+    track: done
+    status: imported
+    owns: ["src/fetch/http1.rs", "src/fetch/https.rs"]
+    summary: "The bespoke blocking HTTP/1.1 client (redirects to 5 with the method rules, cookies per hop, CR/LF-safe headers, a total response parse with chunking and 64 MiB bounds) and https by a fail-closed, verified openssl s_client child."
+  - id: F05
+    name: attestations-page
+    deps: [F01, B01, D01, D02, T01]
+    track: done
+    status: imported
+    owns: ["src/fetch/about.rs", "src/fetch/attestations_data.rs", "src/fetch/attestations_tests.rs", "assets/", "tools/gen-attestations.py"]
+    summary: "The total about: scheme and the about:attestations page (Stele's notice, the generated i486 crate roster and deduped license texts, Terminus's OFL), its generator tools/gen-attestations.py and the hand-checked tests of the generated data."

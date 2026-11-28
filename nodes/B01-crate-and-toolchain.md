@@ -2,7 +2,7 @@
 
 | Track | Deps | Unlocks | Size |
 |---|---|---|---|
-| done | none | B02, B03 | S |
+| done | none | B02, B03, F05 | S |
 
 **Owns:** `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, `targets/`, `.gitignore`
 
